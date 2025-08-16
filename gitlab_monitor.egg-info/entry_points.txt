@@ -1,0 +1,3 @@
+[console_scripts]
+gitlab-monitor = gitlab_monitor.tui:main
+glmon = gitlab_monitor.tui:main
