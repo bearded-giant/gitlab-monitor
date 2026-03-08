@@ -4,40 +4,163 @@
 # Licensed under Apache License 2.0
 
 import sys
+import subprocess
 import gitlab
 import webbrowser
 from datetime import datetime
-from typing import Optional, List, Dict, Any
 import re
 import asyncio
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, DataTable, Static, Input, TextLog, Label, Button
-from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
+from textual.widgets import DataTable, Static, Input, RichLog
+from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import Screen
-from textual.reactive import reactive
 from textual.binding import Binding
 from rich.text import Text
-from rich.table import Table
 
 from .config import Config
 
 
+def copy_to_clipboard(text):
+    try:
+        subprocess.run(['pbcopy'], input=text.encode(), check=True)
+        return True
+    except Exception:
+        try:
+            subprocess.run(['xclip', '-selection', 'clipboard'], input=text.encode(), check=True)
+            return True
+        except Exception:
+            return False
+
+
+# -- status styling ----------------------------------------------------------
+
+STATUS_STYLES = {
+    'success':  ('bold white on #a6e3a1', ' success '),
+    'failed':   ('bold white on #f38ba8', ' failed '),
+    'running':  ('bold white on #f9e2af', ' running '),
+    'pending':  ('bold white on #585b70', ' pending '),
+    'skipped':  ('bold white on #45475a', ' skipped '),
+    'canceled':  ('bold white on #585b70', ' canceled '),
+    'created':  ('bold white on #45475a', ' created '),
+    'manual':   ('bold white on #89b4fa', ' manual '),
+}
+
+
+def status_badge(status):
+    style, label = STATUS_STYLES.get(status, ('', f' {status} '))
+    return Text(label, style=style)
+
+
+def format_duration(seconds):
+    if seconds is None:
+        return "-"
+    m, s = divmod(int(seconds), 60)
+    if m >= 60:
+        h, m = divmod(m, 60)
+        return f"{h}h{m}m"
+    return f"{m}m{s}s"
+
+
+def format_age(iso_str):
+    if not iso_str:
+        return ""
+    dt = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
+    now = datetime.now(dt.tzinfo)
+    diff = (now - dt).total_seconds()
+    if diff < 60:
+        return "just now"
+    elif diff < 3600:
+        return f"{int(diff / 60)}m ago"
+    elif diff < 86400:
+        return f"{int(diff / 3600)}h ago"
+    elif diff < 604800:
+        return f"{int(diff / 86400)}d ago"
+    else:
+        return dt.strftime('%m-%d')
+
+
+# -- breadcrumb bar ----------------------------------------------------------
+
+class Breadcrumb(Static):
+    pass
+
+
+class KeyBar(Static):
+    pass
+
+
+class ScreenBase(Screen):
+    """base screen that routes single-char keys only when input is not focused"""
+
+    # subclasses define: KEY_MAP = {"q": "back", "r": "refresh", ...}
+    KEY_MAP: dict[str, str] = {}
+
+    def _input_focused(self) -> bool:
+        try:
+            for inp in self.query(Input):
+                if inp.has_focus:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def on_key(self, event) -> None:
+        if self._input_focused():
+            if event.key in ("down", "escape"):
+                event.prevent_default()
+                event.stop()
+                for dt in self.query(DataTable):
+                    dt.focus()
+                    break
+            return
+
+        action_name = self.KEY_MAP.get(event.key)
+        if action_name:
+            event.prevent_default()
+            event.stop()
+            method = getattr(self, f"action_{action_name}", None)
+            if method:
+                result = method()
+                if asyncio.iscoroutine(result):
+                    asyncio.ensure_future(result)
+
+
+# -- api layer ---------------------------------------------------------------
+
 class GitLabAPI:
-    """GitLab API wrapper for pipeline operations"""
-    
+
     def __init__(self, config: Config):
         self.config = config
         self.gl = gitlab.Gitlab(config.gitlab_url, private_token=config.gitlab_token)
-        self.project = self.gl.projects.get(config.project_path)
-    
+        self.project = None
+        self.project_name = None
+        if config.project_path:
+            self.project = self.gl.projects.get(config.project_path)
+            self.project_name = config.project_path
+
+    def set_project(self, project_path: str):
+        self.project = self.gl.projects.get(project_path)
+        self.project_name = project_path
+
+    def get_projects(self, search=None, per_page=50):
+        params = {'per_page': per_page, 'order_by': 'last_activity_at', 'sort': 'desc', 'membership': True}
+        if search:
+            params['search'] = search
+        projects = self.gl.projects.list(**params)
+        return [{
+            'id': p.id,
+            'path': p.path_with_namespace,
+            'name': p.name,
+            'description': p.description or '',
+            'last_activity': p.last_activity_at,
+        } for p in projects]
+
     def get_recent_pipelines(self, limit=50, ref=None, username=None):
-        """Get recent pipelines with optional filters"""
         params = {'per_page': limit, 'order_by': 'id', 'sort': 'desc'}
         if ref:
             params['ref'] = ref
         if username:
             params['username'] = username
-        
         pipelines = self.project.pipelines.list(**params)
         results = []
         for p in pipelines:
@@ -48,34 +171,29 @@ class GitLabAPI:
                 'sha': p.sha[:8],
                 'created_at': p.created_at,
                 'updated_at': p.updated_at,
-                'user': p.user.get('username') if p.user else 'unknown',
-                'web_url': p.web_url
+                'user': getattr(p, 'user', {}).get('username', 'unknown') if hasattr(p, 'user') and p.user else 'unknown',
+                'web_url': p.web_url,
             })
         return results
-    
+
     def get_pipeline_jobs(self, pipeline_id):
-        """Get all jobs for a pipeline"""
         try:
             pipeline = self.project.pipelines.get(pipeline_id)
             jobs = pipeline.jobs.list(all=True)
-            results = []
-            for job in jobs:
-                results.append({
-                    'id': job.id,
-                    'name': job.name,
-                    'status': job.status,
-                    'stage': job.stage,
-                    'duration': job.duration,
-                    'started_at': job.started_at,
-                    'finished_at': job.finished_at,
-                    'web_url': job.web_url
-                })
-            return results
-        except Exception as e:
+            return [{
+                'id': job.id,
+                'name': job.name,
+                'status': job.status,
+                'stage': job.stage,
+                'duration': job.duration,
+                'started_at': job.started_at,
+                'finished_at': job.finished_at,
+                'web_url': job.web_url,
+            } for job in jobs]
+        except Exception:
             return []
-    
+
     def get_job_trace(self, job_id):
-        """Get job trace/logs"""
         try:
             job = self.project.jobs.get(job_id)
             trace = job.trace()
@@ -84,493 +202,574 @@ class GitLabAPI:
             return trace
         except Exception as e:
             return f"Error fetching trace: {e}"
-    
+
     def get_job_failures(self, job_id):
-        """Extract failure information from job trace"""
         trace = self.get_job_trace(job_id)
-        
         failures = []
-        
-        # Extract short summary
         summary_pattern = re.compile(
             r"=+\s*short test summary info\s*=+\n(.*?)(?=^=+|\Z)",
             re.MULTILINE | re.DOTALL | re.IGNORECASE,
         )
         summary_match = summary_pattern.search(trace)
         if summary_match:
-            summary = summary_match.group(1).strip()
-            for line in summary.split('\n'):
+            for line in summary_match.group(1).strip().split('\n'):
                 if 'FAILED' in line:
                     failures.append(line.strip())
-        
-        # Look for generic errors if no test summary
         if not failures:
             for line in trace.split('\n'):
-                if any(keyword in line.lower() for keyword in ['error:', 'failed:', 'exception:']):
+                if any(kw in line.lower() for kw in ['error:', 'failed:', 'exception:']):
                     failures.append(line.strip())
                     if len(failures) > 20:
                         break
-        
         return failures
 
 
-class PipelineListScreen(Screen):
-    """Main screen showing list of pipelines"""
-    
-    BINDINGS = [
-        Binding("q", "quit", "Quit"),
-        Binding("r", "refresh", "Refresh"),
-        Binding("f", "filter", "Filter"),
-        Binding("enter", "select", "View Jobs"),
-        Binding("b", "browser", "Open in Browser"),
-        Binding("/", "search", "Search"),
-        Binding("?", "help", "Help"),
-    ]
-    
+# -- screens -----------------------------------------------------------------
+
+class ProjectSelectScreen(ScreenBase):
+
+    KEY_MAP = {"q": "quit", "r": "refresh", "slash": "search"}
+
+    DEBOUNCE_SECONDS = 0.4
+
+    def __init__(self, api: GitLabAPI):
+        super().__init__()
+        self.api = api
+        self.projects = []
+        self._search_timer = None
+
+    def compose(self) -> ComposeResult:
+        yield Breadcrumb("  Projects", id="breadcrumb")
+        yield Container(
+            Input(placeholder="/  filter projects...", id="project-search"),
+            id="filter-bar",
+        )
+        yield DataTable(id="project-table")
+        yield KeyBar(
+            "  q quit  /  filter  r refresh  enter select",
+            id="keybar",
+        )
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#project-table", DataTable)
+        table.add_columns("Project", "Description", "Last Activity")
+        table.cursor_type = "row"
+        await self.load_projects()
+        table.focus()
+
+    async def load_projects(self, search=None) -> None:
+        self.projects = self.api.get_projects(search=search)
+        table = self.query_one("#project-table", DataTable)
+        table.clear()
+        for p in self.projects:
+            age = format_age(p['last_activity'])
+            desc = (p['description'] or '')[:40]
+            table.add_row(
+                Text(p['path'], style="bold"),
+                Text(desc, style="dim"),
+                Text(age, style="dim italic"),
+            )
+
+    def _schedule_search(self) -> None:
+        if self._search_timer is not None:
+            self._search_timer.stop()
+        self._search_timer = self.set_timer(self.DEBOUNCE_SECONDS, self._do_search)
+
+    async def _do_search(self) -> None:
+        query = self.query_one("#project-search", Input).value.strip() or None
+        await self.load_projects(search=query)
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "project-search":
+            self._schedule_search()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "project-search":
+            if self._search_timer is not None:
+                self._search_timer.stop()
+            await self._do_search()
+            self.query_one("#project-table", DataTable).focus()
+
+    async def action_search(self) -> None:
+        self.query_one("#project-search", Input).focus()
+
+    async def action_refresh(self) -> None:
+        query = self.query_one("#project-search", Input).value.strip() or None
+        await self.load_projects(search=query)
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        idx = event.cursor_row
+        if idx is not None and idx < len(self.projects):
+            project = self.projects[idx]
+            self.api.set_project(project['path'])
+            self.app.push_screen(PipelineListScreen(self.api))
+
+
+class PipelineListScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank"}
+
     def __init__(self, api: GitLabAPI):
         super().__init__()
         self.api = api
         self.pipelines = []
         self.filtered_pipelines = []
-        self.filter_ref = None
-        self.filter_user = None
-    
+
     def compose(self) -> ComposeResult:
-        yield Header()
+        name = self.api.project_name or "project"
+        yield Breadcrumb(f"  Projects > [bold]{name}[/bold] > Pipelines", id="breadcrumb")
         yield Container(
-            Label("Filters: ", id="filter-label"),
-            Input(placeholder="Branch filter (press 'f' to edit)", id="branch-filter"),
-            Input(placeholder="User filter", id="user-filter"),
-            Button("Apply", id="apply-filter"),
-            id="filter-container"
+            Input(placeholder="/  filter pipelines...", id="pipeline-filter"),
+            id="filter-bar",
         )
         yield DataTable(id="pipeline-table")
-        yield Footer()
-    
+        yield KeyBar(
+            "  q back  /  filter  r refresh  b browser  y copy url  enter jobs",
+            id="keybar",
+        )
+
     async def on_mount(self) -> None:
         table = self.query_one("#pipeline-table", DataTable)
-        table.add_columns("ID", "Status", "Branch", "User", "Created", "SHA")
+        table.add_columns("ID", "Status", "Branch", "SHA", "Age", "User")
         table.cursor_type = "row"
         await self.load_pipelines()
-    
+        table.focus()
+
     async def load_pipelines(self) -> None:
-        """Load pipelines from GitLab"""
-        self.pipelines = self.api.get_recent_pipelines(
-            ref=self.filter_ref,
-            username=self.filter_user
-        )
-        self.filtered_pipelines = self.pipelines
-        await self.update_table()
-    
-    async def update_table(self) -> None:
-        """Update the pipeline table display"""
+        self.pipelines = self.api.get_recent_pipelines()
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        query = self.query_one("#pipeline-filter", Input).value.strip().lower()
+        if query:
+            self.filtered_pipelines = [
+                p for p in self.pipelines
+                if query in p['ref'].lower()
+                or query in p['status'].lower()
+                or query in p['user'].lower()
+                or query in str(p['id'])
+                or query in p['sha'].lower()
+            ]
+        else:
+            self.filtered_pipelines = self.pipelines
+        self._update_table()
+
+    def _update_table(self) -> None:
         table = self.query_one("#pipeline-table", DataTable)
         table.clear()
-        
-        for pipeline in self.filtered_pipelines:
-            # Color-code status
-            status = pipeline['status']
-            if status == 'success':
-                status_text = Text(f"✅ {status}", style="green")
-            elif status == 'failed':
-                status_text = Text(f"❌ {status}", style="red")
-            elif status == 'running':
-                status_text = Text(f"🔄 {status}", style="yellow")
-            elif status == 'pending':
-                status_text = Text(f"⏸ {status}", style="dim")
-            else:
-                status_text = Text(f"  {status}")
-            
-            created = datetime.fromisoformat(pipeline['created_at'].replace('Z', '+00:00'))
-            created_str = created.strftime('%m-%d %H:%M')
-            
+        for p in self.filtered_pipelines:
+            age = format_age(p['created_at'])
+            ref = p['ref'][:30]
             table.add_row(
-                str(pipeline['id']),
-                status_text,
-                pipeline['ref'][:30],
-                pipeline['user'],
-                created_str,
-                pipeline['sha']
+                Text(str(p['id']), style="bold"),
+                status_badge(p['status']),
+                Text(ref, style="cyan"),
+                Text(p['sha'], style="dim"),
+                Text(age, style="dim italic"),
+                Text(p['user'], style="dim"),
             )
-    
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "pipeline-filter":
+            self._apply_filter()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "pipeline-filter":
+            self._apply_filter()
+            self.query_one("#pipeline-table", DataTable).focus()
+
+    async def action_back(self) -> None:
+        self.app.pop_screen()
+
     async def action_refresh(self) -> None:
-        """Refresh pipeline list"""
         await self.load_pipelines()
-    
-    async def action_filter(self) -> None:
-        """Focus on filter input"""
-        self.query_one("#branch-filter", Input).focus()
-    
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle filter apply button"""
-        if event.button.id == "apply-filter":
-            branch_filter = self.query_one("#branch-filter", Input)
-            user_filter = self.query_one("#user-filter", Input)
-            self.filter_ref = branch_filter.value if branch_filter.value else None
-            self.filter_user = user_filter.value if user_filter.value else None
-            await self.load_pipelines()
-    
-    async def action_select(self) -> None:
-        """View jobs for selected pipeline"""
-        table = self.query_one("#pipeline-table", DataTable)
-        if table.cursor_row is not None and table.cursor_row < len(self.filtered_pipelines):
-            pipeline = self.filtered_pipelines[table.cursor_row]
+
+    async def action_search(self) -> None:
+        self.query_one("#pipeline-filter", Input).focus()
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        idx = event.cursor_row
+        if idx is not None and idx < len(self.filtered_pipelines):
+            pipeline = self.filtered_pipelines[idx]
             self.app.push_screen(JobListScreen(self.api, pipeline))
-    
+
     async def action_browser(self) -> None:
-        """Open selected pipeline in browser"""
         table = self.query_one("#pipeline-table", DataTable)
         if table.cursor_row is not None and table.cursor_row < len(self.filtered_pipelines):
-            pipeline = self.filtered_pipelines[table.cursor_row]
-            webbrowser.open(pipeline['web_url'])
+            webbrowser.open(self.filtered_pipelines[table.cursor_row]['web_url'])
+
+    async def action_yank(self) -> None:
+        table = self.query_one("#pipeline-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.filtered_pipelines):
+            p = self.filtered_pipelines[table.cursor_row]
+            if copy_to_clipboard(p['web_url']):
+                self.notify(f"Copied pipeline #{p['id']} URL", timeout=2)
 
 
-class JobListScreen(Screen):
-    """Screen showing jobs for a specific pipeline"""
-    
-    BINDINGS = [
-        Binding("q", "back", "Back"),
-        Binding("r", "refresh", "Refresh"),
-        Binding("enter", "select", "View Logs"),
-        Binding("b", "browser", "Open in Browser"),
-        Binding("f", "failures", "Show Failures"),
-        Binding("?", "help", "Help"),
-    ]
-    
+class JobListScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "f": "failures", "y": "yank"}
+
+    STAGE_ORDER = ['build', 'test', 'deploy', 'cleanup']
+
     def __init__(self, api: GitLabAPI, pipeline: dict):
         super().__init__()
         self.api = api
         self.pipeline = pipeline
         self.jobs = []
-        self.jobs_by_stage = {}
-    
+        self.filtered_jobs = []
+
     def compose(self) -> ComposeResult:
-        yield Header()
+        name = self.api.project_name or "project"
+        pid = self.pipeline['id']
+        ref = self.pipeline['ref'][:20]
+        yield Breadcrumb(
+            f"  Projects > {name} > [bold]#{pid}[/bold] [dim]{ref}[/dim]",
+            id="breadcrumb",
+        )
         yield Container(
-            Label(f"Pipeline {self.pipeline['id']} - {self.pipeline['ref']} ({self.pipeline['status']})", 
-                  id="pipeline-info"),
-            id="info-container"
+            Input(placeholder="/  filter jobs...", id="job-filter"),
+            id="filter-bar",
         )
         yield DataTable(id="job-table")
-        yield Footer()
-    
+        yield KeyBar(
+            "  q back  /  filter  r refresh  b browser  f failures  y copy url  enter logs",
+            id="keybar",
+        )
+
     async def on_mount(self) -> None:
         table = self.query_one("#job-table", DataTable)
-        table.add_columns("ID", "Stage", "Name", "Status", "Duration")
+        table.add_columns("Stage", "Name", "Status", "Duration", "ID")
         table.cursor_type = "row"
         await self.load_jobs()
-    
+        table.focus()
+
     async def load_jobs(self) -> None:
-        """Load jobs for the pipeline"""
         self.jobs = self.api.get_pipeline_jobs(self.pipeline['id'])
-        
-        # Group by stage
-        self.jobs_by_stage = {}
-        for job in self.jobs:
-            stage = job['stage']
-            if stage not in self.jobs_by_stage:
-                self.jobs_by_stage[stage] = []
-            self.jobs_by_stage[stage].append(job)
-        
-        await self.update_table()
-    
-    async def update_table(self) -> None:
-        """Update the job table display"""
+        order = self.STAGE_ORDER
+        self.jobs.sort(key=lambda j: (
+            order.index(j['stage']) if j['stage'] in order else len(order),
+            j['name'],
+        ))
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        query = self.query_one("#job-filter", Input).value.strip().lower()
+        if query:
+            self.filtered_jobs = [
+                j for j in self.jobs
+                if query in j['name'].lower()
+                or query in j['stage'].lower()
+                or query in j['status'].lower()
+                or query in str(j['id'])
+            ]
+        else:
+            self.filtered_jobs = self.jobs
+        self._update_table()
+
+    def _update_table(self) -> None:
         table = self.query_one("#job-table", DataTable)
         table.clear()
-        
-        # Display jobs grouped by stage
-        stage_order = ['build', 'test', 'deploy', 'cleanup']
-        all_stages = list(self.jobs_by_stage.keys())
-        for stage in all_stages:
-            if stage not in stage_order:
-                stage_order.append(stage)
-        
-        for stage in stage_order:
-            if stage not in self.jobs_by_stage:
-                continue
-            
-            for job in self.jobs_by_stage[stage]:
-                # Color-code status
-                status = job['status']
-                if status == 'success':
-                    status_text = Text(f"✅ {status}", style="green")
-                elif status == 'failed':
-                    status_text = Text(f"❌ {status}", style="red bold")
-                elif status == 'running':
-                    status_text = Text(f"🔄 {status}", style="yellow")
-                elif status == 'pending':
-                    status_text = Text(f"⏸ {status}", style="dim")
-                elif status == 'skipped':
-                    status_text = Text(f"⏭ {status}", style="dim")
-                else:
-                    status_text = Text(f"  {status}")
-                
-                duration = self.format_duration(job['duration']) if job['duration'] else '-'
-                
-                # Make failed jobs stand out
-                if status == 'failed':
-                    table.add_row(
-                        Text(str(job['id']), style="red"),
-                        Text(job['stage'], style="red"),
-                        Text(job['name'][:50], style="red bold"),
-                        status_text,
-                        Text(duration, style="red")
-                    )
-                else:
-                    table.add_row(
-                        str(job['id']),
-                        job['stage'],
-                        job['name'][:50],
-                        status_text,
-                        duration
-                    )
-    
-    def format_duration(self, duration):
-        """Format duration in seconds to human-readable"""
-        if duration is None:
-            return "N/A"
-        minutes, seconds = divmod(duration, 60)
-        return f"{int(minutes)}m{int(seconds)}s"
-    
+        for job in self.filtered_jobs:
+            failed = job['status'] == 'failed'
+            name_style = "bold red" if failed else ""
+            stage_style = "red" if failed else "dim"
+            dur = format_duration(job['duration'])
+            table.add_row(
+                Text(job['stage'], style=stage_style),
+                Text(job['name'][:50], style=name_style),
+                status_badge(job['status']),
+                Text(dur, style="red" if failed else "dim"),
+                Text(str(job['id']), style="dim"),
+            )
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "job-filter":
+            self._apply_filter()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "job-filter":
+            self._apply_filter()
+            self.query_one("#job-table", DataTable).focus()
+
     async def action_back(self) -> None:
-        """Go back to pipeline list"""
         self.app.pop_screen()
-    
+
     async def action_refresh(self) -> None:
-        """Refresh job list"""
         await self.load_jobs()
-    
-    async def action_select(self) -> None:
-        """View logs for selected job"""
-        table = self.query_one("#job-table", DataTable)
-        if table.cursor_row is not None and table.cursor_row < len(self.jobs):
-            job = self.jobs[table.cursor_row]
-            self.app.push_screen(JobDetailScreen(self.api, job))
-    
+
+    async def action_search(self) -> None:
+        self.query_one("#job-filter", Input).focus()
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        idx = event.cursor_row
+        if idx is not None and idx < len(self.filtered_jobs):
+            self.app.push_screen(JobDetailScreen(self.api, self.filtered_jobs[idx]))
+
     async def action_browser(self) -> None:
-        """Open selected job in browser"""
         table = self.query_one("#job-table", DataTable)
-        if table.cursor_row is not None and table.cursor_row < len(self.jobs):
-            job = self.jobs[table.cursor_row]
-            webbrowser.open(job['web_url'])
-    
+        if table.cursor_row is not None and table.cursor_row < len(self.filtered_jobs):
+            webbrowser.open(self.filtered_jobs[table.cursor_row]['web_url'])
+
     async def action_failures(self) -> None:
-        """Show only failed jobs"""
-        # Filter to show only failed jobs
-        failed_jobs = [j for j in self.jobs if j['status'] == 'failed']
-        if failed_jobs:
-            self.app.push_screen(FailedJobsScreen(self.api, self.pipeline, failed_jobs))
+        failed = [j for j in self.jobs if j['status'] == 'failed']
+        if failed:
+            self.app.push_screen(FailedJobsScreen(self.api, self.pipeline, failed))
+
+    async def action_yank(self) -> None:
+        table = self.query_one("#job-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.filtered_jobs):
+            j = self.filtered_jobs[table.cursor_row]
+            if copy_to_clipboard(j['web_url']):
+                self.notify(f"Copied job #{j['id']} URL", timeout=2)
 
 
-class JobDetailScreen(Screen):
-    """Screen showing job logs and details"""
-    
-    BINDINGS = [
-        Binding("q", "back", "Back"),
-        Binding("r", "refresh", "Refresh"),
-        Binding("b", "browser", "Open in Browser"),
-        Binding("f", "failures", "Show Failures Only"),
-        Binding("?", "help", "Help"),
-    ]
-    
+class JobDetailScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "b": "browser", "f": "failures", "y": "yank"}
+
     def __init__(self, api: GitLabAPI, job: dict):
         super().__init__()
         self.api = api
         self.job = job
         self.trace = ""
         self.failures = []
-    
+
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield Container(
-            Label(f"Job {self.job['id']}: {self.job['name']} ({self.job['status']})", 
-                  id="job-info"),
-            id="info-container"
-        )
+        name = self.job['name']
+        jid = self.job['id']
+        yield Breadcrumb(f"  Job [bold]#{jid}[/bold] [dim]{name}[/dim]", id="breadcrumb")
         yield ScrollableContainer(
-            TextLog(id="job-log", wrap=True),
-            id="log-container"
+            RichLog(id="job-log", wrap=True),
+            id="log-container",
         )
-        yield Footer()
-    
+        yield KeyBar(
+            "  q back  r refresh  b browser  f failures only  y copy",
+            id="keybar",
+        )
+
     async def on_mount(self) -> None:
         await self.load_trace()
-    
+
     async def load_trace(self) -> None:
-        """Load job trace/logs"""
-        log = self.query_one("#job-log", TextLog)
+        log = self.query_one("#job-log", RichLog)
         log.clear()
-        
         self.trace = self.api.get_job_trace(self.job['id'])
-        
-        # If job failed, highlight failures
+
         if self.job['status'] == 'failed':
             self.failures = self.api.get_job_failures(self.job['id'])
             if self.failures:
-                log.write("=" * 80)
-                log.write("FAILURE SUMMARY:", style="red bold")
-                log.write("=" * 80)
-                for failure in self.failures:
-                    log.write(failure, style="red")
-                log.write("=" * 80)
+                log.write(Text(" FAILURE SUMMARY ", style="bold white on #f38ba8"))
                 log.write("")
-        
-        # Show full trace
-        log.write("FULL TRACE:")
-        log.write("-" * 80)
+                for f in self.failures:
+                    log.write(Text(f"  {f}", style="#f38ba8"))
+                log.write("")
+                log.write(Text(
+                    " " + "-" * 78 + " ",
+                    style="dim",
+                ))
+                log.write("")
+
         for line in self.trace.split('\n'):
-            # Highlight error lines
-            if any(keyword in line.lower() for keyword in ['error', 'failed', 'exception']):
-                log.write(line, style="red")
+            if any(kw in line.lower() for kw in ['error', 'failed', 'exception']):
+                log.write(Text(line, style="#f38ba8"))
             else:
                 log.write(line)
-    
+
     async def action_back(self) -> None:
-        """Go back to job list"""
         self.app.pop_screen()
-    
+
     async def action_refresh(self) -> None:
-        """Refresh trace"""
         await self.load_trace()
-    
+
     async def action_browser(self) -> None:
-        """Open job in browser"""
         webbrowser.open(self.job['web_url'])
-    
+
     async def action_failures(self) -> None:
-        """Show only failures"""
-        log = self.query_one("#job-log", TextLog)
+        log = self.query_one("#job-log", RichLog)
         log.clear()
-        
         if self.failures:
-            log.write("FAILURES ONLY:", style="red bold")
-            log.write("=" * 80)
-            for failure in self.failures:
-                log.write(failure, style="red")
+            log.write(Text(" FAILURES ONLY ", style="bold white on #f38ba8"))
+            log.write("")
+            for f in self.failures:
+                log.write(Text(f"  {f}", style="#f38ba8"))
         else:
-            log.write("No failures detected in this job")
+            log.write(Text("  No failures detected", style="dim"))
+
+    async def action_yank(self) -> None:
+        text = self.trace if self.trace else "\n".join(self.failures)
+        if copy_to_clipboard(text):
+            self.notify("Copied to clipboard", timeout=2)
+        else:
+            self.notify("Copy failed", severity="error", timeout=2)
 
 
-class FailedJobsScreen(Screen):
-    """Screen showing all failed jobs in a pipeline"""
-    
-    BINDINGS = [
-        Binding("q", "back", "Back"),
-        Binding("enter", "select", "View Job"),
-        Binding("?", "help", "Help"),
-    ]
-    
+class FailedJobsScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "y": "yank"}
+
     def __init__(self, api: GitLabAPI, pipeline: dict, failed_jobs: list):
         super().__init__()
         self.api = api
         self.pipeline = pipeline
         self.failed_jobs = failed_jobs
-    
+
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield Container(
-            Label(f"Failed Jobs in Pipeline {self.pipeline['id']}", id="info"),
-            id="info-container"
-        )
+        pid = self.pipeline['id']
+        yield Breadcrumb(f"  Pipeline [bold]#{pid}[/bold] > Failed Jobs", id="breadcrumb")
         yield ScrollableContainer(
-            TextLog(id="failures-log", wrap=True),
-            id="log-container"
+            RichLog(id="failures-log", wrap=True),
+            id="log-container",
         )
-        yield Footer()
-    
+        yield KeyBar("  q back  y copy", id="keybar")
+
     async def on_mount(self) -> None:
         await self.load_failures()
-    
+
     async def load_failures(self) -> None:
-        """Load all failure summaries"""
-        log = self.query_one("#failures-log", TextLog)
+        log = self.query_one("#failures-log", RichLog)
         log.clear()
-        
         for job in self.failed_jobs:
-            log.write("=" * 80, style="red")
-            log.write(f"Job {job['id']}: {job['name']}", style="red bold")
-            log.write(f"Stage: {job['stage']} | Duration: {self.format_duration(job['duration'])}")
-            log.write("-" * 80)
-            
+            dur = format_duration(job['duration'])
+            log.write(Text(
+                f" {job['name']} ",
+                style="bold white on #f38ba8",
+            ))
+            log.write(Text(
+                f"  stage: {job['stage']}  duration: {dur}  id: {job['id']}",
+                style="dim",
+            ))
+            log.write("")
             failures = self.api.get_job_failures(job['id'])
             if failures:
-                for failure in failures[:10]:  # Show first 10 failures
-                    log.write(failure, style="red")
+                for f in failures[:10]:
+                    log.write(Text(f"  {f}", style="#f38ba8"))
             else:
-                log.write("No specific failures extracted")
-            
+                log.write(Text("  no specific failures extracted", style="dim"))
             log.write("")
-    
-    def format_duration(self, duration):
-        if duration is None:
-            return "N/A"
-        minutes, seconds = divmod(duration, 60)
-        return f"{int(minutes)}m{int(seconds)}s"
-    
+            log.write("")
+
     async def action_back(self) -> None:
         self.app.pop_screen()
 
+    async def action_yank(self) -> None:
+        lines = []
+        for job in self.failed_jobs:
+            lines.append(f"{job['name']} (stage: {job['stage']}, id: {job['id']})")
+            failures = self.api.get_job_failures(job['id'])
+            for f in failures[:10]:
+                lines.append(f"  {f}")
+            lines.append("")
+        if copy_to_clipboard("\n".join(lines)):
+            self.notify("Copied to clipboard", timeout=2)
+        else:
+            self.notify("Copy failed", severity="error", timeout=2)
+
+
+# -- app ---------------------------------------------------------------------
 
 class PipelineMonitor(App):
-    """Main TUI application"""
-    
+
+    TITLE = "glmon"
+
+    BINDINGS = [
+        Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
+        Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
+    ]
+
     CSS = """
-    #filter-container {
-        height: 3;
+    Screen {
+        background: #1e1e2e;
+    }
+
+    #breadcrumb {
         dock: top;
-        background: $surface;
+        height: 1;
+        background: #313244;
+        color: #cdd6f4;
+        padding: 0 0;
+    }
+
+    #filter-bar {
+        dock: top;
+        height: 3;
+        background: #1e1e2e;
         padding: 0 1;
     }
-    
-    #filter-container Input {
-        width: 30;
-        margin: 0 1;
+
+    #filter-bar Input {
+        width: 100%;
+        background: #313244;
+        border: none;
+        color: #cdd6f4;
     }
-    
-    #filter-container Button {
-        width: 10;
-        margin: 0 1;
+
+    #filter-bar Input:focus {
+        border: tall #89b4fa;
     }
-    
-    #info-container {
-        height: 3;
-        dock: top;
-        background: $primary;
-        padding: 1;
+
+    #keybar {
+        dock: bottom;
+        height: 1;
+        background: #313244;
+        color: #a6adc8;
+        padding: 0 0;
     }
-    
-    #pipeline-table, #job-table {
-        background: $surface;
+
+    DataTable {
+        background: #1e1e2e;
+        height: 1fr;
     }
-    
+
+    DataTable > .datatable--header {
+        background: #181825;
+        color: #a6adc8;
+        text-style: bold;
+    }
+
+    DataTable > .datatable--cursor {
+        background: #45475a;
+        color: #cdd6f4;
+    }
+
     #log-container {
-        background: black;
-        padding: 1;
+        background: #11111b;
+        padding: 1 2;
+        height: 1fr;
     }
-    
-    #job-log, #failures-log {
-        background: black;
-        color: white;
+
+    RichLog {
+        background: #11111b;
+        color: #cdd6f4;
+    }
+
+    #info-container {
+        dock: top;
+        height: 2;
+        background: #313244;
+        padding: 0 2;
+        color: #cdd6f4;
     }
     """
-    
+
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
         self.api = GitLabAPI(config)
         self.refresh_task = None
         self.refresh_interval = config.refresh_interval
-    
+
+    def action_quit(self) -> None:
+        self.exit()
+
     async def on_mount(self) -> None:
-        """Initialize the app with pipeline list"""
-        self.push_screen(PipelineListScreen(self.api))
-        
-        # Start auto-refresh
+        if self.api.project:
+            self.push_screen(PipelineListScreen(self.api))
+        else:
+            self.push_screen(ProjectSelectScreen(self.api))
         self.refresh_task = asyncio.create_task(self.auto_refresh())
-    
+
     async def auto_refresh(self) -> None:
-        """Auto-refresh current screen at configured interval"""
         while True:
             await asyncio.sleep(self.refresh_interval)
             screen = self.screen
@@ -583,19 +782,16 @@ class PipelineMonitor(App):
 
 
 def main():
-    """Main entry point for the TUI"""
     config = Config()
-    
-    # Validate configuration
     valid, message = config.validate()
     if not valid:
         print(f"Error: {message}", file=sys.stderr)
-        print("\nConfiguration can be set via environment variables:")
+        print("\nRequired environment variables:")
         print("  export GITLAB_URL=https://gitlab.example.com")
         print("  export GITLAB_TOKEN=your_personal_access_token")
+        print("\nOptional (skips project picker):")
         print("  export GITLAB_PROJECT=group/project")
         sys.exit(1)
-    
     app = PipelineMonitor(config)
     app.run()
 

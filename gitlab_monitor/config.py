@@ -85,11 +85,9 @@ class Config:
         return self._config.get('max_pipelines', 50)
     
     def validate(self) -> tuple[bool, str]:
-        """Validate required configuration"""
+        """Validate required configuration (project_path is optional now)"""
         if not self.gitlab_url:
             return False, "GITLAB_URL not set. Set via environment variable or config file"
         if not self.gitlab_token:
             return False, "GITLAB_TOKEN not set. Set via environment variable"
-        if not self.project_path:
-            return False, "GITLAB_PROJECT not set. Set via environment variable or config file"
         return True, "Configuration valid"

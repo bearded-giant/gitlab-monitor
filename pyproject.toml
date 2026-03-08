@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gitlab-monitor"
+version = "0.1.0"
+description = "K9s-style TUI for monitoring GitLab pipelines"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.8"
+authors = [
+    { name = "BeardedGiant" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = [
+    "python-gitlab>=3.0.0",
+    "textual>=0.41.0",
+    "rich>=13.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/bearded-giant/gitlab-tools"
+
+[project.scripts]
+gitlab-monitor = "gitlab_monitor.tui:main"
+glmon = "gitlab_monitor.tui:main"
+
+[tool.setuptools.packages.find]
+include = ["gitlab_monitor*"]
