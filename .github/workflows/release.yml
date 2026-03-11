@@ -16,7 +16,7 @@ jobs:
           - os: macos-14
             arch: aarch64
             platform: apple-darwin
-          - os: macos-13
+          - os: macos-15
             arch: x86_64
             platform: apple-darwin
           - os: ubuntu-latest
