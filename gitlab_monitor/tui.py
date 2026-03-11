@@ -134,9 +134,11 @@ class GitLabAPI:
         self.gl = gitlab.Gitlab(config.gitlab_url, private_token=config.gitlab_token)
         self.project = None
         self.project_name = None
-        if config.project_path:
-            self.project = self.gl.projects.get(config.project_path)
-            self.project_name = config.project_path
+
+    def connect_project(self):
+        if self.config.project_path:
+            self.project = self.gl.projects.get(self.config.project_path)
+            self.project_name = self.config.project_path
 
     def set_project(self, project_path: str):
         self.project = self.gl.projects.get(project_path)
@@ -252,6 +254,9 @@ LOGO = r"""
 """
 
 
+REPO_URL = "https://github.com/bearded-giant/gitlab-monitor"
+
+
 class LoadingScreen(Screen):
 
     def compose(self) -> ComposeResult:
@@ -260,10 +265,11 @@ class LoadingScreen(Screen):
 
     def on_mount(self) -> None:
         splash = self.query_one("#splash", Static)
-        lines = LOGO.strip('\n')
+        logo = LOGO.rstrip('\n')
         splash.update(
-            f"\n\n\n[bold #89b4fa]{lines}[/]\n\n"
-            "  [dim #a6adc8]loading projects...[/]"
+            f"[bold #89b4fa]{logo}[/]\n"
+            f"\n[dim #a6adc8]built by Bearded Giant[/]  [dim #585b70]{REPO_URL}[/]"
+            "\n\n\n[#a6adc8]loading projects...[/]"
         )
 
 
@@ -854,8 +860,6 @@ class PipelineMonitor(App):
     #splash {
         width: 100%;
         height: 1fr;
-        content-align: center middle;
-        text-align: center;
         background: #1e1e2e;
         color: #89b4fa;
     }
@@ -871,8 +875,11 @@ class PipelineMonitor(App):
 
     async def on_mount(self) -> None:
         self.push_screen(LoadingScreen())
-        # yield a frame so the splash renders before blocking API calls
-        await asyncio.sleep(0.05)
+        # yield a frame so the splash paints before blocking API calls
+        self.set_timer(0.1, self._finish_loading)
+
+    async def _finish_loading(self) -> None:
+        self.api.connect_project()
         if self.api.project:
             self.switch_screen(PipelineListScreen(self.api))
         else:

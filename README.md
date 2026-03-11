@@ -61,14 +61,17 @@ Without `GITLAB_PROJECT` set, you'll get an interactive project picker with type
 
 ## Features
 
-1. **Project picker** -- browse and search all your GitLab projects with typeahead filtering
-2. **Real-time pipeline monitoring** -- auto-refreshes every 30 seconds
-3. **Interactive navigation** -- arrow keys to navigate, Enter to drill down
-4. **Multi-level drill-down** -- Projects -> Pipelines -> Jobs -> Logs
-5. **Filtering** -- filter pipelines by branch name or user
-6. **Failed job highlighting** -- failed jobs shown in red for quick identification
-7. **Browser integration** -- open pipelines/jobs in browser with 'b' key
-8. **Failure extraction** -- automatically extracts and highlights test failures
+1. **Loading splash** -- ASCII art splash screen while connecting to GitLab
+2. **Project picker** -- browse and search all your GitLab projects with typeahead filtering
+3. **Real-time auto-refresh** -- pipeline and job lists refresh every 10 seconds, job detail every 5 seconds
+4. **Interactive navigation** -- arrow keys to navigate, Enter to drill down
+5. **Multi-level drill-down** -- Projects -> Pipelines -> Jobs -> Logs
+6. **Filtering** -- filter pipelines by branch name or user
+7. **Failed job highlighting** -- failed jobs shown in red for quick identification
+8. **Browser integration** -- open pipelines/jobs in browser with 'b' key
+9. **Clipboard support** -- copy URLs or log output with 'y' key
+10. **Failure extraction** -- automatically extracts and highlights test failures
+11. **Job detail info bar** -- live status and duration display while viewing job logs
 
 ## Views
 
@@ -82,7 +85,7 @@ Shows recent pipelines with ID, status (color-coded), branch, creation time, and
 Shows all jobs in a pipeline grouped by stage (build, test, deploy, cleanup) with color-coded status and duration.
 
 ### 4. Job Detail View
-Shows job logs with failure summary at top (for failed jobs), full trace, and error line highlighting.
+Shows job logs with a live status/duration info bar, failure summary at top (for failed jobs), full trace, and error line highlighting. Log output streams incrementally as the job runs.
 
 ### 5. Failed Jobs Summary View
 Quick view of all failed jobs in a pipeline with extracted failure messages.
@@ -97,7 +100,7 @@ Quick view of all failed jobs in a pipeline with extracted failure messages.
 | `r` | Refresh current view |
 | `Ctrl+c` | Quit immediately |
 | `Ctrl+q` | Quit immediately |
-| `?` | Show help |
+| `y` | Copy URL or content to clipboard |
 | `Up/Down` | Navigate |
 | `Enter` | Select / drill down |
 
@@ -112,15 +115,18 @@ Quick view of all failed jobs in a pipeline with extracted failure messages.
 
 | Key | Action |
 |-----|--------|
-| `f` | Focus on filter inputs |
+| `/` | Focus filter input |
 | `b` | Open selected pipeline in browser |
+| `y` | Copy pipeline URL |
 
 ### Job List View
 
 | Key | Action |
 |-----|--------|
+| `/` | Focus filter input |
 | `b` | Open selected job in browser |
-| `f` | Show only failed jobs |
+| `f` | Show failed jobs summary |
+| `y` | Copy job URL |
 
 ### Job Detail View
 
@@ -128,6 +134,7 @@ Quick view of all failed jobs in a pipeline with extracted failure messages.
 |-----|--------|
 | `b` | Open job in browser |
 | `f` | Show failures only (hide full trace) |
+| `y` | Copy log output |
 
 ## Usage Examples
 
@@ -163,14 +170,15 @@ At any level, press `b` to open the current selection in your browser for full G
 
 ```
 PipelineMonitor (App)
+    ├── LoadingScreen (splash while connecting)
     ├── ProjectSelectScreen
     │   └── DataTable of projects + search input
-    ├── PipelineListScreen
+    ├── PipelineListScreen (auto-refresh 10s)
     │   └── DataTable of pipelines
-    ├── JobListScreen
+    ├── JobListScreen (auto-refresh 10s)
     │   └── DataTable of jobs (grouped by stage)
-    ├── JobDetailScreen
-    │   └── RichLog with trace/failures
+    ├── JobDetailScreen (auto-refresh 5s)
+    │   └── Info bar (status + duration) + RichLog with trace/failures
     └── FailedJobsScreen
         └── RichLog with all failures
 ```
@@ -180,7 +188,6 @@ PipelineMonitor (App)
 - [ ] Search within logs
 - [ ] Export failures to file
 - [ ] Pipeline trends/statistics view
-- [ ] Customizable refresh interval
 - [ ] Job re-run capability
 - [ ] Pipeline trigger from TUI
 - [ ] Notification on failure
