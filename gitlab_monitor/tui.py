@@ -193,6 +193,22 @@ class GitLabAPI:
         except Exception:
             return []
 
+    def get_job(self, job_id):
+        try:
+            job = self.project.jobs.get(job_id)
+            return {
+                'id': job.id,
+                'name': job.name,
+                'status': job.status,
+                'stage': job.stage,
+                'duration': job.duration,
+                'started_at': job.started_at,
+                'finished_at': job.finished_at,
+                'web_url': job.web_url,
+            }
+        except Exception:
+            return None
+
     def get_job_trace(self, job_id):
         try:
             job = self.project.jobs.get(job_id)
@@ -225,6 +241,31 @@ class GitLabAPI:
 
 
 # -- screens -----------------------------------------------------------------
+
+LOGO = r"""
+       _
+  __ _| |_ __ ___   ___  _ __
+ / _` | | '_ ` _ \ / _ \| '_ \
+| (_| | | | | | | | (_) | | | |
+ \__, |_|_| |_| |_|\___/|_| |_|
+ |___/
+"""
+
+
+class LoadingScreen(Screen):
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="splash")
+        yield KeyBar("  connecting to gitlab...", id="keybar")
+
+    def on_mount(self) -> None:
+        splash = self.query_one("#splash", Static)
+        lines = LOGO.strip('\n')
+        splash.update(
+            f"\n\n\n[bold #89b4fa]{lines}[/]\n\n"
+            "  [dim #a6adc8]loading projects...[/]"
+        )
+
 
 class ProjectSelectScreen(ScreenBase):
 
@@ -334,6 +375,7 @@ class PipelineListScreen(ScreenBase):
         table.cursor_type = "row"
         await self.load_pipelines()
         table.focus()
+        self.set_interval(10, self.load_pipelines)
 
     async def load_pipelines(self) -> None:
         self.pipelines = self.api.get_recent_pipelines()
@@ -356,6 +398,7 @@ class PipelineListScreen(ScreenBase):
 
     def _update_table(self) -> None:
         table = self.query_one("#pipeline-table", DataTable)
+        prev_row = table.cursor_row
         table.clear()
         for p in self.filtered_pipelines:
             age = format_age(p['created_at'])
@@ -368,6 +411,8 @@ class PipelineListScreen(ScreenBase):
                 Text(age, style="dim italic"),
                 Text(p['user'], style="dim"),
             )
+        if prev_row is not None and self.filtered_pipelines:
+            table.move_cursor(row=min(prev_row, len(self.filtered_pipelines) - 1))
 
     async def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "pipeline-filter":
@@ -443,6 +488,7 @@ class JobListScreen(ScreenBase):
         table.cursor_type = "row"
         await self.load_jobs()
         table.focus()
+        self.set_interval(10, self.load_jobs)
 
     async def load_jobs(self) -> None:
         self.jobs = self.api.get_pipeline_jobs(self.pipeline['id'])
@@ -469,6 +515,7 @@ class JobListScreen(ScreenBase):
 
     def _update_table(self) -> None:
         table = self.query_one("#job-table", DataTable)
+        prev_row = table.cursor_row
         table.clear()
         for job in self.filtered_jobs:
             failed = job['status'] == 'failed'
@@ -482,6 +529,8 @@ class JobListScreen(ScreenBase):
                 Text(dur, style="red" if failed else "dim"),
                 Text(str(job['id']), style="dim"),
             )
+        if prev_row is not None and self.filtered_jobs:
+            table.move_cursor(row=min(prev_row, len(self.filtered_jobs) - 1))
 
     async def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "job-filter":
@@ -533,12 +582,14 @@ class JobDetailScreen(ScreenBase):
         self.api = api
         self.job = job
         self.trace = ""
+        self.trace_lines_written = 0
         self.failures = []
 
     def compose(self) -> ComposeResult:
         name = self.job['name']
         jid = self.job['id']
         yield Breadcrumb(f"  Job [bold]#{jid}[/bold] [dim]{name}[/dim]", id="breadcrumb")
+        yield Static("", id="job-info-bar")
         yield ScrollableContainer(
             RichLog(id="job-log", wrap=True),
             id="log-container",
@@ -548,13 +599,51 @@ class JobDetailScreen(ScreenBase):
             id="keybar",
         )
 
+    def _update_info_bar(self) -> None:
+        bar = self.query_one("#job-info-bar", Static)
+        status = self.job.get('status', '?')
+        dur = format_duration(self.job.get('duration'))
+        style, label = STATUS_STYLES.get(status, ('', f' {status} '))
+        bar.update(f"  Status: [{style}]{label}[/]  Duration: [bold]{dur}[/bold]")
+
     async def on_mount(self) -> None:
         await self.load_trace()
+        self._update_info_bar()
+        self.set_interval(5, self._auto_refresh)
+
+    async def _auto_refresh(self) -> None:
+        try:
+            fresh = self.api.get_job(self.job['id'])
+            if fresh:
+                self.job = fresh
+            self._update_info_bar()
+            self._append_new_trace()
+        except Exception:
+            pass
+
+    def _write_trace_line(self, log, line) -> None:
+        if any(kw in line.lower() for kw in ['error', 'failed', 'exception']):
+            log.write(Text(line, style="#f38ba8"))
+        else:
+            log.write(line)
+
+    def _append_new_trace(self) -> None:
+        new_trace = self.api.get_job_trace(self.job['id'])
+        if new_trace == self.trace:
+            return
+        log = self.query_one("#job-log", RichLog)
+        new_lines = new_trace.split('\n')
+        # append only lines beyond what we already wrote
+        for line in new_lines[self.trace_lines_written:]:
+            self._write_trace_line(log, line)
+        self.trace = new_trace
+        self.trace_lines_written = len(new_lines)
 
     async def load_trace(self) -> None:
         log = self.query_one("#job-log", RichLog)
         log.clear()
         self.trace = self.api.get_job_trace(self.job['id'])
+        self.trace_lines_written = 0
 
         if self.job['status'] == 'failed':
             self.failures = self.api.get_job_failures(self.job['id'])
@@ -570,16 +659,19 @@ class JobDetailScreen(ScreenBase):
                 ))
                 log.write("")
 
-        for line in self.trace.split('\n'):
-            if any(kw in line.lower() for kw in ['error', 'failed', 'exception']):
-                log.write(Text(line, style="#f38ba8"))
-            else:
-                log.write(line)
+        lines = self.trace.split('\n')
+        for line in lines:
+            self._write_trace_line(log, line)
+        self.trace_lines_written = len(lines)
 
     async def action_back(self) -> None:
         self.app.pop_screen()
 
     async def action_refresh(self) -> None:
+        fresh = self.api.get_job(self.job['id'])
+        if fresh:
+            self.job = fresh
+        self._update_info_bar()
         await self.load_trace()
 
     async def action_browser(self) -> None:
@@ -750,35 +842,41 @@ class PipelineMonitor(App):
         padding: 0 2;
         color: #cdd6f4;
     }
+
+    #job-info-bar {
+        dock: top;
+        height: 1;
+        background: #181825;
+        color: #cdd6f4;
+        padding: 0 0;
+    }
+
+    #splash {
+        width: 100%;
+        height: 1fr;
+        content-align: center middle;
+        text-align: center;
+        background: #1e1e2e;
+        color: #89b4fa;
+    }
     """
 
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
         self.api = GitLabAPI(config)
-        self.refresh_task = None
-        self.refresh_interval = config.refresh_interval
 
     def action_quit(self) -> None:
         self.exit()
 
     async def on_mount(self) -> None:
+        self.push_screen(LoadingScreen())
+        # yield a frame so the splash renders before blocking API calls
+        await asyncio.sleep(0.05)
         if self.api.project:
-            self.push_screen(PipelineListScreen(self.api))
+            self.switch_screen(PipelineListScreen(self.api))
         else:
-            self.push_screen(ProjectSelectScreen(self.api))
-        self.refresh_task = asyncio.create_task(self.auto_refresh())
-
-    async def auto_refresh(self) -> None:
-        while True:
-            await asyncio.sleep(self.refresh_interval)
-            screen = self.screen
-            if hasattr(screen, 'load_pipelines'):
-                await screen.load_pipelines()
-            elif hasattr(screen, 'load_jobs'):
-                await screen.load_jobs()
-            elif hasattr(screen, 'load_trace'):
-                await screen.load_trace()
+            self.switch_screen(ProjectSelectScreen(self.api))
 
 
 def main():
