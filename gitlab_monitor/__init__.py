@@ -2,4 +2,4 @@
 # https://github.com/bearded-giant/gitlab-tools
 # Licensed under Apache License 2.0
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
