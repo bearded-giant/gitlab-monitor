@@ -4,22 +4,17 @@ A K9s-style Terminal User Interface for monitoring GitLab pipelines with real-ti
 
 ## Installation
 
-Install with pipx for an isolated, globally available command:
+### Homebrew (recommended)
 
 ```bash
-pipx install ./gitlab-monitor
+brew tap bearded-giant/tap
+brew install gitlab-monitor
 ```
 
-For development:
+### From source (development)
 
 ```bash
 pipx install -e ./gitlab-monitor
-```
-
-To upgrade after making changes:
-
-```bash
-pipx install --force ./gitlab-monitor
 ```
 
 ## Configuration
