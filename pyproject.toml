@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/bearded-giant/gitlab-tools"
+Homepage = "https://github.com/bearded-giant/gitlab-monitor"
 
 [project.scripts]
 gitlab-monitor = "gitlab_monitor.tui:main"

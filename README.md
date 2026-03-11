@@ -151,15 +151,18 @@ Quick view of all failed jobs in a pipeline with extracted failure messages.
 ### Opening in Browser
 At any level, press `b` to open the current selection in your browser for full GitLab UI access.
 
-## Status Icons
+## Status Badges
 
-| Icon | Status |
-|------|--------|
-| Green check | Success |
-| Red X | Failed |
-| Yellow arrows | Running |
-| Dim pause | Pending |
-| Dim skip | Skipped |
+| Badge | Style |
+|-------|-------|
+| `success` | Green |
+| `failed` | Red |
+| `running` | Yellow |
+| `pending` | Dim |
+| `canceled` | Dim |
+| `created` | Dim |
+| `manual` | Blue |
+| `skipped` | Dim |
 
 ## Architecture
 
