@@ -16,7 +16,7 @@ hiddenimports = collect_submodules('textual') + collect_submodules('rich') + [
 datas = collect_data_files('textual') + collect_data_files('rich')
 
 a = Analysis(
-    ['gitlab_monitor/tui.py'],
+    ['entry.py'],
     pathex=[],
     binaries=[],
     datas=datas,
