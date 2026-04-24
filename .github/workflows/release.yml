@@ -16,12 +16,11 @@ jobs:
           - os: macos-14
             arch: aarch64
             platform: apple-darwin
-          - os: macos-15
-            arch: x86_64
-            platform: apple-darwin
+            target_arch: arm64
           - os: ubuntu-latest
             arch: x86_64
             platform: unknown-linux-gnu
+            target_arch: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -32,20 +31,46 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller
+          pip install 'pyinstaller>=6.10'
           pip install -e .
 
       - name: Build binary
+        env:
+          PYINSTALLER_TARGET_ARCH: ${{ matrix.target_arch }}
         run: pyinstaller glmon.spec
 
-      - name: Rename binary
-        run: mv dist/glmon dist/glmon-${{ matrix.arch }}-${{ matrix.platform }}
+      - name: Verify binary arch (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          file dist/glmon/glmon
+          file dist/glmon/glmon | grep -q 'arm64'
+
+      - name: Smoke test binary
+        shell: bash
+        run: |
+          # confirm the bootloader starts and exits cleanly without GITLAB_URL set.
+          # expected: non-zero exit with the "GITLAB_URL not set" error in under 10s.
+          set +e
+          ( cd dist/glmon && timeout 10 ./glmon ) > smoke.out 2>&1
+          status=$?
+          set -e
+          cat smoke.out
+          if [ "$status" -eq 124 ]; then
+            echo "binary hung for 10s (timeout)" >&2
+            exit 1
+          fi
+          grep -q 'GITLAB_URL' smoke.out
+
+      - name: Package artifact
+        run: |
+          cd dist
+          tar -czf glmon-${{ matrix.arch }}-${{ matrix.platform }}.tar.gz glmon
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: glmon-${{ matrix.arch }}-${{ matrix.platform }}
-          path: dist/glmon-${{ matrix.arch }}-${{ matrix.platform }}
+          path: dist/glmon-${{ matrix.arch }}-${{ matrix.platform }}.tar.gz
 
   release:
     needs: build
@@ -59,5 +84,5 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: artifacts/*.tar.gz
           generate_release_notes: true
