@@ -41,14 +41,14 @@ def copy_to_clipboard(text):
 # -- status styling ----------------------------------------------------------
 
 STATUS_STYLES = {
-    'success':  ('bold white on #a6e3a1', ' success '),
-    'failed':   ('bold white on #f38ba8', ' failed '),
-    'running':  ('bold white on #f9e2af', ' running '),
-    'pending':  ('bold white on #585b70', ' pending '),
-    'skipped':  ('bold white on #45475a', ' skipped '),
-    'canceled':  ('bold white on #585b70', ' canceled '),
-    'created':  ('bold white on #45475a', ' created '),
-    'manual':   ('bold white on #89b4fa', ' manual '),
+    'success':  ('bold #a6e3a1', ' success '),
+    'failed':   ('bold #f38ba8', ' failed '),
+    'running':  ('bold #f9e2af', ' running '),
+    'pending':  ('bold #a6adc8', ' pending '),
+    'skipped':  ('bold #6c7086', ' skipped '),
+    'canceled': ('bold #a6adc8', ' canceled '),
+    'created':  ('bold #6c7086', ' created '),
+    'manual':   ('bold #89b4fa', ' manual '),
 }
 
 TERMINAL_STATUSES = frozenset({'success', 'failed', 'canceled', 'skipped', 'manual'})
@@ -88,10 +88,89 @@ def format_age(iso_str):
         return dt.strftime('%m-%d')
 
 
-# -- breadcrumb bar ----------------------------------------------------------
+# -- k9s-style header --------------------------------------------------------
 
-class Breadcrumb(Static):
-    pass
+INFO_PANE_WIDTH = 56
+KEY_COLS = 3
+
+
+def _info_lines(pairs):
+    if not pairs:
+        return []
+    label_w = max(len(l) for l, _ in pairs)
+    lines = []
+    for label, value in pairs:
+        t = Text()
+        t.append(f"{label}:".ljust(label_w + 2), style="bold #f9e2af")
+        t.append(str(value), style="#cdd6f4")
+        lines.append(t)
+    return lines
+
+
+def _key_lines(keys, cols=KEY_COLS):
+    if not keys:
+        return []
+    rows_per_col = (len(keys) + cols - 1) // cols
+    columns = [keys[i * rows_per_col:(i + 1) * rows_per_col] for i in range(cols)]
+    col_widths = []
+    for col in columns:
+        if not col:
+            col_widths.append((0, 0))
+            continue
+        max_k = max(len(f"<{k}>") for k, _ in col)
+        max_a = max(len(a) for _, a in col)
+        col_widths.append((max_k, max_a))
+    rows = max((len(c) for c in columns), default=0)
+    lines = []
+    for r in range(rows):
+        line = Text()
+        for ci, col in enumerate(columns):
+            kw, aw = col_widths[ci]
+            if r < len(col):
+                k, a = col[r]
+                line.append(f"<{k}>".ljust(kw), style="bold #89b4fa")
+                line.append(" ")
+                line.append(a.ljust(aw + 3), style="#cdd6f4")
+            else:
+                line.append(" " * (kw + 1 + aw + 3))
+        lines.append(line)
+    return lines
+
+
+def _format_header(info_pairs, keys, info_width=INFO_PANE_WIDTH):
+    info = _info_lines(info_pairs)
+    krows = _key_lines(keys)
+    rows = max(len(info), len(krows))
+    out = Text()
+    for i in range(rows):
+        if i > 0:
+            out.append("\n")
+        if i < len(info):
+            left = info[i]
+            out.append(left)
+            pad = max(1, info_width - left.cell_len)
+            out.append(" " * pad)
+        else:
+            out.append(" " * info_width)
+        if i < len(krows):
+            out.append(krows[i])
+    return out
+
+
+class K9sHeader(Static):
+
+    def __init__(self, info_pairs, keys, **kw):
+        super().__init__(_format_header(info_pairs, keys), **kw)
+        self._info_pairs = info_pairs
+        self._keys = keys
+
+    def set_info(self, pairs) -> None:
+        self._info_pairs = pairs
+        self.update(_format_header(pairs, self._keys))
+
+    def set_keys(self, keys) -> None:
+        self._keys = keys
+        self.update(_format_header(self._info_pairs, keys))
 
 
 class KeyBar(Static):
@@ -321,26 +400,33 @@ class ProjectSelectScreen(ScreenBase):
         self._search_timer = None
 
     def compose(self) -> ComposeResult:
-        yield Breadcrumb(self._breadcrumb_text(), id="breadcrumb")
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Container(
             Input(placeholder="/  filter projects...", id="project-search"),
             id="filter-bar",
         )
         yield DataTable(id="project-table")
-        yield KeyBar(
-            "  q quit  /  filter  r refresh  s star  a toggle all  enter select",
-            id="keybar",
-        )
 
-    def _breadcrumb_text(self) -> str:
-        mode_label = "Favorites" if self.mode == "fav" else "All"
-        count = len(self.favorites.list())
-        if self.mode == "fav":
-            return f"  Projects > [bold]{mode_label}[/bold] ({count})"
-        return f"  Projects > [bold]{mode_label}[/bold]"
+    def _info_pairs(self):
+        mode_label = "Favorites only" if self.mode == "fav" else "All projects"
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("View", mode_label),
+            ("Favorites", str(len(self.favorites.list()))),
+        ]
+
+    def _keys(self):
+        return [
+            ("q", "quit"),
+            ("/", "filter"),
+            ("r", "refresh"),
+            ("s", "star"),
+            ("a", "toggle all"),
+            ("enter", "select"),
+        ]
 
     def _refresh_breadcrumb(self) -> None:
-        self.query_one("#breadcrumb", Breadcrumb).update(self._breadcrumb_text())
+        self.query_one("#header", K9sHeader).set_info(self._info_pairs())
 
     async def on_mount(self) -> None:
         table = self.query_one("#project-table", DataTable)
@@ -464,21 +550,32 @@ class PipelineListScreen(ScreenBase):
     def _age_label(self) -> str:
         return f"last {self.age_days}d" if self.age_days is not None else "all"
 
-    def _breadcrumb_text(self) -> str:
-        name = self.api.project_name or "project"
-        return f"  Projects > [bold]{name}[/bold] > Pipelines [dim]({self._age_label()})[/dim]"
+    def _info_pairs(self):
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Project", self.api.project_name or "project"),
+            ("Scope", self._age_label()),
+            ("Pipelines", str(len(getattr(self, 'pipelines', []) or []))),
+        ]
+
+    def _keys(self):
+        return [
+            ("q", "back"),
+            ("/", "filter"),
+            ("r", "refresh"),
+            ("t", "age"),
+            ("b", "browser"),
+            ("y", "copy url"),
+            ("enter", "jobs"),
+        ]
 
     def compose(self) -> ComposeResult:
-        yield Breadcrumb(self._breadcrumb_text(), id="breadcrumb")
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Container(
             Input(placeholder="/  filter pipelines...", id="pipeline-filter"),
             id="filter-bar",
         )
         yield DataTable(id="pipeline-table")
-        yield KeyBar(
-            "  q back  /  filter  r refresh  t age  b browser  y copy url  enter jobs",
-            id="keybar",
-        )
 
     async def on_mount(self) -> None:
         table = self.query_one("#pipeline-table", DataTable)
@@ -489,11 +586,12 @@ class PipelineListScreen(ScreenBase):
         self._refresh_timer = self.set_interval(10, self._safe_refresh)
 
     def _refresh_breadcrumb(self) -> None:
-        self.query_one("#breadcrumb", Breadcrumb).update(self._breadcrumb_text())
+        self.query_one("#header", K9sHeader).set_info(self._info_pairs())
 
     async def load_pipelines(self) -> None:
         self.pipelines = await asyncio.to_thread(self.api.get_recent_pipelines, 50, None, None, self.age_days)
         self._apply_filter()
+        self._refresh_breadcrumb()
 
     async def _safe_refresh(self) -> None:
         if self._refreshing:
@@ -605,23 +703,33 @@ class JobListScreen(ScreenBase):
         self._refresh_timer = None
         self._refreshing = False
 
+    def _info_pairs(self):
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Project", self.api.project_name or "project"),
+            ("Pipeline", f"#{self.pipeline['id']}  {self.pipeline['status']}"),
+            ("Branch", self.pipeline['ref'][:40]),
+            ("Jobs", str(len(getattr(self, 'jobs', []) or []))),
+        ]
+
+    def _keys(self):
+        return [
+            ("q", "back"),
+            ("/", "filter"),
+            ("r", "refresh"),
+            ("b", "browser"),
+            ("f", "failures"),
+            ("y", "copy url"),
+            ("enter", "logs"),
+        ]
+
     def compose(self) -> ComposeResult:
-        name = self.api.project_name or "project"
-        pid = self.pipeline['id']
-        ref = self.pipeline['ref'][:20]
-        yield Breadcrumb(
-            f"  Projects > {name} > [bold]#{pid}[/bold] [dim]{ref}[/dim]",
-            id="breadcrumb",
-        )
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Container(
             Input(placeholder="/  filter jobs...", id="job-filter"),
             id="filter-bar",
         )
         yield DataTable(id="job-table")
-        yield KeyBar(
-            "  q back  /  filter  r refresh  b browser  f failures  y copy url  enter logs",
-            id="keybar",
-        )
 
     async def on_mount(self) -> None:
         table = self.query_one("#job-table", DataTable)
@@ -639,6 +747,10 @@ class JobListScreen(ScreenBase):
             j['name'],
         ))
         self._apply_filter()
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+        except Exception:
+            pass
 
     def _apply_filter(self) -> None:
         query = self.query_one("#job-filter", Input).value.strip().lower()
@@ -743,27 +855,36 @@ class JobDetailScreen(ScreenBase):
         self._refresh_timer = None
         self._refreshing = False
 
-    def compose(self) -> ComposeResult:
-        name = self.job['name']
-        jid = self.job['id']
-        yield Breadcrumb(f"  Job [bold]#{jid}[/bold] [dim]{name}[/dim]", id="breadcrumb")
-        yield Static("", id="job-info-bar")
-        yield RichLog(id="job-log", wrap=True, max_lines=MAX_LOG_LINES)
-        yield KeyBar(
-            "  q back  r refresh  b browser  f failures only  y copy",
-            id="keybar",
-        )
-
-    def _update_info_bar(self) -> None:
-        bar = self.query_one("#job-info-bar", Static)
+    def _info_pairs(self):
         status = self.job.get('status', '?')
         dur = format_duration(self.job.get('duration'))
-        style, label = STATUS_STYLES.get(status, ('', f' {status} '))
-        if self._refresh_timer is not None:
-            auto = "[#a6e3a1]auto-refresh: 5s[/]"
-        else:
-            auto = "[dim]auto-refresh: off[/]"
-        bar.update(f"  Status: [{style}]{label}[/]  Duration: [bold]{dur}[/bold]  {auto}")
+        auto = "5s" if self._refresh_timer is not None else "off"
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Project", self.api.project_name or "project"),
+            ("Job", f"#{self.job['id']}  {self.job['name']}"),
+            ("Status", f"{status}  ({dur})"),
+            ("Auto-refresh", auto),
+        ]
+
+    def _keys(self):
+        return [
+            ("q", "back"),
+            ("r", "refresh"),
+            ("b", "browser"),
+            ("f", "failures only"),
+            ("y", "copy"),
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield RichLog(id="job-log", wrap=True, max_lines=MAX_LOG_LINES)
+
+    def _update_info_bar(self) -> None:
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+        except Exception:
+            pass
 
     async def on_mount(self) -> None:
         await self.load_trace()
@@ -878,11 +999,20 @@ class FailedJobsScreen(ScreenBase):
         self.pipeline = pipeline
         self.failed_jobs = failed_jobs
 
+    def _info_pairs(self):
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Project", self.api.project_name or "project"),
+            ("Pipeline", f"#{self.pipeline['id']}"),
+            ("Failures", str(len(self.failed_jobs))),
+        ]
+
+    def _keys(self):
+        return [("q", "back"), ("y", "copy")]
+
     def compose(self) -> ComposeResult:
-        pid = self.pipeline['id']
-        yield Breadcrumb(f"  Pipeline [bold]#{pid}[/bold] > Failed Jobs", id="breadcrumb")
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield RichLog(id="failures-log", wrap=True, max_lines=MAX_LOG_LINES)
-        yield KeyBar("  q back  y copy", id="keybar")
 
     async def on_mount(self) -> None:
         await self.load_failures()
@@ -943,19 +1073,19 @@ class PipelineMonitor(App):
         background: #1e1e2e;
     }
 
-    #breadcrumb {
-        dock: top;
-        height: 1;
-        background: #313244;
+    K9sHeader {
+        height: auto;
+        background: #181825;
+        padding: 1 2;
+        margin-bottom: 1;
         color: #cdd6f4;
-        padding: 0 0;
     }
 
     #filter-bar {
-        dock: top;
         height: 3;
         background: #1e1e2e;
         padding: 0 1;
+        margin-bottom: 1;
     }
 
     #filter-bar Input {
@@ -1007,14 +1137,6 @@ class PipelineMonitor(App):
         background: #313244;
         padding: 0 2;
         color: #cdd6f4;
-    }
-
-    #job-info-bar {
-        dock: top;
-        height: 1;
-        background: #181825;
-        color: #cdd6f4;
-        padding: 0 0;
     }
 
     #splash {
