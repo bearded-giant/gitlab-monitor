@@ -49,32 +49,46 @@ Note: Never store tokens in config files. Always use environment variables for t
 After installation, the tool is available as `gitlab-monitor` or `glmon` (short alias):
 
 ```bash
-glmon
+glmon                                # project picker (favorites first if any)
+glmon -p group/subgroup/project      # jump straight into a project
+glmon --days 7                       # default pipeline window: 7 days (default: 3)
+glmon -p group/project --days 30     # combined
 ```
 
-Without `GITLAB_PROJECT` set, you'll get an interactive project picker with typeahead search. With it set, you go straight to that project's pipelines.
+Without `GITLAB_PROJECT` or `--project` set, you'll get an interactive project picker. Starred projects load first for speed -- press `a` to load all projects.
+
+### CLI Arguments
+
+| Flag | Description |
+|------|-------------|
+| `-p, --project PATH` | Jump directly into `group/project` (skips picker). Overrides `GITLAB_PROJECT`. |
+| `--days N` | Default pipeline age window in days. Default: 3. Use with `t` key to cycle in-app. |
 
 ## Features
 
 1. **Loading splash** -- ASCII art splash screen while connecting to GitLab
-2. **Project picker** -- browse and search all your GitLab projects with typeahead filtering
-3. **Real-time auto-refresh** -- pipeline and job lists refresh every 10 seconds, job detail every 5 seconds
-4. **Interactive navigation** -- arrow keys to navigate, Enter to drill down
-5. **Multi-level drill-down** -- Projects -> Pipelines -> Jobs -> Logs
-6. **Filtering** -- filter pipelines by branch name or user
-7. **Failed job highlighting** -- failed jobs shown in red for quick identification
-8. **Browser integration** -- open pipelines/jobs in browser with 'b' key
-9. **Clipboard support** -- copy URLs or log output with 'y' key
-10. **Failure extraction** -- automatically extracts and highlights test failures
-11. **Job detail info bar** -- live status and duration display while viewing job logs
+2. **Project picker with favorites** -- star projects you care about; favorites load first (fast), toggle to full list on demand
+3. **Pipeline age window** -- default 3 days (huge speedup on busy projects); cycle `3d / 7d / 30d / all` with `t`
+4. **Direct project jump** -- `--project` arg bypasses picker
+5. **Real-time auto-refresh** -- pipeline and job lists refresh every 10 seconds, job detail every 5 seconds
+6. **Interactive navigation** -- arrow keys to navigate, Enter to drill down
+7. **Multi-level drill-down** -- Projects -> Pipelines -> Jobs -> Logs
+8. **Filtering** -- filter pipelines by branch name or user
+9. **Failed job highlighting** -- failed jobs shown in red for quick identification
+10. **Browser integration** -- open pipelines/jobs in browser with 'b' key
+11. **Clipboard support** -- copy URLs or log output with 'y' key
+12. **Failure extraction** -- automatically extracts and highlights test failures
+13. **Job detail info bar** -- live status and duration display while viewing job logs
 
 ## Views
 
-### 1. Project Picker (when GITLAB_PROJECT is not set)
-Lists all your GitLab projects sorted by last activity. Type to filter, Enter to select.
+### 1. Project Picker (when no project set)
+Defaults to **Favorites** view if any projects are starred (fast, no full project listing). Press `a` to toggle to **All** projects (sorted by last activity, favorites pinned to top). A leading `*` column marks starred projects. Type to filter, Enter to select, `s` to star/unstar.
+
+Favorites persist to `~/.config/gitlab-monitor/favorites.json`.
 
 ### 2. Pipeline List View
-Shows recent pipelines with ID, status (color-coded), branch, creation time, and commit SHA.
+Shows recent pipelines with ID, status (color-coded), branch, creation time, and commit SHA. Defaults to the last 3 days to keep load fast on busy projects. Press `t` to cycle window: `3d -> 7d -> 30d -> all`. Current window shown in breadcrumb.
 
 ### 3. Job List View
 Shows all jobs in a pipeline grouped by stage (build, test, deploy, cleanup) with color-coded status and duration.
@@ -104,6 +118,8 @@ Quick view of all failed jobs in a pipeline with extracted failure messages.
 | Key | Action |
 |-----|--------|
 | `/` | Focus search input |
+| `s` | Star / unstar current project |
+| `a` | Toggle view: Favorites only <-> All projects |
 | `Down` / `Escape` | Move from search to project list |
 
 ### Pipeline List View
@@ -111,6 +127,7 @@ Quick view of all failed jobs in a pipeline with extracted failure messages.
 | Key | Action |
 |-----|--------|
 | `/` | Focus filter input |
+| `t` | Cycle age window: 3d -> 7d -> 30d -> all |
 | `b` | Open selected pipeline in browser |
 | `y` | Copy pipeline URL |
 
@@ -140,6 +157,21 @@ Quick view of all failed jobs in a pipeline with extracted failure messages.
 4. Press Enter to view jobs in a pipeline
 5. Press Enter on a job to view its logs
 6. Press `q` to go back up a level
+
+### Building a Favorites List
+1. Launch `glmon`, press `a` to load all projects
+2. Navigate to a project you care about, press `s` to star it
+3. Repeat for other projects
+4. Next launch: starred projects load instantly in the default Favorites view
+
+### Jump Straight to a Project
+```bash
+glmon -p my-group/my-project
+```
+Skips the picker entirely. Useful for shell aliases or keyboard launchers.
+
+### Loading Older Pipelines
+Default view is last 3 days. Press `t` in the pipeline list to expand to 7d, 30d, or all. Or launch with `--days 30` to set a different default.
 
 ### Investigating Failures
 1. Navigate to a pipeline with failed status (red)
@@ -180,6 +212,13 @@ PipelineMonitor (App)
     └── FailedJobsScreen
         └── RichLog with all failures
 ```
+
+## Files
+
+| Path | Purpose |
+|------|---------|
+| `~/.config/gitlab-monitor/config.json` | Optional non-token config (url, project, refresh_interval) |
+| `~/.config/gitlab-monitor/favorites.json` | List of starred project paths |
 
 ## Future Enhancements
 

@@ -5,7 +5,54 @@
 import os
 import json
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+
+
+class Favorites:
+    """Persist starred project paths to ~/.config/gitlab-monitor/favorites.json"""
+
+    def __init__(self, config_dir: Path):
+        self.path = config_dir / "favorites.json"
+        self._items: List[str] = []
+        self._load()
+
+    def _load(self) -> None:
+        if self.path.exists():
+            try:
+                with open(self.path, 'r') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        self._items = [str(x) for x in data]
+            except Exception:
+                self._items = []
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, 'w') as f:
+            json.dump(self._items, f, indent=2)
+
+    def list(self) -> List[str]:
+        return list(self._items)
+
+    def has(self, project_path: str) -> bool:
+        return project_path in self._items
+
+    def add(self, project_path: str) -> None:
+        if project_path not in self._items:
+            self._items.append(project_path)
+            self._save()
+
+    def remove(self, project_path: str) -> None:
+        if project_path in self._items:
+            self._items.remove(project_path)
+            self._save()
+
+    def toggle(self, project_path: str) -> bool:
+        if self.has(project_path):
+            self.remove(project_path)
+            return False
+        self.add(project_path)
+        return True
 
 
 class Config:
@@ -15,6 +62,7 @@ class Config:
         self.config_dir = Path.home() / ".config" / "gitlab-monitor"
         self.config_file = self.config_dir / "config.json"
         self._config = self._load_config()
+        self.favorites = Favorites(self.config_dir)
     
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from file and environment variables"""

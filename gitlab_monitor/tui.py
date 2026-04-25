@@ -4,20 +4,26 @@
 # Licensed under Apache License 2.0
 
 import sys
+import argparse
 import subprocess
 import gitlab
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import re
 import asyncio
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Static, Input, RichLog
-from textual.containers import Container, Horizontal, ScrollableContainer
+from textual.containers import Container, Horizontal
 from textual.screen import Screen
 from textual.binding import Binding
 from rich.text import Text
 
 from .config import Config
+
+
+# pipeline age filter cycle: 3d -> 7d -> 30d -> all (None)
+PIPELINE_AGE_CYCLE = [3, 7, 30, None]
+DEFAULT_PIPELINE_AGE_DAYS = 3
 
 
 def copy_to_clipboard(text):
@@ -160,12 +166,36 @@ class GitLabAPI:
             'last_activity': p.last_activity_at,
         } for p in projects]
 
-    def get_recent_pipelines(self, limit=50, ref=None, username=None):
+    def get_project_meta(self, project_path):
+        try:
+            p = self.gl.projects.get(project_path)
+            return {
+                'id': p.id,
+                'path': p.path_with_namespace,
+                'name': p.name,
+                'description': p.description or '',
+                'last_activity': p.last_activity_at,
+            }
+        except Exception:
+            return None
+
+    def get_projects_by_paths(self, paths):
+        results = []
+        for path in paths:
+            meta = self.get_project_meta(path)
+            if meta:
+                results.append(meta)
+        return results
+
+    def get_recent_pipelines(self, limit=50, ref=None, username=None, days=None):
         params = {'per_page': limit, 'order_by': 'id', 'sort': 'desc'}
         if ref:
             params['ref'] = ref
         if username:
             params['username'] = username
+        if days is not None:
+            since = datetime.now(timezone.utc) - timedelta(days=days)
+            params['updated_after'] = since.isoformat().replace('+00:00', 'Z')
         pipelines = self.project.pipelines.list(**params)
         results = []
         for p in pipelines:
@@ -278,43 +308,72 @@ class LoadingScreen(Screen):
 
 class ProjectSelectScreen(ScreenBase):
 
-    KEY_MAP = {"q": "quit", "r": "refresh", "slash": "search"}
+    KEY_MAP = {"q": "quit", "r": "refresh", "slash": "search", "s": "star", "a": "toggle_all"}
 
     DEBOUNCE_SECONDS = 0.4
 
-    def __init__(self, api: GitLabAPI):
+    def __init__(self, api: GitLabAPI, favorites):
         super().__init__()
         self.api = api
+        self.favorites = favorites
         self.projects = []
+        self.mode = "fav" if favorites.list() else "all"
         self._search_timer = None
 
     def compose(self) -> ComposeResult:
-        yield Breadcrumb("  Projects", id="breadcrumb")
+        yield Breadcrumb(self._breadcrumb_text(), id="breadcrumb")
         yield Container(
             Input(placeholder="/  filter projects...", id="project-search"),
             id="filter-bar",
         )
         yield DataTable(id="project-table")
         yield KeyBar(
-            "  q quit  /  filter  r refresh  enter select",
+            "  q quit  /  filter  r refresh  s star  a toggle all  enter select",
             id="keybar",
         )
 
+    def _breadcrumb_text(self) -> str:
+        mode_label = "Favorites" if self.mode == "fav" else "All"
+        count = len(self.favorites.list())
+        if self.mode == "fav":
+            return f"  Projects > [bold]{mode_label}[/bold] ({count})"
+        return f"  Projects > [bold]{mode_label}[/bold]"
+
+    def _refresh_breadcrumb(self) -> None:
+        self.query_one("#breadcrumb", Breadcrumb).update(self._breadcrumb_text())
+
     async def on_mount(self) -> None:
         table = self.query_one("#project-table", DataTable)
-        table.add_columns("Project", "Description", "Last Activity")
+        table.add_columns("", "Project", "Description", "Last Activity")
         table.cursor_type = "row"
         await self.load_projects()
         table.focus()
 
     async def load_projects(self, search=None) -> None:
-        self.projects = await asyncio.to_thread(self.api.get_projects, search)
+        if self.mode == "fav" and not search:
+            paths = self.favorites.list()
+            if paths:
+                self.projects = await asyncio.to_thread(self.api.get_projects_by_paths, paths)
+            else:
+                # no favorites yet, fall back to all
+                self.mode = "all"
+                self.projects = await asyncio.to_thread(self.api.get_projects, None)
+        else:
+            self.projects = await asyncio.to_thread(self.api.get_projects, search)
+            # show favorites first within all-projects view
+            self.projects.sort(key=lambda p: (0 if self.favorites.has(p['path']) else 1))
+        self._render_table()
+        self._refresh_breadcrumb()
+
+    def _render_table(self) -> None:
         table = self.query_one("#project-table", DataTable)
         table.clear()
         for p in self.projects:
             age = format_age(p['last_activity'])
             desc = (p['description'] or '')[:40]
+            star = "*" if self.favorites.has(p['path']) else " "
             table.add_row(
+                Text(star, style="bold #f9e2af"),
                 Text(p['path'], style="bold"),
                 Text(desc, style="dim"),
                 Text(age, style="dim italic"),
@@ -327,6 +386,14 @@ class ProjectSelectScreen(ScreenBase):
 
     async def _do_search(self) -> None:
         query = self.query_one("#project-search", Input).value.strip() or None
+        if query and self.mode == "fav":
+            # local filter over favorites
+            paths = self.favorites.list()
+            all_favs = await asyncio.to_thread(self.api.get_projects_by_paths, paths)
+            q = query.lower()
+            self.projects = [p for p in all_favs if q in p['path'].lower() or q in (p['name'] or '').lower()]
+            self._render_table()
+            return
         await self.load_projects(search=query)
 
     async def on_input_changed(self, event: Input.Changed) -> None:
@@ -347,36 +414,69 @@ class ProjectSelectScreen(ScreenBase):
         query = self.query_one("#project-search", Input).value.strip() or None
         await self.load_projects(search=query)
 
+    async def action_star(self) -> None:
+        table = self.query_one("#project-table", DataTable)
+        idx = table.cursor_row
+        if idx is None or idx >= len(self.projects):
+            return
+        path = self.projects[idx]['path']
+        starred = self.favorites.toggle(path)
+        self.notify(f"{'Starred' if starred else 'Unstarred'} {path}", timeout=2)
+        # in favorites mode, drop unstarred row; otherwise just rerender
+        if self.mode == "fav" and not starred:
+            self.projects.pop(idx)
+            self._render_table()
+            if self.projects:
+                table.move_cursor(row=min(idx, len(self.projects) - 1))
+        else:
+            self._render_table()
+            table.move_cursor(row=idx)
+        self._refresh_breadcrumb()
+
+    async def action_toggle_all(self) -> None:
+        self.mode = "all" if self.mode == "fav" else "fav"
+        # clear search when toggling
+        self.query_one("#project-search", Input).value = ""
+        await self.load_projects()
+
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         idx = event.cursor_row
         if idx is not None and idx < len(self.projects):
             project = self.projects[idx]
             self.api.set_project(project['path'])
-            self.app.push_screen(PipelineListScreen(self.api))
+            age = getattr(self.app, 'default_age_days', DEFAULT_PIPELINE_AGE_DAYS)
+            self.app.push_screen(PipelineListScreen(self.api, age_days=age))
 
 
 class PipelineListScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age"}
 
-    def __init__(self, api: GitLabAPI):
+    def __init__(self, api: GitLabAPI, age_days=DEFAULT_PIPELINE_AGE_DAYS):
         super().__init__()
         self.api = api
         self.pipelines = []
         self.filtered_pipelines = []
+        self.age_days = age_days
         self._refresh_timer = None
         self._refreshing = False
 
-    def compose(self) -> ComposeResult:
+    def _age_label(self) -> str:
+        return f"last {self.age_days}d" if self.age_days is not None else "all"
+
+    def _breadcrumb_text(self) -> str:
         name = self.api.project_name or "project"
-        yield Breadcrumb(f"  Projects > [bold]{name}[/bold] > Pipelines", id="breadcrumb")
+        return f"  Projects > [bold]{name}[/bold] > Pipelines [dim]({self._age_label()})[/dim]"
+
+    def compose(self) -> ComposeResult:
+        yield Breadcrumb(self._breadcrumb_text(), id="breadcrumb")
         yield Container(
             Input(placeholder="/  filter pipelines...", id="pipeline-filter"),
             id="filter-bar",
         )
         yield DataTable(id="pipeline-table")
         yield KeyBar(
-            "  q back  /  filter  r refresh  b browser  y copy url  enter jobs",
+            "  q back  /  filter  r refresh  t age  b browser  y copy url  enter jobs",
             id="keybar",
         )
 
@@ -388,8 +488,11 @@ class PipelineListScreen(ScreenBase):
         table.focus()
         self._refresh_timer = self.set_interval(10, self._safe_refresh)
 
+    def _refresh_breadcrumb(self) -> None:
+        self.query_one("#breadcrumb", Breadcrumb).update(self._breadcrumb_text())
+
     async def load_pipelines(self) -> None:
-        self.pipelines = await asyncio.to_thread(self.api.get_recent_pipelines)
+        self.pipelines = await asyncio.to_thread(self.api.get_recent_pipelines, 50, None, None, self.age_days)
         self._apply_filter()
 
     async def _safe_refresh(self) -> None:
@@ -457,6 +560,16 @@ class PipelineListScreen(ScreenBase):
 
     async def action_search(self) -> None:
         self.query_one("#pipeline-filter", Input).focus()
+
+    async def action_toggle_age(self) -> None:
+        try:
+            idx = PIPELINE_AGE_CYCLE.index(self.age_days)
+        except ValueError:
+            idx = -1
+        self.age_days = PIPELINE_AGE_CYCLE[(idx + 1) % len(PIPELINE_AGE_CYCLE)]
+        self._refresh_breadcrumb()
+        self.notify(f"Showing pipelines: {self._age_label()}", timeout=2)
+        await self.load_pipelines()
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         idx = event.cursor_row
@@ -635,10 +748,7 @@ class JobDetailScreen(ScreenBase):
         jid = self.job['id']
         yield Breadcrumb(f"  Job [bold]#{jid}[/bold] [dim]{name}[/dim]", id="breadcrumb")
         yield Static("", id="job-info-bar")
-        yield ScrollableContainer(
-            RichLog(id="job-log", wrap=True, max_lines=MAX_LOG_LINES),
-            id="log-container",
-        )
+        yield RichLog(id="job-log", wrap=True, max_lines=MAX_LOG_LINES)
         yield KeyBar(
             "  q back  r refresh  b browser  f failures only  y copy",
             id="keybar",
@@ -649,7 +759,11 @@ class JobDetailScreen(ScreenBase):
         status = self.job.get('status', '?')
         dur = format_duration(self.job.get('duration'))
         style, label = STATUS_STYLES.get(status, ('', f' {status} '))
-        bar.update(f"  Status: [{style}]{label}[/]  Duration: [bold]{dur}[/bold]")
+        if self._refresh_timer is not None:
+            auto = "[#a6e3a1]auto-refresh: 5s[/]"
+        else:
+            auto = "[dim]auto-refresh: off[/]"
+        bar.update(f"  Status: [{style}]{label}[/]  Duration: [bold]{dur}[/bold]  {auto}")
 
     async def on_mount(self) -> None:
         await self.load_trace()
@@ -665,11 +779,11 @@ class JobDetailScreen(ScreenBase):
             fresh = await asyncio.to_thread(self.api.get_job, self.job['id'])
             if fresh:
                 self.job = fresh
-            self._update_info_bar()
             await self._append_new_trace()
             if self.job.get('status') in TERMINAL_STATUSES and self._refresh_timer:
                 self._refresh_timer.stop()
                 self._refresh_timer = None
+            self._update_info_bar()
         except Exception:
             pass
         finally:
@@ -767,10 +881,7 @@ class FailedJobsScreen(ScreenBase):
     def compose(self) -> ComposeResult:
         pid = self.pipeline['id']
         yield Breadcrumb(f"  Pipeline [bold]#{pid}[/bold] > Failed Jobs", id="breadcrumb")
-        yield ScrollableContainer(
-            RichLog(id="failures-log", wrap=True, max_lines=MAX_LOG_LINES),
-            id="log-container",
-        )
+        yield RichLog(id="failures-log", wrap=True, max_lines=MAX_LOG_LINES)
         yield KeyBar("  q back  y copy", id="keybar")
 
     async def on_mount(self) -> None:
@@ -882,15 +993,12 @@ class PipelineMonitor(App):
         color: #cdd6f4;
     }
 
-    #log-container {
-        background: #11111b;
-        padding: 1 2;
-        height: 1fr;
-    }
-
     RichLog {
         background: #11111b;
         color: #cdd6f4;
+        padding: 1 2;
+        height: 1fr;
+        scrollbar-size: 1 1;
     }
 
     #info-container {
@@ -917,10 +1025,11 @@ class PipelineMonitor(App):
     }
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, default_age_days=DEFAULT_PIPELINE_AGE_DAYS):
         super().__init__()
         self.config = config
         self.api = GitLabAPI(config)
+        self.default_age_days = default_age_days
 
     def action_quit(self) -> None:
         self.exit()
@@ -933,13 +1042,22 @@ class PipelineMonitor(App):
     async def _finish_loading(self) -> None:
         await asyncio.to_thread(self.api.connect_project)
         if self.api.project:
-            self.switch_screen(PipelineListScreen(self.api))
+            self.switch_screen(PipelineListScreen(self.api, age_days=self.default_age_days))
         else:
-            self.switch_screen(ProjectSelectScreen(self.api))
+            self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
 
 
 def main():
+    parser = argparse.ArgumentParser(prog="glmon", description="GitLab pipeline monitor TUI")
+    parser.add_argument("-p", "--project", help="Project path (group/project) to jump into directly")
+    parser.add_argument("--days", type=int, default=DEFAULT_PIPELINE_AGE_DAYS,
+                        help=f"Default pipeline age window in days (default {DEFAULT_PIPELINE_AGE_DAYS})")
+    args = parser.parse_args()
+
     config = Config()
+    if args.project:
+        config._config['project_path'] = args.project
+
     valid, message = config.validate()
     if not valid:
         print(f"Error: {message}", file=sys.stderr)
@@ -948,8 +1066,10 @@ def main():
         print("  export GITLAB_TOKEN=your_personal_access_token")
         print("\nOptional (skips project picker):")
         print("  export GITLAB_PROJECT=group/project")
+        print("  --project group/project")
         sys.exit(1)
-    app = PipelineMonitor(config)
+
+    app = PipelineMonitor(config, default_age_days=args.days)
     app.run()
 
 
