@@ -177,6 +177,31 @@ class KeyBar(Static):
     pass
 
 
+class StatusBar(Static):
+    def set_text(self, text) -> None:
+        self.update(text)
+
+
+def _status_line(parts):
+    """Render footer line. parts: list of (label, value) or strings."""
+    t = Text()
+    sep = Text("  |  ", style="#585b70")
+    first = True
+    for p in parts:
+        if not p:
+            continue
+        if not first:
+            t.append_text(sep)
+        first = False
+        if isinstance(p, tuple):
+            label, value = p
+            t.append(f"{label}: ", style="#6c7086")
+            t.append(str(value), style="bold #cdd6f4")
+        else:
+            t.append(str(p), style="#cdd6f4")
+    return t
+
+
 class ScreenBase(Screen):
     """base screen that routes single-char keys only when input is not focused"""
 
@@ -289,6 +314,22 @@ class GitLabAPI:
                 'web_url': p.web_url,
             })
         return results
+
+    def get_pipeline_detail(self, pipeline_id):
+        try:
+            p = self.project.pipelines.get(pipeline_id)
+            user = getattr(p, 'user', None) or {}
+            return {
+                'duration': getattr(p, 'duration', None),
+                'queued_duration': getattr(p, 'queued_duration', None),
+                'started_at': getattr(p, 'started_at', None),
+                'finished_at': getattr(p, 'finished_at', None),
+                'source': getattr(p, 'source', None),
+                'coverage': getattr(p, 'coverage', None),
+                'user': user.get('username') if isinstance(user, dict) else getattr(user, 'username', None),
+            }
+        except Exception:
+            return {}
 
     def get_pipeline_jobs(self, pipeline_id):
         try:
@@ -406,6 +447,26 @@ class ProjectSelectScreen(ScreenBase):
             id="filter-bar",
         )
         yield DataTable(id="project-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _status_text(self):
+        total = len(getattr(self, 'projects', []) or [])
+        text_filter = ""
+        try:
+            text_filter = self.query_one("#project-search", Input).value.strip()
+        except Exception:
+            pass
+        mode = "favorites" if self.mode == "fav" else "all"
+        parts = [f"{total} projects", ("view", mode)]
+        if text_filter:
+            parts.append(("filter", text_filter))
+        return _status_line(parts)
+
+    def _refresh_status(self) -> None:
+        try:
+            self.query_one("#statusbar", StatusBar).set_text(self._status_text())
+        except Exception:
+            pass
 
     def _info_pairs(self):
         mode_label = "Favorites only" if self.mode == "fav" else "All projects"
@@ -464,6 +525,7 @@ class ProjectSelectScreen(ScreenBase):
                 Text(desc, style="dim"),
                 Text(age, style="dim italic"),
             )
+        self._refresh_status()
 
     def _schedule_search(self) -> None:
         if self._search_timer is not None:
@@ -578,6 +640,27 @@ class PipelineListScreen(ScreenBase):
             id="filter-bar",
         )
         yield DataTable(id="pipeline-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _status_text(self):
+        total = len(getattr(self, 'pipelines', []) or [])
+        shown = len(getattr(self, 'filtered_pipelines', []) or [])
+        text_filter = ""
+        try:
+            text_filter = self.query_one("#pipeline-filter", Input).value.strip()
+        except Exception:
+            pass
+        count = f"{shown}/{total} pipelines" if shown != total else f"{total} pipelines"
+        parts = [count, ("scope", self._age_label())]
+        if text_filter:
+            parts.append(("filter", text_filter))
+        return _status_line(parts)
+
+    def _refresh_status(self) -> None:
+        try:
+            self.query_one("#statusbar", StatusBar).set_text(self._status_text())
+        except Exception:
+            pass
 
     async def on_mount(self) -> None:
         table = self.query_one("#pipeline-table", DataTable)
@@ -624,6 +707,7 @@ class PipelineListScreen(ScreenBase):
         else:
             self.filtered_pipelines = self.pipelines
         self._update_table()
+        self._refresh_status()
 
     def _update_table(self) -> None:
         table = self.query_one("#pipeline-table", DataTable)
@@ -712,13 +796,34 @@ class JobListScreen(ScreenBase):
         jobs_label = str(len(getattr(self, 'jobs', []) or []))
         if self.status_filter:
             jobs_label = f"{len(self.filtered_jobs)}/{jobs_label}  ({self.status_filter})"
-        return [
+        p = self.pipeline
+        pairs = [
             ("GitLab", self.api.config.gitlab_url),
             ("Project", self.api.project_name or "project"),
-            ("Pipeline", f"#{self.pipeline['id']}  {self.pipeline['status']}"),
-            ("Branch", self.pipeline['ref'][:40]),
+            ("Pipeline", f"#{p['id']}  {p['status']}"),
+            ("Branch", p['ref'][:40]),
             ("Jobs", jobs_label),
         ]
+        dur = p.get('duration')
+        if dur is not None:
+            qd = p.get('queued_duration')
+            label = format_duration(dur)
+            if qd:
+                label = f"{label}  (queued {format_duration(qd)})"
+            pairs.append(("Duration", label))
+        started = p.get('started_at')
+        if started:
+            pairs.append(("Started", format_age(started)))
+        user = p.get('user')
+        if user:
+            pairs.append(("User", user))
+        source = p.get('source')
+        if source:
+            pairs.append(("Source", source))
+        coverage = p.get('coverage')
+        if coverage is not None:
+            pairs.append(("Coverage", f"{coverage}%"))
+        return pairs
 
     def _keys(self):
         status_label = f"status:{self.status_filter}" if self.status_filter else "status"
@@ -740,6 +845,29 @@ class JobListScreen(ScreenBase):
             id="filter-bar",
         )
         yield DataTable(id="job-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _status_text(self):
+        total = len(getattr(self, 'jobs', []) or [])
+        shown = len(getattr(self, 'filtered_jobs', []) or [])
+        text_filter = ""
+        try:
+            text_filter = self.query_one("#job-filter", Input).value.strip()
+        except Exception:
+            pass
+        count = f"{shown}/{total} jobs" if shown != total else f"{total} jobs"
+        parts = [count]
+        if self.status_filter:
+            parts.append(("status", self.status_filter))
+        if text_filter:
+            parts.append(("filter", text_filter))
+        return _status_line(parts)
+
+    def _refresh_status(self) -> None:
+        try:
+            self.query_one("#statusbar", StatusBar).set_text(self._status_text())
+        except Exception:
+            pass
 
     async def on_mount(self) -> None:
         table = self.query_one("#job-table", DataTable)
@@ -750,7 +878,13 @@ class JobListScreen(ScreenBase):
         self._refresh_timer = self.set_interval(10, self._safe_refresh)
 
     async def load_jobs(self) -> None:
-        self.jobs = await asyncio.to_thread(self.api.get_pipeline_jobs, self.pipeline['id'])
+        jobs, detail = await asyncio.gather(
+            asyncio.to_thread(self.api.get_pipeline_jobs, self.pipeline['id']),
+            asyncio.to_thread(self.api.get_pipeline_detail, self.pipeline['id']),
+        )
+        self.jobs = jobs
+        if detail:
+            self.pipeline.update(detail)
         order = self.STAGE_ORDER
         self.jobs.sort(key=lambda j: (
             order.index(j['stage']) if j['stage'] in order else len(order),
@@ -778,6 +912,7 @@ class JobListScreen(ScreenBase):
         else:
             self.filtered_jobs = jobs
         self._update_table()
+        self._refresh_status()
 
     def _update_table(self) -> None:
         table = self.query_one("#job-table", DataTable)
@@ -1037,6 +1172,10 @@ class FailedJobsScreen(ScreenBase):
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield RichLog(id="failures-log", wrap=True, max_lines=MAX_LOG_LINES)
+        yield StatusBar(
+            _status_line([f"{len(self.failed_jobs)} failed jobs", ("pipeline", f"#{self.pipeline['id']}")]),
+            id="statusbar",
+        )
 
     async def on_mount(self) -> None:
         await self.load_failures()
@@ -1129,6 +1268,14 @@ class PipelineMonitor(App):
         background: #313244;
         color: #a6adc8;
         padding: 0 0;
+    }
+
+    #statusbar {
+        dock: bottom;
+        height: 1;
+        background: #313244;
+        color: #a6adc8;
+        padding: 0 1;
     }
 
     DataTable {
