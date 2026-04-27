@@ -531,19 +531,21 @@ class ProjectSelectScreen(ScreenBase):
             project = self.projects[idx]
             self.api.set_project(project['path'])
             age = getattr(self.app, 'default_age_days', DEFAULT_PIPELINE_AGE_DAYS)
-            self.app.push_screen(PipelineListScreen(self.api, age_days=age))
+            initial_filter = getattr(self.app, 'default_branch_filter', '') or ''
+            self.app.push_screen(PipelineListScreen(self.api, age_days=age, initial_filter=initial_filter))
 
 
 class PipelineListScreen(ScreenBase):
 
     KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age"}
 
-    def __init__(self, api: GitLabAPI, age_days=DEFAULT_PIPELINE_AGE_DAYS):
+    def __init__(self, api: GitLabAPI, age_days=DEFAULT_PIPELINE_AGE_DAYS, initial_filter: str = ""):
         super().__init__()
         self.api = api
         self.pipelines = []
         self.filtered_pipelines = []
         self.age_days = age_days
+        self.initial_filter = initial_filter or ""
         self._refresh_timer = None
         self._refreshing = False
 
@@ -572,7 +574,7 @@ class PipelineListScreen(ScreenBase):
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Container(
-            Input(placeholder="/  filter pipelines...", id="pipeline-filter"),
+            Input(value=self.initial_filter, placeholder="/  filter pipelines...", id="pipeline-filter"),
             id="filter-bar",
         )
         yield DataTable(id="pipeline-table")
@@ -690,9 +692,11 @@ class PipelineListScreen(ScreenBase):
 
 class JobListScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "f": "failures", "y": "yank"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "f": "failures", "s": "toggle_status", "y": "yank"}
 
     STAGE_ORDER = ['build', 'test', 'deploy', 'cleanup']
+
+    STATUS_CYCLE = [None, 'running', 'pending']
 
     def __init__(self, api: GitLabAPI, pipeline: dict):
         super().__init__()
@@ -700,25 +704,31 @@ class JobListScreen(ScreenBase):
         self.pipeline = pipeline
         self.jobs = []
         self.filtered_jobs = []
+        self.status_filter = None
         self._refresh_timer = None
         self._refreshing = False
 
     def _info_pairs(self):
+        jobs_label = str(len(getattr(self, 'jobs', []) or []))
+        if self.status_filter:
+            jobs_label = f"{len(self.filtered_jobs)}/{jobs_label}  ({self.status_filter})"
         return [
             ("GitLab", self.api.config.gitlab_url),
             ("Project", self.api.project_name or "project"),
             ("Pipeline", f"#{self.pipeline['id']}  {self.pipeline['status']}"),
             ("Branch", self.pipeline['ref'][:40]),
-            ("Jobs", str(len(getattr(self, 'jobs', []) or []))),
+            ("Jobs", jobs_label),
         ]
 
     def _keys(self):
+        status_label = f"status:{self.status_filter}" if self.status_filter else "status"
         return [
             ("q", "back"),
             ("/", "filter"),
             ("r", "refresh"),
             ("b", "browser"),
             ("f", "failures"),
+            ("s", status_label),
             ("y", "copy url"),
             ("enter", "logs"),
         ]
@@ -754,16 +764,19 @@ class JobListScreen(ScreenBase):
 
     def _apply_filter(self) -> None:
         query = self.query_one("#job-filter", Input).value.strip().lower()
+        jobs = self.jobs
+        if self.status_filter:
+            jobs = [j for j in jobs if j['status'] == self.status_filter]
         if query:
             self.filtered_jobs = [
-                j for j in self.jobs
+                j for j in jobs
                 if query in j['name'].lower()
                 or query in j['stage'].lower()
                 or query in j['status'].lower()
                 or query in str(j['id'])
             ]
         else:
-            self.filtered_jobs = self.jobs
+            self.filtered_jobs = jobs
         self._update_table()
 
     def _update_table(self) -> None:
@@ -832,6 +845,17 @@ class JobListScreen(ScreenBase):
         failed = [j for j in self.jobs if j['status'] == 'failed']
         if failed:
             self.app.push_screen(FailedJobsScreen(self.api, self.pipeline, failed))
+
+    async def action_toggle_status(self) -> None:
+        idx = self.STATUS_CYCLE.index(self.status_filter)
+        self.status_filter = self.STATUS_CYCLE[(idx + 1) % len(self.STATUS_CYCLE)]
+        self._apply_filter()
+        try:
+            header = self.query_one("#header", K9sHeader)
+            header.set_keys(self._keys())
+            header.set_info(self._info_pairs())
+        except Exception:
+            pass
 
     async def action_yank(self) -> None:
         table = self.query_one("#job-table", DataTable)
@@ -1147,11 +1171,12 @@ class PipelineMonitor(App):
     }
     """
 
-    def __init__(self, config: Config, default_age_days=DEFAULT_PIPELINE_AGE_DAYS):
+    def __init__(self, config: Config, default_age_days=DEFAULT_PIPELINE_AGE_DAYS, default_branch_filter: str = ""):
         super().__init__()
         self.config = config
         self.api = GitLabAPI(config)
         self.default_age_days = default_age_days
+        self.default_branch_filter = default_branch_filter or ""
 
     def action_quit(self) -> None:
         self.exit()
@@ -1164,9 +1189,24 @@ class PipelineMonitor(App):
     async def _finish_loading(self) -> None:
         await asyncio.to_thread(self.api.connect_project)
         if self.api.project:
-            self.switch_screen(PipelineListScreen(self.api, age_days=self.default_age_days))
+            self.switch_screen(PipelineListScreen(
+                self.api,
+                age_days=self.default_age_days,
+                initial_filter=self.default_branch_filter,
+            ))
         else:
             self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
+
+
+def _detect_cwd_branch() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return ""
 
 
 def main():
@@ -1174,7 +1214,19 @@ def main():
     parser.add_argument("-p", "--project", help="Project path (group/project) to jump into directly")
     parser.add_argument("--days", type=int, default=DEFAULT_PIPELINE_AGE_DAYS,
                         help=f"Default pipeline age window in days (default {DEFAULT_PIPELINE_AGE_DAYS})")
+    parser.add_argument("-b", "--branch",
+                        help="Pre-fill pipeline filter with this branch (clearable in the UI)")
+    parser.add_argument("-B", "--cwd-branch", action="store_true",
+                        help="Pre-fill pipeline filter with current git branch from CWD")
     args = parser.parse_args()
+
+    branch_filter = ""
+    if args.branch:
+        branch_filter = args.branch.strip()
+    elif args.cwd_branch:
+        branch_filter = _detect_cwd_branch()
+        if not branch_filter:
+            print("Warning: --cwd-branch set but no git branch detected in CWD", file=sys.stderr)
 
     config = Config()
     if args.project:
@@ -1191,7 +1243,7 @@ def main():
         print("  --project group/project")
         sys.exit(1)
 
-    app = PipelineMonitor(config, default_age_days=args.days)
+    app = PipelineMonitor(config, default_age_days=args.days, default_branch_filter=branch_filter)
     app.run()
 
 
