@@ -3,6 +3,7 @@
 # https://github.com/bearded-giant/gitlab-tools
 # Licensed under Apache License 2.0
 
+import os
 import sys
 import argparse
 import subprocess
@@ -24,6 +25,23 @@ from .config import Config
 # pipeline age filter cycle: 3d -> 7d -> 30d -> all (None)
 PIPELINE_AGE_CYCLE = [3, 7, 30, None]
 DEFAULT_PIPELINE_AGE_DAYS = 3
+
+
+def _env_int(name, default):
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        return default
+
+
+PIPELINE_REFRESH_INTERVAL = _env_int('GLMON_PIPELINE_REFRESH_INTERVAL', 10)
+JOB_REFRESH_INTERVAL = _env_int('GLMON_JOB_REFRESH_INTERVAL', 10)
+LOG_META_REFRESH_INTERVAL = _env_int('GLMON_LOG_REFRESH_INTERVAL', 5)
+LOG_TRACE_REFRESH_INTERVAL = _env_int('GLMON_TRACE_REFRESH_INTERVAL', 20)
+LOG_FETCH_TIMEOUT = _env_int('GLMON_FETCH_TIMEOUT', 30)
 
 
 def copy_to_clipboard(text):
@@ -703,7 +721,7 @@ class PipelineListScreen(ScreenBase):
         except Exception:
             pass
 
-    REFRESH_INTERVAL = 10
+    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
     async def on_mount(self) -> None:
         table = self.query_one("#pipeline-table", DataTable)
@@ -921,7 +939,7 @@ class JobListScreen(ScreenBase):
         except Exception:
             pass
 
-    REFRESH_INTERVAL = 10
+    REFRESH_INTERVAL = JOB_REFRESH_INTERVAL
 
     async def on_mount(self) -> None:
         table = self.query_one("#job-table", DataTable)
@@ -1069,10 +1087,13 @@ class JobDetailScreen(ScreenBase):
         self.trace_lines_written = 0
         self.failures = []
         self._refresh_timer = None
-        self._refreshing = False
+        self._trace_timer = None
+        self._refreshing_meta = False
+        self._refreshing_trace = False
 
-    REFRESH_INTERVAL = 5
-    FETCH_TIMEOUT = 8
+    REFRESH_INTERVAL = LOG_META_REFRESH_INTERVAL
+    TRACE_INTERVAL = LOG_TRACE_REFRESH_INTERVAL
+    FETCH_TIMEOUT = LOG_FETCH_TIMEOUT
 
     def _info_pairs(self):
         status = self.job.get('status', '?')
@@ -1105,13 +1126,28 @@ class JobDetailScreen(ScreenBase):
         try:
             sb = self.query_one("#statusbar", StatusBar)
             sb.set_text(self._status_text())
-            sb.set_right(_auto_refresh_indicator(
-                self.REFRESH_INTERVAL,
-                active=self._refresh_timer is not None,
-                refreshing=self._refreshing,
-            ))
+            sb.set_right(self._build_refresh_indicator())
         except Exception:
             pass
+
+    def _build_refresh_indicator(self):
+        active = self._refresh_timer is not None
+        refreshing = self._refreshing_meta or self._refreshing_trace
+        t = Text()
+        if not active:
+            t.append("auto-refresh: ", style="#6c7086")
+            t.append("off", style="bold #f38ba8")
+            return t
+        if refreshing:
+            t.append("⟳ ", style="bold #f9e2af")
+            t.append("refreshing", style="bold #f9e2af")
+            return t
+        t.append("↻ ", style="#a6e3a1")
+        t.append("status ", style="#6c7086")
+        t.append(f"{self.REFRESH_INTERVAL}s", style="bold #a6e3a1")
+        t.append(" · log ", style="#6c7086")
+        t.append(f"{self.TRACE_INTERVAL}s", style="bold #a6e3a1")
+        return t
 
     def _update_info_bar(self) -> None:
         try:
@@ -1123,13 +1159,24 @@ class JobDetailScreen(ScreenBase):
     async def on_mount(self) -> None:
         await self.load_trace()
         if self.job.get('status') not in TERMINAL_STATUSES:
-            self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._auto_refresh)
+            self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._refresh_meta)
+            self._trace_timer = self.set_interval(self.TRACE_INTERVAL, self._refresh_trace)
         self._update_info_bar()
 
-    async def _auto_refresh(self) -> None:
-        if self._refreshing:
+    def _stop_timers_if_terminal(self) -> None:
+        if self.job.get('status') not in TERMINAL_STATUSES:
             return
-        self._refreshing = True
+        if self._refresh_timer:
+            self._refresh_timer.stop()
+            self._refresh_timer = None
+        if self._trace_timer:
+            self._trace_timer.stop()
+            self._trace_timer = None
+
+    async def _refresh_meta(self) -> None:
+        if self._refreshing_meta:
+            return
+        self._refreshing_meta = True
         self._refresh_status()
         try:
             try:
@@ -1142,15 +1189,23 @@ class JobDetailScreen(ScreenBase):
             except Exception:
                 pass
             self._update_info_bar()
+            self._stop_timers_if_terminal()
+        finally:
+            self._refreshing_meta = False
+            self._refresh_status()
+
+    async def _refresh_trace(self) -> None:
+        if self._refreshing_trace:
+            return
+        self._refreshing_trace = True
+        self._refresh_status()
+        try:
             try:
                 await asyncio.wait_for(self._append_new_trace(), timeout=self.FETCH_TIMEOUT)
             except Exception:
                 pass
-            if self.job.get('status') in TERMINAL_STATUSES and self._refresh_timer:
-                self._refresh_timer.stop()
-                self._refresh_timer = None
         finally:
-            self._refreshing = False
+            self._refreshing_trace = False
             self._refresh_status()
 
     def _write_trace_line(self, log, line) -> None:
@@ -1199,6 +1254,8 @@ class JobDetailScreen(ScreenBase):
     def on_unmount(self) -> None:
         if self._refresh_timer:
             self._refresh_timer.stop()
+        if self._trace_timer:
+            self._trace_timer.stop()
 
     async def action_back(self) -> None:
         self.app.pop_screen()

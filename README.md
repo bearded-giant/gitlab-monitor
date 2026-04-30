@@ -31,6 +31,19 @@ export GITLAB_PROJECT=group/project         # skip project picker, go straight t
 export GITLAB_REFRESH_INTERVAL=30           # seconds between auto-refresh (default: 30)
 ```
 
+#### Refresh Tuning (per-view, optional)
+Override default refresh cadences for each view. Useful when GitLab traces are large and the log view auto-refresh appears stalled — bump `GLMON_FETCH_TIMEOUT` and/or `GLMON_TRACE_REFRESH_INTERVAL` so the trace GET completes before the next tick.
+
+```bash
+export GLMON_PIPELINE_REFRESH_INTERVAL=10   # pipeline list refresh (default: 10s)
+export GLMON_JOB_REFRESH_INTERVAL=10        # job list refresh (default: 10s)
+export GLMON_LOG_REFRESH_INTERVAL=5         # log view: status/duration meta tick (default: 5s)
+export GLMON_TRACE_REFRESH_INTERVAL=20      # log view: trace fetch cadence (default: 20s)
+export GLMON_FETCH_TIMEOUT=30               # per-fetch timeout in log view (default: 30s)
+```
+
+The log view splits refresh into a fast meta tick (job status + duration via small JSON GET) and a slower trace tick (full job log download). This keeps duration current at low cost while avoiding overlapping multi-MB trace fetches that would lock the auto-refresh.
+
 ### Config File (Optional)
 Configuration can also be stored in `~/.config/gitlab-monitor/config.json`:
 ```json
