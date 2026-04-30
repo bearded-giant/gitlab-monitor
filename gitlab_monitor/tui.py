@@ -177,9 +177,44 @@ class KeyBar(Static):
     pass
 
 
-class StatusBar(Static):
+class StatusBar(Horizontal):
+    def __init__(self, left=None, right=None, **kw):
+        super().__init__(**kw)
+        self._initial_left = left or ""
+        self._initial_right = right or ""
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._initial_left, id="status-left")
+        yield Static(self._initial_right, id="status-right")
+
     def set_text(self, text) -> None:
-        self.update(text)
+        try:
+            self.query_one("#status-left", Static).update(text)
+        except Exception:
+            self._initial_left = text
+
+    def set_right(self, text) -> None:
+        try:
+            self.query_one("#status-right", Static).update(text)
+        except Exception:
+            self._initial_right = text
+
+
+def _auto_refresh_indicator(interval_seconds, active=True, refreshing=False):
+    """Build right-side status text showing auto-refresh state."""
+    t = Text()
+    if not active or interval_seconds is None:
+        t.append("auto-refresh: ", style="#6c7086")
+        t.append("off", style="bold #f38ba8")
+        return t
+    if refreshing:
+        t.append("⟳ ", style="bold #f9e2af")
+        t.append("refreshing", style="bold #f9e2af")
+    else:
+        t.append("↻ ", style="#a6e3a1")
+        t.append("auto-refresh: ", style="#6c7086")
+        t.append(f"{interval_seconds}s", style="bold #a6e3a1")
+    return t
 
 
 def _status_line(parts):
@@ -658,9 +693,17 @@ class PipelineListScreen(ScreenBase):
 
     def _refresh_status(self) -> None:
         try:
-            self.query_one("#statusbar", StatusBar).set_text(self._status_text())
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(self._status_text())
+            sb.set_right(_auto_refresh_indicator(
+                self.REFRESH_INTERVAL,
+                active=self._refresh_timer is not None,
+                refreshing=self._refreshing,
+            ))
         except Exception:
             pass
+
+    REFRESH_INTERVAL = 10
 
     async def on_mount(self) -> None:
         table = self.query_one("#pipeline-table", DataTable)
@@ -668,7 +711,8 @@ class PipelineListScreen(ScreenBase):
         table.cursor_type = "row"
         await self.load_pipelines()
         table.focus()
-        self._refresh_timer = self.set_interval(10, self._safe_refresh)
+        self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
+        self._refresh_status()
 
     def _refresh_breadcrumb(self) -> None:
         self.query_one("#header", K9sHeader).set_info(self._info_pairs())
@@ -682,12 +726,14 @@ class PipelineListScreen(ScreenBase):
         if self._refreshing:
             return
         self._refreshing = True
+        self._refresh_status()
         try:
             await self.load_pipelines()
         except Exception:
             pass
         finally:
             self._refreshing = False
+            self._refresh_status()
 
     def on_unmount(self) -> None:
         if self._refresh_timer:
@@ -865,9 +911,17 @@ class JobListScreen(ScreenBase):
 
     def _refresh_status(self) -> None:
         try:
-            self.query_one("#statusbar", StatusBar).set_text(self._status_text())
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(self._status_text())
+            sb.set_right(_auto_refresh_indicator(
+                self.REFRESH_INTERVAL,
+                active=self._refresh_timer is not None,
+                refreshing=self._refreshing,
+            ))
         except Exception:
             pass
+
+    REFRESH_INTERVAL = 10
 
     async def on_mount(self) -> None:
         table = self.query_one("#job-table", DataTable)
@@ -875,7 +929,8 @@ class JobListScreen(ScreenBase):
         table.cursor_type = "row"
         await self.load_jobs()
         table.focus()
-        self._refresh_timer = self.set_interval(10, self._safe_refresh)
+        self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
+        self._refresh_status()
 
     async def load_jobs(self) -> None:
         jobs, detail = await asyncio.gather(
@@ -937,12 +992,14 @@ class JobListScreen(ScreenBase):
         if self._refreshing:
             return
         self._refreshing = True
+        self._refresh_status()
         try:
             await self.load_jobs()
         except Exception:
             pass
         finally:
             self._refreshing = False
+            self._refresh_status()
 
     def on_unmount(self) -> None:
         if self._refresh_timer:
@@ -1014,16 +1071,16 @@ class JobDetailScreen(ScreenBase):
         self._refresh_timer = None
         self._refreshing = False
 
+    REFRESH_INTERVAL = 5
+    FETCH_TIMEOUT = 8
+
     def _info_pairs(self):
         status = self.job.get('status', '?')
-        dur = format_duration(self.job.get('duration'))
-        auto = "5s" if self._refresh_timer is not None else "off"
         return [
             ("GitLab", self.api.config.gitlab_url),
             ("Project", self.api.project_name or "project"),
             ("Job", f"#{self.job['id']}  {self.job['name']}"),
-            ("Status", f"{status}  ({dur})"),
-            ("Auto-refresh", auto),
+            ("Status", status),
         ]
 
     def _keys(self):
@@ -1038,36 +1095,63 @@ class JobDetailScreen(ScreenBase):
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield RichLog(id="job-log", wrap=True, max_lines=MAX_LOG_LINES)
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _status_text(self):
+        dur = format_duration(self.job.get('duration'))
+        return _status_line([("duration", dur)])
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(self._status_text())
+            sb.set_right(_auto_refresh_indicator(
+                self.REFRESH_INTERVAL,
+                active=self._refresh_timer is not None,
+                refreshing=self._refreshing,
+            ))
+        except Exception:
+            pass
 
     def _update_info_bar(self) -> None:
         try:
             self.query_one("#header", K9sHeader).set_info(self._info_pairs())
         except Exception:
             pass
+        self._refresh_status()
 
     async def on_mount(self) -> None:
         await self.load_trace()
-        self._update_info_bar()
         if self.job.get('status') not in TERMINAL_STATUSES:
-            self._refresh_timer = self.set_interval(5, self._auto_refresh)
+            self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._auto_refresh)
+        self._update_info_bar()
 
     async def _auto_refresh(self) -> None:
         if self._refreshing:
             return
         self._refreshing = True
+        self._refresh_status()
         try:
-            fresh = await asyncio.to_thread(self.api.get_job, self.job['id'])
-            if fresh:
-                self.job = fresh
-            await self._append_new_trace()
+            try:
+                fresh = await asyncio.wait_for(
+                    asyncio.to_thread(self.api.get_job, self.job['id']),
+                    timeout=self.FETCH_TIMEOUT,
+                )
+                if fresh:
+                    self.job = fresh
+            except Exception:
+                pass
+            self._update_info_bar()
+            try:
+                await asyncio.wait_for(self._append_new_trace(), timeout=self.FETCH_TIMEOUT)
+            except Exception:
+                pass
             if self.job.get('status') in TERMINAL_STATUSES and self._refresh_timer:
                 self._refresh_timer.stop()
                 self._refresh_timer = None
-            self._update_info_bar()
-        except Exception:
-            pass
         finally:
             self._refreshing = False
+            self._refresh_status()
 
     def _write_trace_line(self, log, line) -> None:
         if any(kw in line.lower() for kw in ['error', 'failed', 'exception']):
@@ -1276,6 +1360,19 @@ class PipelineMonitor(App):
         background: #313244;
         color: #a6adc8;
         padding: 0 1;
+    }
+
+    #statusbar #status-left {
+        width: 1fr;
+        background: #313244;
+        color: #a6adc8;
+    }
+
+    #statusbar #status-right {
+        width: auto;
+        background: #313244;
+        color: #a6adc8;
+        content-align: right middle;
     }
 
     DataTable {
