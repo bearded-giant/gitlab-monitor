@@ -15,7 +15,7 @@ import asyncio
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Static, Input, RichLog
 from textual.containers import Container, Horizontal
-from textual.screen import Screen
+from textual.screen import Screen, ModalScreen
 from textual.binding import Binding
 from rich.text import Text
 
@@ -384,6 +384,11 @@ class GitLabAPI:
         except Exception:
             return {}
 
+    def cancel_pipeline(self, pipeline_id):
+        pipeline = self.project.pipelines.get(pipeline_id)
+        pipeline.cancel()
+        return pipeline.status
+
     def get_pipeline_jobs(self, pipeline_id):
         try:
             pipeline = self.project.pipelines.get(pipeline_id)
@@ -652,7 +657,7 @@ class ProjectSelectScreen(ScreenBase):
 
 class PipelineListScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel"}
 
     def __init__(self, api: GitLabAPI, age_days=DEFAULT_PIPELINE_AGE_DAYS, initial_filter: str = ""):
         super().__init__()
@@ -683,6 +688,7 @@ class PipelineListScreen(ScreenBase):
             ("t", "age"),
             ("b", "browser"),
             ("y", "copy url"),
+            ("x", "cancel"),
             ("enter", "jobs"),
         ]
 
@@ -836,6 +842,33 @@ class PipelineListScreen(ScreenBase):
             p = self.filtered_pipelines[table.cursor_row]
             if copy_to_clipboard(p['web_url']):
                 self.notify(f"Copied pipeline #{p['id']} URL", timeout=2)
+
+    async def action_cancel(self) -> None:
+        table = self.query_one("#pipeline-table", DataTable)
+        if table.cursor_row is None or table.cursor_row >= len(self.filtered_pipelines):
+            return
+        p = self.filtered_pipelines[table.cursor_row]
+        if p['status'] in TERMINAL_STATUSES:
+            self.notify(f"Pipeline #{p['id']} already {p['status']}", timeout=2)
+            return
+
+        def _after(confirmed):
+            if confirmed:
+                asyncio.ensure_future(self._do_cancel(p))
+
+        modal = ConfirmModal(
+            f"Cancel pipeline #{p['id']}?",
+            detail=f"{p['ref'][:40]}  ({p['status']})",
+        )
+        self.app.push_screen(modal, _after)
+
+    async def _do_cancel(self, pipeline) -> None:
+        try:
+            await asyncio.to_thread(self.api.cancel_pipeline, pipeline['id'])
+            self.notify(f"Cancelled pipeline #{pipeline['id']}", timeout=2)
+            await self.load_pipelines()
+        except Exception as e:
+            self.notify(f"Cancel failed: {e}", severity="error", timeout=3)
 
 
 class JobListScreen(ScreenBase):
@@ -1361,6 +1394,34 @@ class FailedJobsScreen(ScreenBase):
             self.notify("Copy failed", severity="error", timeout=2)
 
 
+# -- modals ------------------------------------------------------------------
+
+class ConfirmModal(ModalScreen[bool]):
+    """y/N confirmation modal. Default N — only y/Y returns True."""
+
+    def __init__(self, message: str, detail: str = ""):
+        super().__init__()
+        self.message = message
+        self.detail = detail
+
+    def compose(self) -> ComposeResult:
+        body = Text()
+        body.append(self.message, style="bold #cdd6f4")
+        if self.detail:
+            body.append("\n")
+            body.append(self.detail, style="#a6adc8")
+        body.append("\n\n")
+        body.append("[y/", style="#a6adc8")
+        body.append("N", style="bold #f9e2af")
+        body.append("]", style="#a6adc8")
+        yield Container(Static(body, id="confirm-text"), id="confirm-box")
+
+    def on_key(self, event) -> None:
+        event.prevent_default()
+        event.stop()
+        self.dismiss(event.key.lower() == "y")
+
+
 # -- app ---------------------------------------------------------------------
 
 class PipelineMonitor(App):
@@ -1469,6 +1530,25 @@ class PipelineMonitor(App):
         height: 1fr;
         background: #1e1e2e;
         color: #89b4fa;
+    }
+
+    ConfirmModal {
+        align: center middle;
+        background: #1e1e2e 60%;
+    }
+
+    #confirm-box {
+        width: 60;
+        height: auto;
+        background: #313244;
+        border: tall #f9e2af;
+        padding: 1 2;
+    }
+
+    #confirm-text {
+        width: 100%;
+        height: auto;
+        color: #cdd6f4;
     }
     """
 
