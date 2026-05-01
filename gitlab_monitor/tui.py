@@ -310,6 +310,13 @@ class GitLabAPI:
         self.project = self.gl.projects.get(project_path)
         self.project_name = project_path
 
+    @staticmethod
+    def _project_activity(p):
+        # GitLab's last_activity_at lags + skips pipeline events; take max with updated_at
+        a = getattr(p, 'last_activity_at', None) or ''
+        u = getattr(p, 'updated_at', None) or ''
+        return max(a, u) or None
+
     def get_projects(self, search=None, per_page=50):
         params = {'per_page': per_page, 'order_by': 'last_activity_at', 'sort': 'desc', 'membership': True}
         if search:
@@ -320,7 +327,7 @@ class GitLabAPI:
             'path': p.path_with_namespace,
             'name': p.name,
             'description': p.description or '',
-            'last_activity': p.last_activity_at,
+            'last_activity': self._project_activity(p),
         } for p in projects]
 
     def get_project_meta(self, project_path):
@@ -331,7 +338,7 @@ class GitLabAPI:
                 'path': p.path_with_namespace,
                 'name': p.name,
                 'description': p.description or '',
-                'last_activity': p.last_activity_at,
+                'last_activity': self._project_activity(p),
             }
         except Exception:
             return None
@@ -565,8 +572,8 @@ class ProjectSelectScreen(ScreenBase):
                 self.projects = await asyncio.to_thread(self.api.get_projects, None)
         else:
             self.projects = await asyncio.to_thread(self.api.get_projects, search)
-            # show favorites first within all-projects view
-            self.projects.sort(key=lambda p: (0 if self.favorites.has(p['path']) else 1))
+        # sort by most recent activity desc (ISO 8601 strings sort lexically)
+        self.projects.sort(key=lambda p: p.get('last_activity') or '', reverse=True)
         self._render_table()
         self._refresh_breadcrumb()
 
@@ -598,6 +605,7 @@ class ProjectSelectScreen(ScreenBase):
             all_favs = await asyncio.to_thread(self.api.get_projects_by_paths, paths)
             q = query.lower()
             self.projects = [p for p in all_favs if q in p['path'].lower() or q in (p['name'] or '').lower()]
+            self.projects.sort(key=lambda p: p.get('last_activity') or '', reverse=True)
             self._render_table()
             return
         await self.load_projects(search=query)
@@ -657,7 +665,9 @@ class ProjectSelectScreen(ScreenBase):
 
 class PipelineListScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel", "s": "toggle_status", "f": "failed"}
+
+    STATUS_CYCLE = [None, 'running', 'pending']
 
     def __init__(self, api: GitLabAPI, age_days=DEFAULT_PIPELINE_AGE_DAYS, initial_filter: str = ""):
         super().__init__()
@@ -666,6 +676,7 @@ class PipelineListScreen(ScreenBase):
         self.filtered_pipelines = []
         self.age_days = age_days
         self.initial_filter = initial_filter or ""
+        self.status_filter = None
         self._refresh_timer = None
         self._refreshing = False
 
@@ -673,19 +684,27 @@ class PipelineListScreen(ScreenBase):
         return f"last {self.age_days}d" if self.age_days is not None else "all"
 
     def _info_pairs(self):
+        total = len(getattr(self, 'pipelines', []) or [])
+        pipelines_label = str(total)
+        if self.status_filter:
+            pipelines_label = f"{len(self.filtered_pipelines)}/{total}  ({self.status_filter})"
         return [
             ("GitLab", self.api.config.gitlab_url),
             ("Project", self.api.project_name or "project"),
             ("Scope", self._age_label()),
-            ("Pipelines", str(len(getattr(self, 'pipelines', []) or []))),
+            ("Pipelines", pipelines_label),
         ]
 
     def _keys(self):
+        status_label = f"status:{self.status_filter}" if self.status_filter else "status"
+        failed_label = "failed*" if self.status_filter == 'failed' else "failed"
         return [
             ("q", "back"),
             ("/", "filter"),
             ("r", "refresh"),
             ("t", "age"),
+            ("s", status_label),
+            ("f", failed_label),
             ("b", "browser"),
             ("y", "copy url"),
             ("x", "cancel"),
@@ -711,6 +730,8 @@ class PipelineListScreen(ScreenBase):
             pass
         count = f"{shown}/{total} pipelines" if shown != total else f"{total} pipelines"
         parts = [count, ("scope", self._age_label())]
+        if self.status_filter:
+            parts.append(("status", self.status_filter))
         if text_filter:
             parts.append(("filter", text_filter))
         return _status_line(parts)
@@ -765,9 +786,12 @@ class PipelineListScreen(ScreenBase):
 
     def _apply_filter(self) -> None:
         query = self.query_one("#pipeline-filter", Input).value.strip().lower()
+        pipelines = self.pipelines
+        if self.status_filter:
+            pipelines = [p for p in pipelines if p['status'] == self.status_filter]
         if query:
             self.filtered_pipelines = [
-                p for p in self.pipelines
+                p for p in pipelines
                 if query in p['ref'].lower()
                 or query in p['status'].lower()
                 or query in p['user'].lower()
@@ -775,7 +799,7 @@ class PipelineListScreen(ScreenBase):
                 or query in p['sha'].lower()
             ]
         else:
-            self.filtered_pipelines = self.pipelines
+            self.filtered_pipelines = pipelines
         self._update_table()
         self._refresh_status()
 
@@ -824,6 +848,28 @@ class PipelineListScreen(ScreenBase):
         self._refresh_breadcrumb()
         self.notify(f"Showing pipelines: {self._age_label()}", timeout=2)
         await self.load_pipelines()
+
+    async def action_toggle_status(self) -> None:
+        try:
+            idx = self.STATUS_CYCLE.index(self.status_filter)
+        except ValueError:
+            idx = -1
+        self.status_filter = self.STATUS_CYCLE[(idx + 1) % len(self.STATUS_CYCLE)]
+        self._apply_filter()
+        self._refresh_header()
+
+    async def action_failed(self) -> None:
+        self.status_filter = None if self.status_filter == 'failed' else 'failed'
+        self._apply_filter()
+        self._refresh_header()
+
+    def _refresh_header(self) -> None:
+        try:
+            header = self.query_one("#header", K9sHeader)
+            header.set_keys(self._keys())
+            header.set_info(self._info_pairs())
+        except Exception:
+            pass
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         idx = event.cursor_row
@@ -1123,6 +1169,7 @@ class JobDetailScreen(ScreenBase):
         self._trace_timer = None
         self._refreshing_meta = False
         self._refreshing_trace = False
+        self._final_trace_done = False
 
     REFRESH_INTERVAL = LOG_META_REFRESH_INTERVAL
     TRACE_INTERVAL = LOG_TRACE_REFRESH_INTERVAL
@@ -1222,10 +1269,35 @@ class JobDetailScreen(ScreenBase):
             except Exception:
                 pass
             self._update_info_bar()
+            # job just went terminal — fetch final trace once before stopping timers
+            if (
+                self.job.get('status') in TERMINAL_STATUSES
+                and not self._final_trace_done
+            ):
+                self._final_trace_done = True
+                await self._final_trace_fetch()
             self._stop_timers_if_terminal()
         finally:
             self._refreshing_meta = False
             self._refresh_status()
+
+    async def _final_trace_fetch(self) -> None:
+        # wait briefly for any in-flight trace refresh to clear so we don't
+        # double-write or skip; bound the wait to FETCH_TIMEOUT
+        deadline_iters = max(1, int(self.FETCH_TIMEOUT * 10))
+        for _ in range(deadline_iters):
+            if not self._refreshing_trace:
+                break
+            await asyncio.sleep(0.1)
+        self._refreshing_trace = True
+        self._refresh_status()
+        try:
+            try:
+                await asyncio.wait_for(self._append_new_trace(), timeout=self.FETCH_TIMEOUT)
+            except Exception:
+                pass
+        finally:
+            self._refreshing_trace = False
 
     async def _refresh_trace(self) -> None:
         if self._refreshing_trace:
