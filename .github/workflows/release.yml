@@ -66,16 +66,14 @@ jobs:
           fi
           grep -q 'GITLAB_URL' smoke.out
 
-      - name: Package artifact
-        run: |
-          cd dist
-          tar -czf glmon-${{ matrix.arch }}-${{ matrix.platform }}.tar.gz glmon
+      - name: Rename binary
+        run: cp dist/glmon/glmon dist/glmon-${{ matrix.arch }}-${{ matrix.platform }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: glmon-${{ matrix.arch }}-${{ matrix.platform }}
-          path: dist/glmon-${{ matrix.arch }}-${{ matrix.platform }}.tar.gz
+          path: dist/glmon-${{ matrix.arch }}-${{ matrix.platform }}
 
   release:
     needs: build
@@ -89,5 +87,5 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.tar.gz
+          files: artifacts/glmon-*
           generate_release_notes: true
