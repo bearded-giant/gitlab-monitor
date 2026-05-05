@@ -51,12 +51,17 @@ jobs:
           # confirm the bootloader starts and exits cleanly without GITLAB_URL set.
           # expected: non-zero exit with the "GITLAB_URL not set" error in under 10s.
           set +e
-          ( cd dist/glmon && timeout 10 ./glmon ) > smoke.out 2>&1
+          ( cd dist/glmon && ./glmon ) > smoke.out 2>&1 &
+          pid=$!
+          ( sleep 10; kill $pid 2>/dev/null ) &
+          guard=$!
+          wait $pid
           status=$?
+          kill $guard 2>/dev/null || true
           set -e
           cat smoke.out
-          if [ "$status" -eq 124 ]; then
-            echo "binary hung for 10s (timeout)" >&2
+          if [ "$status" -eq 143 ]; then
+            echo "binary hung for 10s (killed)" >&2
             exit 1
           fi
           grep -q 'GITLAB_URL' smoke.out
