@@ -17,6 +17,10 @@ jobs:
             arch: aarch64
             platform: apple-darwin
             target_arch: arm64
+          - os: macos-13
+            arch: x86_64
+            platform: apple-darwin
+            target_arch: x86_64
           - os: ubuntu-latest
             arch: x86_64
             platform: unknown-linux-gnu
@@ -43,7 +47,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           file dist/glmon/glmon
-          file dist/glmon/glmon | grep -q 'arm64'
+          file dist/glmon/glmon | grep -q '${{ matrix.target_arch }}'
 
       - name: Smoke test binary
         shell: bash
