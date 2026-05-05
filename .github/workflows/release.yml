@@ -10,22 +10,7 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        include:
-          - os: macos-14
-            arch: aarch64
-            platform: apple-darwin
-            target_arch: arm64
-          - os: macos-13
-            arch: x86_64
-            platform: apple-darwin
-            target_arch: x86_64
-          - os: ubuntu-latest
-            arch: x86_64
-            platform: unknown-linux-gnu
-            target_arch: ""
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
@@ -40,20 +25,16 @@ jobs:
 
       - name: Build binary
         env:
-          PYINSTALLER_TARGET_ARCH: ${{ matrix.target_arch }}
+          PYINSTALLER_TARGET_ARCH: arm64
         run: pyinstaller glmon.spec
 
-      - name: Verify binary arch (macOS)
-        if: runner.os == 'macOS'
+      - name: Verify binary arch
         run: |
           file dist/glmon/glmon
-          file dist/glmon/glmon | grep -q '${{ matrix.target_arch }}'
+          file dist/glmon/glmon | grep -q 'arm64'
 
       - name: Smoke test binary
-        shell: bash
         run: |
-          # confirm the bootloader starts and exits cleanly without GITLAB_URL set.
-          # expected: non-zero exit with the "GITLAB_URL not set" error in under 10s.
           set +e
           ( cd dist/glmon && ./glmon ) > smoke.out 2>&1 &
           pid=$!
@@ -71,13 +52,13 @@ jobs:
           grep -q 'GITLAB_URL' smoke.out
 
       - name: Rename binary
-        run: cp dist/glmon/glmon dist/glmon-${{ matrix.arch }}-${{ matrix.platform }}
+        run: cp dist/glmon/glmon dist/glmon-aarch64-apple-darwin
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: glmon-${{ matrix.arch }}-${{ matrix.platform }}
-          path: dist/glmon-${{ matrix.arch }}-${{ matrix.platform }}
+          name: glmon-aarch64-apple-darwin
+          path: dist/glmon-aarch64-apple-darwin
 
   release:
     needs: build
