@@ -375,6 +375,50 @@ class GitLabAPI:
             })
         return results
 
+    def _project_path_from_url(self, web_url):
+        # extract project path from pipeline web_url like
+        # https://gitlab.example.com/group/subgroup/project/-/pipelines/123
+        try:
+            base = self.config.gitlab_url.rstrip('/')
+            path = web_url.replace(base, '').strip('/')
+            # path: group/subgroup/project/-/pipelines/123
+            idx = path.find('/-/')
+            if idx > 0:
+                return path[:idx]
+        except Exception:
+            pass
+        return None
+
+    def get_pipeline_bridges(self, pipeline_id):
+        try:
+            pipeline = self.project.pipelines.get(pipeline_id)
+            bridges = pipeline.bridges.list(all=True)
+            results = []
+            for b in bridges:
+                dp = getattr(b, 'downstream_pipeline', None)
+                if not dp:
+                    continue
+                web_url = dp.get('web_url', '')
+                ds_project_path = self._project_path_from_url(web_url)
+                is_same_project = (ds_project_path == self.project_name) if ds_project_path else True
+                results.append({
+                    'id': dp.get('id'),
+                    'status': dp.get('status', 'unknown'),
+                    'ref': dp.get('ref', ''),
+                    'sha': (dp.get('sha') or '')[:8],
+                    'created_at': dp.get('created_at', ''),
+                    'updated_at': dp.get('updated_at', ''),
+                    'web_url': web_url,
+                    'user': 'unknown',
+                    '_ds_project_path': ds_project_path if not is_same_project else None,
+                    '_is_downstream': True,
+                    '_parent_id': pipeline_id,
+                    '_bridge_name': b.name,
+                })
+            return results
+        except Exception:
+            return []
+
     def get_pipeline_detail(self, pipeline_id):
         try:
             p = self.project.pipelines.get(pipeline_id)
@@ -679,6 +723,7 @@ class PipelineListScreen(ScreenBase):
         self.status_filter = None
         self._refresh_timer = None
         self._refreshing = False
+        self._bridges_cache = {}
 
     def _age_label(self) -> str:
         return f"last {self.age_days}d" if self.age_days is not None else "all"
@@ -762,8 +807,32 @@ class PipelineListScreen(ScreenBase):
     def _refresh_breadcrumb(self) -> None:
         self.query_one("#header", K9sHeader).set_info(self._info_pairs())
 
-    async def load_pipelines(self) -> None:
-        self.pipelines = await asyncio.to_thread(self.api.get_recent_pipelines, 50, None, None, self.age_days)
+    async def load_pipelines(self, full_bridge_scan=True) -> None:
+        raw = await asyncio.to_thread(self.api.get_recent_pipelines, 50, None, None, self.age_days)
+        active_ids = set(p['id'] for p in raw if p['status'] not in TERMINAL_STATUSES)
+        ids_to_check = set(active_ids)
+        if full_bridge_scan:
+            for p in raw[:10]:
+                ids_to_check.add(p['id'])
+            self._bridges_cache = {}
+        else:
+            # re-check parents that had active downstream last time
+            for pid, ds_list in self._bridges_cache.items():
+                if any(d['status'] not in TERMINAL_STATUSES for d in ds_list):
+                    ids_to_check.add(pid)
+        if ids_to_check:
+            check_list = list(ids_to_check)
+            bridge_results = await asyncio.gather(*(
+                asyncio.to_thread(self.api.get_pipeline_bridges, pid) for pid in check_list
+            ))
+            for pid, bridges in zip(check_list, bridge_results):
+                if bridges:
+                    self._bridges_cache[pid] = bridges
+        self.pipelines = []
+        for p in raw:
+            self.pipelines.append(p)
+            for ds in self._bridges_cache.get(p['id'], []):
+                self.pipelines.append(ds)
         self._apply_filter()
         self._refresh_breadcrumb()
 
@@ -773,7 +842,7 @@ class PipelineListScreen(ScreenBase):
         self._refreshing = True
         self._refresh_status()
         try:
-            await self.load_pipelines()
+            await self.load_pipelines(full_bridge_scan=False)
         except Exception:
             pass
         finally:
@@ -797,6 +866,8 @@ class PipelineListScreen(ScreenBase):
                 or query in p['user'].lower()
                 or query in str(p['id'])
                 or query in p['sha'].lower()
+                or query in p.get('_bridge_name', '').lower()
+                or query in p.get('_ds_project_path', '').lower()
             ]
         else:
             self.filtered_pipelines = pipelines
@@ -808,16 +879,37 @@ class PipelineListScreen(ScreenBase):
         prev_row = table.cursor_row
         table.clear()
         for p in self.filtered_pipelines:
+            is_ds = p.get('_is_downstream', False)
             age = format_age(p['created_at'])
-            ref = p['ref'][:30]
-            table.add_row(
-                Text(str(p['id']), style="bold"),
-                status_badge(p['status']),
-                Text(ref, style="cyan"),
-                Text(p['sha'], style="dim"),
-                Text(age, style="dim italic"),
-                Text(p['user'], style="dim"),
-            )
+            if is_ds:
+                bridge = p.get('_bridge_name', '')
+                ds_path = p.get('_ds_project_path', '')
+                label = bridge or ds_path or ''
+                if ds_path and bridge:
+                    label = f"{bridge} ({ds_path})"
+                ref_text = Text()
+                ref_text.append("  └ ", style="dim #585b70")
+                ref_text.append(label[:35] if label else p['ref'][:30], style="#b4befe")
+                id_text = Text()
+                id_text.append(f"#{p['id']}", style="#b4befe dim")
+                table.add_row(
+                    id_text,
+                    status_badge(p['status']),
+                    ref_text,
+                    Text(p['sha'], style="dim"),
+                    Text(age, style="dim italic"),
+                    Text("", style="dim"),
+                )
+            else:
+                ref = p['ref'][:30]
+                table.add_row(
+                    Text(str(p['id']), style="bold"),
+                    status_badge(p['status']),
+                    Text(ref, style="cyan"),
+                    Text(p['sha'], style="dim"),
+                    Text(age, style="dim italic"),
+                    Text(p['user'], style="dim"),
+                )
         if prev_row is not None and self.filtered_pipelines:
             table.move_cursor(row=min(prev_row, len(self.filtered_pipelines) - 1))
 
@@ -875,6 +967,16 @@ class PipelineListScreen(ScreenBase):
         idx = event.cursor_row
         if idx is not None and idx < len(self.filtered_pipelines):
             pipeline = self.filtered_pipelines[idx]
+            ds_path = pipeline.get('_ds_project_path')
+            if pipeline.get('_is_downstream') and ds_path:
+                ds_api = GitLabAPI(self.api.config)
+                try:
+                    ds_api.set_project(ds_path)
+                except Exception:
+                    self.notify(f"Cannot access {ds_path}", severity="error", timeout=3)
+                    return
+                self.app.push_screen(JobListScreen(ds_api, pipeline))
+                return
             self.app.push_screen(JobListScreen(self.api, pipeline))
 
     async def action_browser(self) -> None:
@@ -1641,14 +1743,13 @@ class PipelineMonitor(App):
 
     async def _finish_loading(self) -> None:
         await asyncio.to_thread(self.api.connect_project)
+        self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
         if self.api.project:
-            self.switch_screen(PipelineListScreen(
+            self.push_screen(PipelineListScreen(
                 self.api,
                 age_days=self.default_age_days,
                 initial_filter=self.default_branch_filter,
             ))
-        else:
-            self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
 
 
 def _detect_cwd_branch() -> str:
