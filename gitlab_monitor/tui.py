@@ -1742,7 +1742,12 @@ class PipelineMonitor(App):
         self.set_timer(0.1, self._finish_loading)
 
     async def _finish_loading(self) -> None:
-        await asyncio.to_thread(self.api.connect_project)
+        try:
+            await asyncio.to_thread(self.api.connect_project)
+        except Exception as e:
+            self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
+            self.notify(f"Project not found: {self.config.project_path}", severity="error", timeout=5)
+            return
         self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
         if self.api.project:
             self.push_screen(PipelineListScreen(
