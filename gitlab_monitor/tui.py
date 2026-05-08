@@ -861,13 +861,13 @@ class PipelineListScreen(ScreenBase):
         if query:
             self.filtered_pipelines = [
                 p for p in pipelines
-                if query in p['ref'].lower()
-                or query in p['status'].lower()
-                or query in p['user'].lower()
+                if query in (p.get('ref') or '').lower()
+                or query in (p.get('status') or '').lower()
+                or query in (p.get('user') or '').lower()
                 or query in str(p['id'])
-                or query in p['sha'].lower()
-                or query in p.get('_bridge_name', '').lower()
-                or query in p.get('_ds_project_path', '').lower()
+                or query in (p.get('sha') or '').lower()
+                or query in (p.get('_bridge_name') or '').lower()
+                or query in (p.get('_ds_project_path') or '').lower()
             ]
         else:
             self.filtered_pipelines = pipelines
