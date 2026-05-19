@@ -235,6 +235,14 @@ def _auto_refresh_indicator(interval_seconds, active=True, refreshing=False):
     return t
 
 
+def _loading_indicator(label="loading"):
+    """Build right-side status text for an in-flight load."""
+    t = Text()
+    t.append("⟳ ", style="bold #f9e2af")
+    t.append(label, style="bold #f9e2af")
+    return t
+
+
 def _status_line(parts):
     """Render footer line. parts: list of (label, value) or strings."""
     t = Text()
@@ -537,7 +545,7 @@ class LoadingScreen(Screen):
 
 class ProjectSelectScreen(ScreenBase):
 
-    KEY_MAP = {"q": "quit", "r": "refresh", "slash": "search", "s": "star", "a": "toggle_all"}
+    KEY_MAP = {"q": "quit", "r": "refresh", "slash": "search", "s": "star", "a": "toggle_all", "c": "clear_filter"}
 
     DEBOUNCE_SECONDS = 0.4
 
@@ -548,6 +556,7 @@ class ProjectSelectScreen(ScreenBase):
         self.projects = []
         self.mode = "fav" if favorites.list() else "all"
         self._search_timer = None
+        self._loading = False
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
@@ -573,7 +582,12 @@ class ProjectSelectScreen(ScreenBase):
 
     def _refresh_status(self) -> None:
         try:
-            self.query_one("#statusbar", StatusBar).set_text(self._status_text())
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(self._status_text())
+            if self._loading:
+                sb.set_right(_loading_indicator("loading projects..."))
+            else:
+                sb.set_right("")
         except Exception:
             pass
 
@@ -586,12 +600,14 @@ class ProjectSelectScreen(ScreenBase):
         ]
 
     def _keys(self):
+        toggle_label = "show all" if self.mode == "fav" else "favorites only"
         return [
             ("q", "quit"),
             ("/", "filter"),
+            ("c", "clear"),
             ("r", "refresh"),
             ("s", "star"),
-            ("a", "toggle all"),
+            ("a", toggle_label),
             ("enter", "select"),
         ]
 
@@ -606,20 +622,26 @@ class ProjectSelectScreen(ScreenBase):
         table.focus()
 
     async def load_projects(self, search=None) -> None:
-        if self.mode == "fav" and not search:
-            paths = self.favorites.list()
-            if paths:
-                self.projects = await asyncio.to_thread(self.api.get_projects_by_paths, paths)
+        self._loading = True
+        self._refresh_status()
+        try:
+            if self.mode == "fav" and not search:
+                paths = self.favorites.list()
+                if paths:
+                    self.projects = await asyncio.to_thread(self.api.get_projects_by_paths, paths)
+                else:
+                    # no favorites yet, fall back to all
+                    self.mode = "all"
+                    self.projects = await asyncio.to_thread(self.api.get_projects, None)
             else:
-                # no favorites yet, fall back to all
-                self.mode = "all"
-                self.projects = await asyncio.to_thread(self.api.get_projects, None)
-        else:
-            self.projects = await asyncio.to_thread(self.api.get_projects, search)
-        # sort by most recent activity desc (ISO 8601 strings sort lexically)
-        self.projects.sort(key=lambda p: p.get('last_activity') or '', reverse=True)
-        self._render_table()
-        self._refresh_breadcrumb()
+                self.projects = await asyncio.to_thread(self.api.get_projects, search)
+            # sort by most recent activity desc (ISO 8601 strings sort lexically)
+            self.projects.sort(key=lambda p: p.get('last_activity') or '', reverse=True)
+            self._render_table()
+            self._refresh_breadcrumb()
+        finally:
+            self._loading = False
+            self._refresh_status()
 
     def _render_table(self) -> None:
         table = self.query_one("#project-table", DataTable)
@@ -692,10 +714,30 @@ class ProjectSelectScreen(ScreenBase):
         self._refresh_breadcrumb()
 
     async def action_toggle_all(self) -> None:
+        if self.mode == "all" and not self.favorites.list():
+            self.notify("No favorites starred yet (press 's' to star)", timeout=3)
+            return
         self.mode = "all" if self.mode == "fav" else "fav"
         # clear search when toggling
         self.query_one("#project-search", Input).value = ""
+        self._refresh_keys()
         await self.load_projects()
+        self.notify(f"Showing: {'favorites' if self.mode == 'fav' else 'all projects'}", timeout=2)
+
+    def _refresh_keys(self) -> None:
+        try:
+            self.query_one("#header", K9sHeader).set_keys(self._keys())
+        except Exception:
+            pass
+
+    async def action_clear_filter(self) -> None:
+        inp = self.query_one("#project-search", Input)
+        if not inp.value:
+            return
+        inp.value = ""
+        if self._search_timer is not None:
+            self._search_timer.stop()
+        await self._do_search()
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         idx = event.cursor_row
@@ -709,7 +751,7 @@ class ProjectSelectScreen(ScreenBase):
 
 class PipelineListScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel", "s": "toggle_status", "f": "failed"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel", "s": "toggle_status", "f": "failed", "c": "clear_filter"}
 
     STATUS_CYCLE = [None, 'running', 'pending']
 
@@ -746,6 +788,7 @@ class PipelineListScreen(ScreenBase):
         return [
             ("q", "back"),
             ("/", "filter"),
+            ("c", "clear"),
             ("r", "refresh"),
             ("t", "age"),
             ("s", status_label),
@@ -808,33 +851,42 @@ class PipelineListScreen(ScreenBase):
         self.query_one("#header", K9sHeader).set_info(self._info_pairs())
 
     async def load_pipelines(self, full_bridge_scan=True) -> None:
-        raw = await asyncio.to_thread(self.api.get_recent_pipelines, 50, None, None, self.age_days)
-        active_ids = set(p['id'] for p in raw if p['status'] not in TERMINAL_STATUSES)
-        ids_to_check = set(active_ids)
-        if full_bridge_scan:
-            for p in raw[:10]:
-                ids_to_check.add(p['id'])
-            self._bridges_cache = {}
-        else:
-            # re-check parents that had active downstream last time
-            for pid, ds_list in self._bridges_cache.items():
-                if any(d['status'] not in TERMINAL_STATUSES for d in ds_list):
-                    ids_to_check.add(pid)
-        if ids_to_check:
-            check_list = list(ids_to_check)
-            bridge_results = await asyncio.gather(*(
-                asyncio.to_thread(self.api.get_pipeline_bridges, pid) for pid in check_list
-            ))
-            for pid, bridges in zip(check_list, bridge_results):
-                if bridges:
-                    self._bridges_cache[pid] = bridges
-        self.pipelines = []
-        for p in raw:
-            self.pipelines.append(p)
-            for ds in self._bridges_cache.get(p['id'], []):
-                self.pipelines.append(ds)
-        self._apply_filter()
-        self._refresh_breadcrumb()
+        owns_refresh_flag = not self._refreshing
+        if owns_refresh_flag:
+            self._refreshing = True
+            self._refresh_status()
+        try:
+            raw = await asyncio.to_thread(self.api.get_recent_pipelines, 50, None, None, self.age_days)
+            active_ids = set(p['id'] for p in raw if p['status'] not in TERMINAL_STATUSES)
+            ids_to_check = set(active_ids)
+            if full_bridge_scan:
+                for p in raw[:10]:
+                    ids_to_check.add(p['id'])
+                self._bridges_cache = {}
+            else:
+                # re-check parents that had active downstream last time
+                for pid, ds_list in self._bridges_cache.items():
+                    if any(d['status'] not in TERMINAL_STATUSES for d in ds_list):
+                        ids_to_check.add(pid)
+            if ids_to_check:
+                check_list = list(ids_to_check)
+                bridge_results = await asyncio.gather(*(
+                    asyncio.to_thread(self.api.get_pipeline_bridges, pid) for pid in check_list
+                ))
+                for pid, bridges in zip(check_list, bridge_results):
+                    if bridges:
+                        self._bridges_cache[pid] = bridges
+            self.pipelines = []
+            for p in raw:
+                self.pipelines.append(p)
+                for ds in self._bridges_cache.get(p['id'], []):
+                    self.pipelines.append(ds)
+            self._apply_filter()
+            self._refresh_breadcrumb()
+        finally:
+            if owns_refresh_flag:
+                self._refreshing = False
+                self._refresh_status()
 
     async def _safe_refresh(self) -> None:
         if self._refreshing:
@@ -931,6 +983,17 @@ class PipelineListScreen(ScreenBase):
     async def action_search(self) -> None:
         self.query_one("#pipeline-filter", Input).focus()
 
+    async def action_clear_filter(self) -> None:
+        inp = self.query_one("#pipeline-filter", Input)
+        cleared_text = bool(inp.value)
+        cleared_status = self.status_filter is not None
+        if not cleared_text and not cleared_status:
+            return
+        inp.value = ""
+        self.status_filter = None
+        self._apply_filter()
+        self._refresh_header()
+
     async def action_toggle_age(self) -> None:
         try:
             idx = PIPELINE_AGE_CYCLE.index(self.age_days)
@@ -1021,7 +1084,7 @@ class PipelineListScreen(ScreenBase):
 
 class JobListScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "f": "failures", "s": "toggle_status", "y": "yank"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "f": "failures", "s": "toggle_status", "y": "yank", "c": "clear_filter"}
 
     STAGE_ORDER = ['build', 'test', 'deploy', 'cleanup']
 
@@ -1075,6 +1138,7 @@ class JobListScreen(ScreenBase):
         return [
             ("q", "back"),
             ("/", "filter"),
+            ("c", "clear"),
             ("r", "refresh"),
             ("b", "browser"),
             ("f", "failures"),
@@ -1132,23 +1196,32 @@ class JobListScreen(ScreenBase):
         self._refresh_status()
 
     async def load_jobs(self) -> None:
-        jobs, detail = await asyncio.gather(
-            asyncio.to_thread(self.api.get_pipeline_jobs, self.pipeline['id']),
-            asyncio.to_thread(self.api.get_pipeline_detail, self.pipeline['id']),
-        )
-        self.jobs = jobs
-        if detail:
-            self.pipeline.update(detail)
-        order = self.STAGE_ORDER
-        self.jobs.sort(key=lambda j: (
-            order.index(j['stage']) if j['stage'] in order else len(order),
-            j['name'],
-        ))
-        self._apply_filter()
+        owns_refresh_flag = not self._refreshing
+        if owns_refresh_flag:
+            self._refreshing = True
+            self._refresh_status()
         try:
-            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
-        except Exception:
-            pass
+            jobs, detail = await asyncio.gather(
+                asyncio.to_thread(self.api.get_pipeline_jobs, self.pipeline['id']),
+                asyncio.to_thread(self.api.get_pipeline_detail, self.pipeline['id']),
+            )
+            self.jobs = jobs
+            if detail:
+                self.pipeline.update(detail)
+            order = self.STAGE_ORDER
+            self.jobs.sort(key=lambda j: (
+                order.index(j['stage']) if j['stage'] in order else len(order),
+                j['name'],
+            ))
+            self._apply_filter()
+            try:
+                self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+            except Exception:
+                pass
+        finally:
+            if owns_refresh_flag:
+                self._refreshing = False
+                self._refresh_status()
 
     def _apply_filter(self) -> None:
         query = self.query_one("#job-filter", Input).value.strip().lower()
@@ -1221,6 +1294,22 @@ class JobListScreen(ScreenBase):
 
     async def action_search(self) -> None:
         self.query_one("#job-filter", Input).focus()
+
+    async def action_clear_filter(self) -> None:
+        inp = self.query_one("#job-filter", Input)
+        cleared_text = bool(inp.value)
+        cleared_status = self.status_filter is not None
+        if not cleared_text and not cleared_status:
+            return
+        inp.value = ""
+        self.status_filter = None
+        self._apply_filter()
+        try:
+            header = self.query_one("#header", K9sHeader)
+            header.set_keys(self._keys())
+            header.set_info(self._info_pairs())
+        except Exception:
+            pass
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         idx = event.cursor_row
