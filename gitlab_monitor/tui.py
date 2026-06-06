@@ -133,6 +133,11 @@ def _info_lines(pairs, max_value_width=None):
 def _key_lines(keys, cols=KEY_COLS):
     if not keys:
         return []
+    # Two shapes supported:
+    #  - flat list[(key, label)] → column-major packing (legacy)
+    #  - list[list[(key, label) | None]] → rows verbatim; slot positions stable across screens
+    if isinstance(keys[0], list):
+        return _key_lines_from_rows(keys, cols)
     rows_per_col = (len(keys) + cols - 1) // cols
     columns = [keys[i * rows_per_col:(i + 1) * rows_per_col] for i in range(cols)]
     col_widths = []
@@ -160,12 +165,63 @@ def _key_lines(keys, cols=KEY_COLS):
     return lines
 
 
-def _format_header(info_pairs, keys, info_width=INFO_PANE_WIDTH):
-    # leave room for label + ": " (~12 chars at most)
+def _key_lines_from_rows(rows, cols):
+    n_cols = min(cols, max((len(r) for r in rows), default=0))
+    col_widths = []
+    for ci in range(n_cols):
+        max_k = 0
+        max_a = 0
+        for r in rows:
+            entry = r[ci] if ci < len(r) else None
+            if entry is None:
+                continue
+            k, a = entry
+            max_k = max(max_k, len(f"<{k}>"))
+            max_a = max(max_a, len(a))
+        col_widths.append((max_k, max_a))
+    lines = []
+    for r in rows:
+        line = Text()
+        for ci in range(n_cols):
+            kw, aw = col_widths[ci]
+            entry = r[ci] if ci < len(r) else None
+            if entry is not None:
+                k, a = entry
+                line.append(f"<{k}>".ljust(kw), style="bold #89b4fa")
+                line.append(" ")
+                line.append(a.ljust(aw + 3), style="#cdd6f4")
+            else:
+                line.append(" " * (kw + 1 + aw + 3))
+        lines.append(line)
+    return lines
+
+
+def _header_layout(available_width):
+    # returns (info_width, key_cols, stack). stack=True renders info above keys
+    if available_width is None or available_width >= 130:
+        return INFO_PANE_WIDTH, KEY_COLS, False
+    if available_width >= 100:
+        return 50, 2, False
+    if available_width >= 75:
+        return 42, 1, False
+    return max(20, available_width - 2), 2, True
+
+
+def _format_header(info_pairs, keys, available_width=None):
+    info_width, cols, stack = _header_layout(available_width)
     info = _info_lines(info_pairs, max_value_width=max(10, info_width - 12))
-    krows = _key_lines(keys)
-    rows = max(len(info), len(krows))
+    krows = _key_lines(keys, cols=cols)
     out = Text()
+    if stack:
+        for i, line in enumerate(info):
+            if i > 0:
+                out.append("\n")
+            out.append(line)
+        for line in krows:
+            out.append("\n")
+            out.append(line)
+        return out
+    rows = max(len(info), len(krows))
     for i in range(rows):
         if i > 0:
             out.append("\n")
@@ -184,17 +240,31 @@ def _format_header(info_pairs, keys, info_width=INFO_PANE_WIDTH):
 class K9sHeader(Static):
 
     def __init__(self, info_pairs, keys, **kw):
-        super().__init__(_format_header(info_pairs, keys), **kw)
+        super().__init__(**kw)
         self._info_pairs = info_pairs
         self._keys = keys
+        self._available_width = None
+        self.update(_format_header(info_pairs, keys, self._available_width))
+
+    def _rerender(self) -> None:
+        self.update(_format_header(self._info_pairs, self._keys, self._available_width))
 
     def set_info(self, pairs) -> None:
         self._info_pairs = pairs
-        self.update(_format_header(pairs, self._keys))
+        self._rerender()
 
     def set_keys(self, keys) -> None:
         self._keys = keys
-        self.update(_format_header(self._info_pairs, keys))
+        self._rerender()
+
+    def on_resize(self, event) -> None:
+        try:
+            new_width = event.size.width
+        except Exception:
+            return
+        if new_width != self._available_width:
+            self._available_width = new_width
+            self._rerender()
 
 
 class KeyBar(Static):
@@ -827,15 +897,9 @@ class ProjectSelectScreen(ScreenBase):
     def _keys(self):
         toggle_label = "show all" if self.mode == "fav" else "favorites only"
         return [
-            ("q", "quit"),
-            ("/", "filter"),
-            ("c", "clear"),
-            ("r", "refresh"),
-            ("s", "star"),
-            ("a", toggle_label),
-            ("m", "MRs"),
-            ("g", "goto MR"),
-            ("enter", "select"),
+            [("q", "quit"),       ("r", "refresh"), ("m", "MRs")],
+            [("/", "filter"),     ("s", "star"),    ("g", "goto MR")],
+            [("enter", "select"), ("c", "clear"),   ("a", toggle_label)],
         ]
 
     def _refresh_breadcrumb(self) -> None:
@@ -1992,15 +2056,9 @@ class MyMergeRequestsScreen(ScreenBase):
 
     def _keys(self):
         return [
-            ("q", "quit"),
-            ("m", "pipelines"),
-            ("/", "filter"),
-            ("r", "refresh"),
-            ("s", f"state:{self.state}"),
-            ("g", "goto MR"),
-            ("b", "browser"),
-            ("y", "copy url"),
-            ("enter", "view"),
+            [("q", "quit"),     ("r", "refresh"),              ("m", "pipelines")],
+            [("/", "filter"),   ("s", f"state:{self.state}"),  ("g", "goto MR")],
+            [("enter", "view"), ("b", "browser"),              ("y", "copy url")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2042,6 +2100,10 @@ class MyMergeRequestsScreen(ScreenBase):
         table = self.query_one("#mr-table", DataTable)
         table.add_columns("IID", "Project", "Title", "MR", "Pipeline", "Unresolved", "Age")
         table.cursor_type = "row"
+        try:
+            self.query_one("#statusbar", StatusBar).set_right(_loading_indicator("loading MRs..."))
+        except Exception:
+            pass
         await self.load_mrs()
         table.focus()
         self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
