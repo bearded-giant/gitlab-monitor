@@ -770,7 +770,7 @@ class LoadingScreen(Screen):
 
 class ProjectSelectScreen(ScreenBase):
 
-    KEY_MAP = {"q": "quit", "r": "refresh", "slash": "search", "s": "star", "a": "toggle_all", "c": "clear_filter", "m": "my_mrs", "g": "goto_mr"}
+    KEY_MAP = {"q": "quit", "r": "refresh", "slash": "search", "s": "star", "a": "toggle_all", "c": "clear_filter", "m": "toggle_module", "g": "goto_mr"}
 
     DEBOUNCE_SECONDS = 0.4
 
@@ -833,7 +833,7 @@ class ProjectSelectScreen(ScreenBase):
             ("r", "refresh"),
             ("s", "star"),
             ("a", toggle_label),
-            ("m", "my MRs"),
+            ("m", "MRs"),
             ("g", "goto MR"),
             ("enter", "select"),
         ]
@@ -847,6 +847,13 @@ class ProjectSelectScreen(ScreenBase):
         table.cursor_type = "row"
         await self.load_projects()
         table.focus()
+        # mark pipelines module active. don't clobber pinned project from PipelineListScreen.
+        try:
+            last = self.api.config.get_last_view() or {}
+            if last.get('type') != 'pipelines':
+                self.api.config.save_last_view('pipelines')
+        except Exception:
+            pass
 
     async def load_projects(self, search=None) -> None:
         self._loading = True
@@ -976,15 +983,10 @@ class ProjectSelectScreen(ScreenBase):
             self.app.push_screen(PipelineListScreen(self.api, age_days=age, initial_filter=initial_filter))
 
     async def action_quit(self) -> None:
-        # quitting from ProjectSelect = user wants to reset their "home" view
-        try:
-            self.api.config.clear_last_view()
-        except Exception:
-            pass
         self.app.exit()
 
-    async def action_my_mrs(self) -> None:
-        self.app.push_screen(MyMergeRequestsScreen(self.api))
+    async def action_toggle_module(self) -> None:
+        self.app.switch_screen(MyMergeRequestsScreen(self.api))
 
     async def action_goto_mr(self) -> None:
         def _after(result):
@@ -1963,7 +1965,7 @@ def _pipeline_status_text(status):
 
 class MyMergeRequestsScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "toggle_module"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -1990,7 +1992,8 @@ class MyMergeRequestsScreen(ScreenBase):
 
     def _keys(self):
         return [
-            ("q", "back"),
+            ("q", "quit"),
+            ("m", "pipelines"),
             ("/", "filter"),
             ("r", "refresh"),
             ("s", f"state:{self.state}"),
@@ -2141,7 +2144,10 @@ class MyMergeRequestsScreen(ScreenBase):
             self.query_one("#mr-table", DataTable).focus()
 
     async def action_back(self) -> None:
-        self.app.pop_screen()
+        self.app.exit()
+
+    async def action_toggle_module(self) -> None:
+        self.app.switch_screen(ProjectSelectScreen(self.api, self.api.config.favorites))
 
     async def action_refresh(self) -> None:
         self._unresolved_cache.clear()
