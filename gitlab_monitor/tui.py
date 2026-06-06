@@ -13,8 +13,9 @@ from datetime import datetime, timedelta, timezone
 import re
 import asyncio
 from textual.app import App, ComposeResult
-from textual.widgets import DataTable, Static, Input, RichLog
-from textual.containers import Container, Horizontal
+from textual.widgets import DataTable, Static, Input, RichLog, TextArea, Label, Markdown
+from textual.containers import Container, Horizontal, ScrollableContainer
+from textual.suggester import SuggestFromList
 from textual.screen import Screen, ModalScreen
 from textual.binding import Binding
 from rich.text import Text
@@ -112,15 +113,19 @@ INFO_PANE_WIDTH = 56
 KEY_COLS = 3
 
 
-def _info_lines(pairs):
+def _info_lines(pairs, max_value_width=None):
     if not pairs:
         return []
     label_w = max(len(l) for l, _ in pairs)
     lines = []
     for label, value in pairs:
         t = Text()
-        t.append(f"{label}:".ljust(label_w + 2), style="bold #f9e2af")
-        t.append(str(value), style="#cdd6f4")
+        t.append(f"{label}:".rjust(label_w + 1), style="bold #f9e2af")
+        t.append(" ", style="bold #f9e2af")
+        sval = str(value)
+        if max_value_width is not None and len(sval) > max_value_width:
+            sval = sval[:max(0, max_value_width - 1)] + "…"
+        t.append(sval, style="#cdd6f4")
         lines.append(t)
     return lines
 
@@ -156,7 +161,8 @@ def _key_lines(keys, cols=KEY_COLS):
 
 
 def _format_header(info_pairs, keys, info_width=INFO_PANE_WIDTH):
-    info = _info_lines(info_pairs)
+    # leave room for label + ": " (~12 chars at most)
+    info = _info_lines(info_pairs, max_value_width=max(10, info_width - 12))
     krows = _key_lines(keys)
     rows = max(len(info), len(krows))
     out = Text()
@@ -503,6 +509,225 @@ class GitLabAPI:
                         break
         return failures
 
+    # -- merge requests ------------------------------------------------------
+
+    @staticmethod
+    def _mr_project_path_from_refs(mr):
+        # `references.full` looks like "group/sub/project!123"
+        try:
+            refs = getattr(mr, 'references', None) or {}
+            full = refs.get('full') if isinstance(refs, dict) else None
+            if full and '!' in full:
+                return full.split('!', 1)[0]
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _mr_to_dict(mr, project_path=None):
+        author = getattr(mr, 'author', None) or {}
+        head_pipeline = getattr(mr, 'head_pipeline', None) or {}
+        path = project_path or GitLabAPI._mr_project_path_from_refs(mr)
+        return {
+            'id': mr.id,
+            'iid': mr.iid,
+            'project_id': mr.project_id,
+            'project_path': path or '',
+            'title': mr.title,
+            'description': getattr(mr, 'description', '') or '',
+            'state': mr.state,
+            'draft': bool(getattr(mr, 'draft', False) or getattr(mr, 'work_in_progress', False)),
+            'merge_status': getattr(mr, 'merge_status', None) or getattr(mr, 'detailed_merge_status', None),
+            'source_branch': mr.source_branch,
+            'target_branch': mr.target_branch,
+            'created_at': mr.created_at,
+            'updated_at': mr.updated_at,
+            'merged_at': getattr(mr, 'merged_at', None),
+            'closed_at': getattr(mr, 'closed_at', None),
+            'author': author.get('username') if isinstance(author, dict) else getattr(author, 'username', 'unknown'),
+            'web_url': mr.web_url,
+            'user_notes_count': getattr(mr, 'user_notes_count', 0) or 0,
+            'upvotes': getattr(mr, 'upvotes', 0) or 0,
+            'downvotes': getattr(mr, 'downvotes', 0) or 0,
+            'head_pipeline_status': head_pipeline.get('status') if isinstance(head_pipeline, dict) else getattr(head_pipeline, 'status', None),
+            'head_pipeline_id': head_pipeline.get('id') if isinstance(head_pipeline, dict) else getattr(head_pipeline, 'id', None),
+            'head_pipeline_web_url': head_pipeline.get('web_url') if isinstance(head_pipeline, dict) else getattr(head_pipeline, 'web_url', None),
+            'has_conflicts': getattr(mr, 'has_conflicts', False),
+            'blocking_discussions_resolved': getattr(mr, 'blocking_discussions_resolved', True),
+        }
+
+    def get_my_merge_requests(self, state='opened', limit=50):
+        try:
+            mrs = self.gl.mergerequests.list(
+                scope='created_by_me',
+                state=state,
+                per_page=limit,
+                order_by='updated_at',
+                sort='desc',
+            )
+            return [self._mr_to_dict(mr) for mr in mrs]
+        except Exception:
+            return []
+
+    def get_project_merge_requests(self, project_path, state='merged', limit=50):
+        try:
+            project = self.gl.projects.get(project_path)
+            mrs = project.mergerequests.list(
+                state=state,
+                per_page=limit,
+                order_by='updated_at',
+                sort='desc',
+            )
+            return [self._mr_to_dict(mr, project_path=project_path) for mr in mrs]
+        except Exception:
+            return []
+
+    def get_merge_request(self, project_path, iid):
+        try:
+            project = self.gl.projects.get(project_path)
+            mr = project.mergerequests.get(iid)
+            data = self._mr_to_dict(mr, project_path=project_path)
+            # diff stats
+            try:
+                changes = mr.changes()
+                data['changes_count'] = len(changes.get('changes', [])) if isinstance(changes, dict) else 0
+            except Exception:
+                data['changes_count'] = 0
+            # commits count
+            try:
+                commits = mr.commits()
+                data['commits_count'] = sum(1 for _ in commits)
+            except Exception:
+                data['commits_count'] = 0
+            # approvals
+            try:
+                approvals = mr.approvals.get()
+                approved_by = getattr(approvals, 'approved_by', None) or []
+                data['approvals_count'] = len(approved_by)
+                data['approved_by'] = [
+                    (a.get('user') or {}).get('username', '') if isinstance(a, dict) else ''
+                    for a in approved_by
+                ]
+                data['approvals_required'] = getattr(approvals, 'approvals_required', 0) or 0
+            except Exception:
+                data['approvals_count'] = 0
+                data['approved_by'] = []
+                data['approvals_required'] = 0
+            return data
+        except Exception:
+            return None
+
+    def get_mr_approval_state(self, project_path, iid):
+        try:
+            project = self.gl.projects.get(project_path)
+            mr = project.mergerequests.get(iid)
+            state = mr.approval_state.get()
+            rules_raw = getattr(state, 'rules', None) or []
+            rules = []
+            for r in rules_raw:
+                d = r if isinstance(r, dict) else (r.attributes if hasattr(r, 'attributes') else dict(r))
+                approved_by = d.get('approved_by') or []
+                approved_names = [
+                    (a.get('username') if isinstance(a, dict) else getattr(a, 'username', '')) or ''
+                    for a in approved_by
+                ]
+                rules.append({
+                    'id': d.get('id'),
+                    'name': d.get('name') or '',
+                    'rule_type': d.get('rule_type') or '',
+                    'approvals_required': d.get('approvals_required', 0) or 0,
+                    'approved': bool(d.get('approved', False)),
+                    'approved_by': [n for n in approved_names if n],
+                })
+            return rules
+        except Exception:
+            return []
+
+    def get_mr_pipelines(self, project_path, iid):
+        try:
+            project = self.gl.projects.get(project_path)
+            mr = project.mergerequests.get(iid)
+            pipelines = mr.pipelines.list(all=False, per_page=50)
+            results = []
+            for p in pipelines:
+                pd = p.attributes if hasattr(p, 'attributes') else {}
+                results.append({
+                    'id': pd.get('id') or getattr(p, 'id', None),
+                    'status': pd.get('status') or getattr(p, 'status', 'unknown'),
+                    'ref': pd.get('ref') or getattr(p, 'ref', ''),
+                    'sha': (pd.get('sha') or getattr(p, 'sha', '') or '')[:8],
+                    'created_at': pd.get('created_at') or getattr(p, 'created_at', ''),
+                    'updated_at': pd.get('updated_at') or getattr(p, 'updated_at', ''),
+                    'web_url': pd.get('web_url') or getattr(p, 'web_url', ''),
+                    'user': 'unknown',
+                })
+            return results
+        except Exception:
+            return []
+
+    @staticmethod
+    def _discussion_unresolved(disc_dict):
+        notes = disc_dict.get('notes', []) if isinstance(disc_dict, dict) else []
+        return any(n.get('resolvable') and not n.get('resolved') for n in notes if isinstance(n, dict))
+
+    def get_mr_discussions(self, project_path, iid):
+        try:
+            project = self.gl.projects.get(project_path)
+            mr = project.mergerequests.get(iid)
+            discussions = mr.discussions.list(all=True)
+            results = []
+            for d in discussions:
+                dd = d.attributes if hasattr(d, 'attributes') else dict(d)
+                notes = dd.get('notes', []) or []
+                if not notes:
+                    continue
+                first = notes[0]
+                results.append({
+                    'id': dd.get('id'),
+                    'unresolved': self._discussion_unresolved(dd),
+                    'resolvable': any(n.get('resolvable') for n in notes),
+                    'notes': [
+                        {
+                            'id': n.get('id'),
+                            'author': (n.get('author') or {}).get('username', 'unknown'),
+                            'body': n.get('body') or '',
+                            'created_at': n.get('created_at', ''),
+                            'system': bool(n.get('system')),
+                            'resolved': bool(n.get('resolved')),
+                            'resolvable': bool(n.get('resolvable')),
+                        }
+                        for n in notes
+                    ],
+                    'first_author': (first.get('author') or {}).get('username', 'unknown'),
+                    'first_created_at': first.get('created_at', ''),
+                    'system': bool(first.get('system')),
+                })
+            return results
+        except Exception:
+            return []
+
+    def get_mr_unresolved_count(self, project_path, iid):
+        discussions = self.get_mr_discussions(project_path, iid)
+        return sum(1 for d in discussions if d.get('unresolved'))
+
+    def approve_merge_request(self, project_path, iid):
+        project = self.gl.projects.get(project_path)
+        mr = project.mergerequests.get(iid)
+        mr.approve()
+        return True
+
+    def close_merge_request(self, project_path, iid):
+        project = self.gl.projects.get(project_path)
+        mr = project.mergerequests.get(iid)
+        mr.state_event = 'close'
+        mr.save()
+        return True
+
+    def create_mr_note(self, project_path, iid, body):
+        project = self.gl.projects.get(project_path)
+        mr = project.mergerequests.get(iid)
+        return mr.notes.create({'body': body})
+
 
 # -- screens -----------------------------------------------------------------
 
@@ -537,7 +762,7 @@ class LoadingScreen(Screen):
 
 class ProjectSelectScreen(ScreenBase):
 
-    KEY_MAP = {"q": "quit", "r": "refresh", "slash": "search", "s": "star", "a": "toggle_all"}
+    KEY_MAP = {"q": "quit", "r": "refresh", "slash": "search", "s": "star", "a": "toggle_all", "m": "my_mrs", "g": "goto_mr"}
 
     DEBOUNCE_SECONDS = 0.4
 
@@ -592,6 +817,8 @@ class ProjectSelectScreen(ScreenBase):
             ("r", "refresh"),
             ("s", "star"),
             ("a", "toggle all"),
+            ("m", "my MRs"),
+            ("g", "goto MR"),
             ("enter", "select"),
         ]
 
@@ -706,10 +933,31 @@ class ProjectSelectScreen(ScreenBase):
             initial_filter = getattr(self.app, 'default_branch_filter', '') or ''
             self.app.push_screen(PipelineListScreen(self.api, age_days=age, initial_filter=initial_filter))
 
+    async def action_quit(self) -> None:
+        # quitting from ProjectSelect = user wants to reset their "home" view
+        try:
+            self.api.config.clear_last_view()
+        except Exception:
+            pass
+        self.app.exit()
+
+    async def action_my_mrs(self) -> None:
+        self.app.push_screen(MyMergeRequestsScreen(self.api))
+
+    async def action_goto_mr(self) -> None:
+        def _after(result):
+            if result:
+                project_path, iid = result
+                asyncio.ensure_future(self._open_mr(project_path, iid))
+        self.app.push_screen(MRPickerModal(recents=self.api.config.recent_projects), _after)
+
+    async def _open_mr(self, project_path: str, iid: int) -> None:
+        self.app.push_screen(MergeRequestDetailScreen(self.api, project_path, iid))
+
 
 class PipelineListScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel", "s": "toggle_status", "f": "failed"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel", "s": "toggle_status", "f": "failed", "M": "project_mrs"}
 
     STATUS_CYCLE = [None, 'running', 'pending']
 
@@ -750,6 +998,7 @@ class PipelineListScreen(ScreenBase):
             ("t", "age"),
             ("s", status_label),
             ("f", failed_label),
+            ("M", "MRs"),
             ("b", "browser"),
             ("y", "copy url"),
             ("x", "cancel"),
@@ -803,6 +1052,9 @@ class PipelineListScreen(ScreenBase):
         table.focus()
         self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
+        if self.api.project_name:
+            self.api.config.save_last_view('pipelines', project=self.api.project_name)
+            self.api.config.recent_projects.remember(self.api.project_name)
 
     def _refresh_breadcrumb(self) -> None:
         self.query_one("#header", K9sHeader).set_info(self._info_pairs())
@@ -1017,6 +1269,10 @@ class PipelineListScreen(ScreenBase):
             await self.load_pipelines()
         except Exception as e:
             self.notify(f"Cancel failed: {e}", severity="error", timeout=3)
+
+    async def action_project_mrs(self) -> None:
+        if self.api.project_name:
+            self.app.push_screen(ProjectMergeRequestsScreen(self.api, self.api.project_name))
 
 
 class JobListScreen(ScreenBase):
@@ -1568,6 +1824,1054 @@ class FailedJobsScreen(ScreenBase):
             self.notify("Copy failed", severity="error", timeout=2)
 
 
+# -- merge request screens ---------------------------------------------------
+
+MR_STATE_CYCLE = ['opened', 'merged', 'closed', 'all']
+
+
+def _mr_state_badge(state):
+    styles = {
+        'opened': ('bold #a6e3a1', ' open '),
+        'merged': ('bold #89b4fa', ' merged '),
+        'closed': ('bold #f38ba8', ' closed '),
+        'locked': ('bold #6c7086', ' locked '),
+    }
+    style, label = styles.get(state, ('', f' {state} '))
+    return Text(label, style=style)
+
+
+def _mr_state_color(state):
+    colors = {
+        'opened': '#a6e3a1',
+        'merged': '#89b4fa',
+        'closed': '#f38ba8',
+        'locked': '#6c7086',
+    }
+    return colors.get(state, '#cdd6f4')
+
+
+def _pipeline_status_color(status):
+    if not status:
+        return '#6c7086'
+    colors = {
+        'success': '#a6e3a1',
+        'failed': '#f38ba8',
+        'running': '#f9e2af',
+        'pending': '#a6adc8',
+        'canceled': '#a6adc8',
+        'skipped': '#6c7086',
+        'manual': '#89b4fa',
+        'created': '#6c7086',
+    }
+    return colors.get(status, '#cdd6f4')
+
+
+def _pipeline_status_text(status):
+    if not status:
+        return Text("—", style="dim")
+    return status_badge(status)
+
+
+class MyMergeRequestsScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state"}
+
+    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+
+    def __init__(self, api: GitLabAPI):
+        super().__init__()
+        self.api = api
+        self.mrs = []
+        self.filtered_mrs = []
+        self.state = 'opened'
+        self._refresh_timer = None
+        self._refreshing = False
+        self._unresolved_cache = {}
+
+    def _info_pairs(self):
+        total = len(self.mrs)
+        shown = len(self.filtered_mrs)
+        count = f"{shown}/{total}" if shown != total else str(total)
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Scope", "created_by_me"),
+            ("State", self.state),
+            ("MRs", count),
+        ]
+
+    def _keys(self):
+        return [
+            ("q", "back"),
+            ("/", "filter"),
+            ("r", "refresh"),
+            ("s", f"state:{self.state}"),
+            ("g", "goto MR"),
+            ("b", "browser"),
+            ("y", "copy url"),
+            ("enter", "view"),
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Container(
+            Input(placeholder="/  filter MRs...", id="mr-filter"),
+            id="filter-bar",
+        )
+        yield DataTable(id="mr-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _status_text(self):
+        total = len(self.mrs)
+        shown = len(self.filtered_mrs)
+        text_filter = ""
+        try:
+            text_filter = self.query_one("#mr-filter", Input).value.strip()
+        except Exception:
+            pass
+        count = f"{shown}/{total} MRs" if shown != total else f"{total} MRs"
+        parts = [count, ("state", self.state)]
+        if text_filter:
+            parts.append(("filter", text_filter))
+        return _status_line(parts)
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(self._status_text())
+            sb.set_right(_auto_refresh_indicator(
+                self.REFRESH_INTERVAL,
+                active=self._refresh_timer is not None,
+                refreshing=self._refreshing,
+            ))
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        table.add_columns("IID", "Project", "Title", "MR", "Pipeline", "Unresolved", "Age")
+        table.cursor_type = "row"
+        await self.load_mrs()
+        table.focus()
+        self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
+        self._refresh_status()
+        self.api.config.save_last_view('my_mrs')
+
+    async def load_mrs(self) -> None:
+        self.mrs = await asyncio.to_thread(self.api.get_my_merge_requests, self.state)
+        # Fetch unresolved counts in parallel for opened MRs only
+        if self.state == 'opened' and self.mrs:
+            todo = [(m['project_path'], m['iid']) for m in self.mrs if m['project_path']]
+            results = await asyncio.gather(*(
+                asyncio.to_thread(self.api.get_mr_unresolved_count, p, i) for p, i in todo
+            ), return_exceptions=True)
+            for (p, i), r in zip(todo, results):
+                if isinstance(r, int):
+                    self._unresolved_cache[(p, i)] = r
+        self._apply_filter()
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+            self.query_one("#header", K9sHeader).set_keys(self._keys())
+        except Exception:
+            pass
+
+    async def _safe_refresh(self) -> None:
+        if self._refreshing:
+            return
+        self._refreshing = True
+        self._refresh_status()
+        try:
+            await self.load_mrs()
+        except Exception:
+            pass
+        finally:
+            self._refreshing = False
+            self._refresh_status()
+
+    def on_unmount(self) -> None:
+        if self._refresh_timer:
+            self._refresh_timer.stop()
+
+    def _apply_filter(self) -> None:
+        try:
+            q = self.query_one("#mr-filter", Input).value.strip().lower()
+        except Exception:
+            q = ""
+        if not q:
+            self.filtered_mrs = list(self.mrs)
+        else:
+            self.filtered_mrs = [
+                m for m in self.mrs
+                if q in (m['title'] or '').lower()
+                or q in (m['project_path'] or '').lower()
+                or q in (m['author'] or '').lower()
+                or q in str(m['iid'])
+                or q in (m['source_branch'] or '').lower()
+                or q in (m['target_branch'] or '').lower()
+            ]
+        self._update_table()
+        self._refresh_status()
+
+    def _update_table(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        prev = table.cursor_row
+        table.clear()
+        for m in self.filtered_mrs:
+            iid = Text(f"!{m['iid']}", style="bold #89b4fa")
+            proj = Text((m['project_path'] or '')[:32], style="cyan")
+            title = m['title'] or ''
+            if m['draft']:
+                title = f"[draft] {title}"
+            title_t = Text(title[:50], style="bold #cdd6f4")
+            unresolved = self._unresolved_cache.get((m['project_path'], m['iid']))
+            if unresolved is None:
+                unresolved_t = Text("—", style="dim")
+            elif unresolved == 0:
+                unresolved_t = Text("0", style="dim #a6e3a1")
+            else:
+                unresolved_t = Text(str(unresolved), style="bold #f38ba8")
+            age = format_age(m['updated_at'] or m['created_at'])
+            table.add_row(
+                iid,
+                proj,
+                title_t,
+                _mr_state_badge(m['state']),
+                _pipeline_status_text(m['head_pipeline_status']),
+                unresolved_t,
+                Text(age, style="dim italic"),
+            )
+        if prev is not None and self.filtered_mrs:
+            table.move_cursor(row=min(prev, len(self.filtered_mrs) - 1))
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "mr-filter":
+            self._apply_filter()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "mr-filter":
+            self._apply_filter()
+            self.query_one("#mr-table", DataTable).focus()
+
+    async def action_back(self) -> None:
+        self.app.pop_screen()
+
+    async def action_refresh(self) -> None:
+        self._unresolved_cache.clear()
+        await self.load_mrs()
+
+    async def action_search(self) -> None:
+        self.query_one("#mr-filter", Input).focus()
+
+    async def action_toggle_state(self) -> None:
+        try:
+            idx = MR_STATE_CYCLE.index(self.state)
+        except ValueError:
+            idx = -1
+        self.state = MR_STATE_CYCLE[(idx + 1) % len(MR_STATE_CYCLE)]
+        self._unresolved_cache.clear()
+        await self.load_mrs()
+
+    async def action_goto(self) -> None:
+        def _after(result):
+            if result:
+                project_path, iid = result
+                asyncio.ensure_future(self._open_mr(project_path, iid))
+        self.app.push_screen(MRPickerModal(recents=self.api.config.recent_projects), _after)
+
+    async def _open_mr(self, project_path: str, iid: int) -> None:
+        self.app.push_screen(MergeRequestDetailScreen(self.api, project_path, iid))
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        idx = event.cursor_row
+        if idx is not None and idx < len(self.filtered_mrs):
+            m = self.filtered_mrs[idx]
+            self.app.push_screen(MergeRequestDetailScreen(self.api, m['project_path'], m['iid']))
+
+    async def action_browser(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.filtered_mrs):
+            webbrowser.open(self.filtered_mrs[table.cursor_row]['web_url'])
+
+    async def action_yank(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.filtered_mrs):
+            m = self.filtered_mrs[table.cursor_row]
+            if copy_to_clipboard(m['web_url']):
+                self.notify(f"Copied MR !{m['iid']} URL", timeout=2)
+
+
+class ProjectMergeRequestsScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "s": "toggle_state"}
+
+    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+    STATE_CYCLE = ['merged', 'closed', 'opened', 'all']
+
+    def __init__(self, api: GitLabAPI, project_path: str):
+        super().__init__()
+        self.api = api
+        self.project_path = project_path
+        self.mrs = []
+        self.filtered_mrs = []
+        self.state = 'merged'
+        self._refresh_timer = None
+        self._refreshing = False
+
+    def _info_pairs(self):
+        total = len(self.mrs)
+        shown = len(self.filtered_mrs)
+        count = f"{shown}/{total}" if shown != total else str(total)
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Project", self.project_path),
+            ("State", self.state),
+            ("MRs", count),
+        ]
+
+    def _keys(self):
+        return [
+            ("q", "back"),
+            ("/", "filter"),
+            ("r", "refresh"),
+            ("s", f"state:{self.state}"),
+            ("b", "browser"),
+            ("y", "copy url"),
+            ("enter", "view"),
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Container(
+            Input(placeholder="/  filter MRs...", id="proj-mr-filter"),
+            id="filter-bar",
+        )
+        yield DataTable(id="proj-mr-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _status_text(self):
+        total = len(self.mrs)
+        shown = len(self.filtered_mrs)
+        text_filter = ""
+        try:
+            text_filter = self.query_one("#proj-mr-filter", Input).value.strip()
+        except Exception:
+            pass
+        count = f"{shown}/{total} MRs" if shown != total else f"{total} MRs"
+        parts = [count, ("state", self.state)]
+        if text_filter:
+            parts.append(("filter", text_filter))
+        return _status_line(parts)
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(self._status_text())
+            sb.set_right(_auto_refresh_indicator(
+                self.REFRESH_INTERVAL,
+                active=self._refresh_timer is not None,
+                refreshing=self._refreshing,
+            ))
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#proj-mr-table", DataTable)
+        table.add_columns("IID", "Title", "MR", "Pipeline", "Author", "Age")
+        table.cursor_type = "row"
+        await self.load_mrs()
+        table.focus()
+        self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
+        self._refresh_status()
+
+    async def load_mrs(self) -> None:
+        self.mrs = await asyncio.to_thread(self.api.get_project_merge_requests, self.project_path, self.state)
+        self._apply_filter()
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+            self.query_one("#header", K9sHeader).set_keys(self._keys())
+        except Exception:
+            pass
+
+    async def _safe_refresh(self) -> None:
+        if self._refreshing:
+            return
+        self._refreshing = True
+        self._refresh_status()
+        try:
+            await self.load_mrs()
+        except Exception:
+            pass
+        finally:
+            self._refreshing = False
+            self._refresh_status()
+
+    def on_unmount(self) -> None:
+        if self._refresh_timer:
+            self._refresh_timer.stop()
+
+    def _apply_filter(self) -> None:
+        try:
+            q = self.query_one("#proj-mr-filter", Input).value.strip().lower()
+        except Exception:
+            q = ""
+        if not q:
+            self.filtered_mrs = list(self.mrs)
+        else:
+            self.filtered_mrs = [
+                m for m in self.mrs
+                if q in (m['title'] or '').lower()
+                or q in (m['author'] or '').lower()
+                or q in str(m['iid'])
+                or q in (m['source_branch'] or '').lower()
+            ]
+        self._update_table()
+        self._refresh_status()
+
+    def _update_table(self) -> None:
+        table = self.query_one("#proj-mr-table", DataTable)
+        prev = table.cursor_row
+        table.clear()
+        for m in self.filtered_mrs:
+            iid = Text(f"!{m['iid']}", style="bold #89b4fa")
+            title = m['title'] or ''
+            if m['draft']:
+                title = f"[draft] {title}"
+            ref_age = m.get('merged_at') or m.get('closed_at') or m['updated_at']
+            table.add_row(
+                iid,
+                Text(title[:60], style="bold #cdd6f4"),
+                _mr_state_badge(m['state']),
+                _pipeline_status_text(m['head_pipeline_status']),
+                Text(m['author'] or '', style="dim"),
+                Text(format_age(ref_age), style="dim italic"),
+            )
+        if prev is not None and self.filtered_mrs:
+            table.move_cursor(row=min(prev, len(self.filtered_mrs) - 1))
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "proj-mr-filter":
+            self._apply_filter()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "proj-mr-filter":
+            self._apply_filter()
+            self.query_one("#proj-mr-table", DataTable).focus()
+
+    async def action_back(self) -> None:
+        self.app.pop_screen()
+
+    async def action_refresh(self) -> None:
+        await self.load_mrs()
+
+    async def action_search(self) -> None:
+        self.query_one("#proj-mr-filter", Input).focus()
+
+    async def action_toggle_state(self) -> None:
+        try:
+            idx = self.STATE_CYCLE.index(self.state)
+        except ValueError:
+            idx = -1
+        self.state = self.STATE_CYCLE[(idx + 1) % len(self.STATE_CYCLE)]
+        await self.load_mrs()
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        idx = event.cursor_row
+        if idx is not None and idx < len(self.filtered_mrs):
+            m = self.filtered_mrs[idx]
+            self.app.push_screen(MergeRequestDetailScreen(self.api, self.project_path, m['iid']))
+
+    async def action_browser(self) -> None:
+        table = self.query_one("#proj-mr-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.filtered_mrs):
+            webbrowser.open(self.filtered_mrs[table.cursor_row]['web_url'])
+
+    async def action_yank(self) -> None:
+        table = self.query_one("#proj-mr-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.filtered_mrs):
+            m = self.filtered_mrs[table.cursor_row]
+            if copy_to_clipboard(m['web_url']):
+                self.notify(f"Copied MR !{m['iid']} URL", timeout=2)
+
+
+class MergeRequestDetailScreen(ScreenBase):
+
+    KEY_MAP = {
+        "q": "back",
+        "r": "refresh",
+        "b": "browser",
+        "y": "yank",
+        "p": "pipelines",
+        "a": "approve",
+        "x": "close",
+        "c": "comment",
+        "g": "goto",
+        "f": "toggle_resolved",
+        "t": "toggle_auto",
+    }
+
+    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+
+    def __init__(self, api: GitLabAPI, project_path: str, iid: int):
+        super().__init__()
+        self.api = api
+        self.project_path = project_path
+        self.iid = iid
+        self.mr = None
+        self.discussions = []
+        self.approval_rules = []
+        self.show_resolved = False
+        self._refresh_timer = None
+        self._refreshing = False
+
+    def _info_pairs(self):
+        if not self.mr:
+            return [
+                ("GitLab", self.api.config.gitlab_url),
+                ("Project", self.project_path),
+                ("MR", f"!{self.iid}"),
+                ("Status", "loading..."),
+            ]
+        m = self.mr
+        title = (m['title'] or '')[:60]
+        pipeline = m['head_pipeline_status'] or '—'
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Project", self.project_path),
+            ("MR", f"!{m['iid']}  {title}"),
+            ("State", m['state']),
+            ("Pipeline", pipeline),
+            ("Author", m['author'] or 'unknown'),
+            ("Created", format_age(m['created_at'])),
+        ]
+
+    def _keys(self):
+        resolved_label = "hide resolved" if self.show_resolved else "show resolved"
+        auto_label = "auto off" if self._refresh_timer is not None else "auto on"
+        return [
+            ("q", "back"),
+            ("r", "refresh"),
+            ("p", "pipelines"),
+            ("a", "approve"),
+            ("x", "close"),
+            ("c", "comment"),
+            ("f", resolved_label),
+            ("t", auto_label),
+            ("g", "goto MR"),
+            ("b", "browser"),
+            ("y", "copy url"),
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield ScrollableContainer(
+            Horizontal(
+                Static("", id="mr-col-left", classes="mr-col"),
+                Static("", id="mr-col-right", classes="mr-col"),
+                id="mr-cols",
+            ),
+            Static("", id="mr-approvals"),
+            Static("", id="mr-desc-heading", classes="mr-section"),
+            Markdown("", id="mr-desc"),
+            Static("", id="mr-disc-heading", classes="mr-section"),
+            Static("", id="mr-disc"),
+            id="mr-body-scroll",
+        )
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _status_text(self):
+        if not self.mr:
+            return _status_line(["loading..."])
+        m = self.mr
+        unresolved = sum(1 for d in self.discussions if d.get('unresolved'))
+        parts = [
+            ("commits", m.get('commits_count', 0)),
+            ("pipelines", m.get('head_pipeline_id') and "1+" or "0"),
+            ("changes", m.get('changes_count', 0)),
+            ("approvals", f"{m.get('approvals_count', 0)}/{m.get('approvals_required', 0) or '-'}"),
+            ("unresolved", unresolved),
+        ]
+        return _status_line(parts)
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(self._status_text())
+            sb.set_right(_auto_refresh_indicator(
+                self.REFRESH_INTERVAL,
+                active=self._refresh_timer is not None,
+                refreshing=self._refreshing,
+            ))
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        if self.project_path:
+            self.api.config.recent_projects.remember(self.project_path)
+        await self.load_mr()
+        if self.mr and self.mr.get('state') == 'opened':
+            self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
+        self._refresh_status()
+
+    def on_unmount(self) -> None:
+        if self._refresh_timer:
+            self._refresh_timer.stop()
+
+    async def load_mr(self) -> None:
+        mr, discussions, approval_rules = await asyncio.gather(
+            asyncio.to_thread(self.api.get_merge_request, self.project_path, self.iid),
+            asyncio.to_thread(self.api.get_mr_discussions, self.project_path, self.iid),
+            asyncio.to_thread(self.api.get_mr_approval_state, self.project_path, self.iid),
+        )
+        self.mr = mr
+        self.discussions = discussions or []
+        self.approval_rules = approval_rules or []
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+            self.query_one("#header", K9sHeader).set_keys(self._keys())
+        except Exception:
+            pass
+        self._render_body()
+        self._refresh_status()
+
+    async def _safe_refresh(self) -> None:
+        if self._refreshing:
+            return
+        self._refreshing = True
+        self._refresh_status()
+        try:
+            await self.load_mr()
+        except Exception:
+            pass
+        finally:
+            self._refreshing = False
+            self._refresh_status()
+
+    def _build_left_col(self) -> Text:
+        m = self.mr
+        rows = [
+            ("ID", Text(f"!{m['iid']}  (id {m['id']})", style="#cdd6f4")),
+            ("Title", Text(m['title'] or '', style="bold #cdd6f4")),
+            ("Author", Text(m['author'] or 'unknown', style="#cdd6f4")),
+            ("Source", Text(m['source_branch'], style="cyan")),
+            ("Target", Text(m['target_branch'], style="cyan")),
+        ]
+        return self._format_kv_rows(rows)
+
+    def _build_right_col(self) -> Text:
+        m = self.mr
+        state_t = Text(m['state'], style=f"bold {_mr_state_color(m['state'])}")
+        pipeline_status = m.get('head_pipeline_status')
+        pipeline_id = m.get('head_pipeline_id')
+        pipeline_t = Text()
+        if pipeline_status:
+            pipeline_t.append(pipeline_status, style=f"bold {_pipeline_status_color(pipeline_status)}")
+            if pipeline_id:
+                pipeline_t.append(f"  -  {pipeline_id}", style="#a6adc8")
+        else:
+            pipeline_t.append("—", style="dim")
+        created_t = Text(f"{m['created_at']}  ({format_age(m['created_at'])})", style="#cdd6f4")
+        rows = [
+            ("State", state_t),
+            ("Pipeline", pipeline_t),
+            ("Created", created_t),
+        ]
+        if m.get('merged_at'):
+            rows.append(("Merged", Text(f"{m['merged_at']}  ({format_age(m['merged_at'])})", style="#cdd6f4")))
+        elif m.get('closed_at') and m['state'] == 'closed':
+            rows.append(("Closed", Text(f"{m['closed_at']}  ({format_age(m['closed_at'])})", style="#cdd6f4")))
+        if m.get('has_conflicts'):
+            rows.append(("Conflicts", Text("yes", style="bold #f38ba8")))
+        return self._format_kv_rows(rows)
+
+    @staticmethod
+    def _format_kv_rows(rows) -> Text:
+        if not rows:
+            return Text("")
+        label_w = max(len(label) for label, _ in rows)
+        out = Text()
+        for i, (label, value_text) in enumerate(rows):
+            if i > 0:
+                out.append("\n")
+            out.append(f"{label.rjust(label_w)}: ", style="bold #f9e2af")
+            out.append_text(value_text if isinstance(value_text, Text) else Text(str(value_text)))
+        return out
+
+    def _build_approvals(self) -> Text:
+        m = self.mr
+        approved = m.get('approvals_count', 0) or 0
+        required = m.get('approvals_required', 0) or 0
+        names = m.get('approved_by') or []
+        out = Text()
+        if not (required or approved or self.approval_rules):
+            return out
+        out.append("Approvals: ", style="bold #f9e2af")
+        out.append(f"{approved}/{required if required else '-'}", style="bold #cdd6f4")
+        if names:
+            out.append("   ")
+            out.append(" | ".join(names), style="bold #a6e3a1")
+        for rule in self.approval_rules:
+            if rule.get('rule_type') != 'code_owner':
+                continue
+            rr = rule.get('approvals_required', 0) or 0
+            ra = rule.get('approved_by') or []
+            if rr == 0 and not ra:
+                continue
+            out.append("\n   CODEOWNER ", style="bold #f9e2af")
+            out.append(f"{len(ra)}/{rr}", style="bold #cdd6f4")
+            if ra:
+                out.append("   ")
+                out.append(" | ".join(ra), style="bold #a6e3a1")
+            else:
+                out.append("   ")
+                out.append("(needs approval)", style="bold #f38ba8")
+            name = rule.get('name') or ''
+            if name and name.lower() not in ('code owners', 'codeowners'):
+                out.append("   ")
+                out.append(f"[{name}]", style="dim #a6adc8")
+        return out
+
+    def _build_discussions(self) -> Text:
+        visible = self.discussions if self.show_resolved else [
+            d for d in self.discussions if d.get('unresolved') or not d.get('resolvable')
+        ]
+        non_system = [d for d in visible if not d.get('system')]
+        out = Text()
+        if not non_system:
+            out.append("(no discussions)", style="dim italic #6c7086")
+            return out
+        for i, d in enumerate(non_system):
+            if i > 0:
+                out.append("\n\n")
+            marker_style = "bold #f38ba8" if d.get('unresolved') else (
+                "bold #a6e3a1" if d.get('resolvable') else "bold #89b4fa"
+            )
+            marker_label = "●" if d.get('unresolved') else ("✓" if d.get('resolvable') else "·")
+            out.append(f"{marker_label} ", style=marker_style)
+            out.append(d.get('first_author') or 'unknown', style="bold #cdd6f4")
+            out.append("  ")
+            out.append(format_age(d.get('first_created_at') or ''), style="dim italic #a6adc8")
+            if d.get('resolvable'):
+                out.append("  ")
+                out.append(
+                    "unresolved" if d.get('unresolved') else "resolved",
+                    style="bold #f38ba8" if d.get('unresolved') else "dim #a6e3a1",
+                )
+            for note in d.get('notes', []):
+                if note.get('system'):
+                    continue
+                body = (note.get('body') or '').strip()
+                if not body:
+                    continue
+                out.append("\n")
+                for j, line in enumerate(body.split('\n')):
+                    if j > 0:
+                        out.append("\n")
+                    out.append(f"    {line}", style="#cdd6f4")
+        return out
+
+    def _disc_heading_text(self) -> Text:
+        visible = self.discussions if self.show_resolved else [
+            d for d in self.discussions if d.get('unresolved') or not d.get('resolvable')
+        ]
+        non_system = [d for d in visible if not d.get('system')]
+        unresolved = sum(1 for d in self.discussions if d.get('unresolved'))
+        total = len(self.discussions)
+        t = Text()
+        t.append(" DISCUSSIONS ", style="bold white on #89b4fa")
+        t.append(f"  ({len(non_system)} shown · {unresolved} unresolved · {total} total)", style="dim #a6adc8")
+        return t
+
+    def _render_body(self) -> None:
+        if not self.mr:
+            try:
+                self.query_one("#mr-col-left", Static).update(Text("MR not found", style="bold #f38ba8"))
+                self.query_one("#mr-col-right", Static).update("")
+                self.query_one("#mr-approvals", Static).update("")
+                self.query_one("#mr-desc-heading", Static).update("")
+                self.query_one("#mr-desc", Markdown).update("")
+                self.query_one("#mr-disc-heading", Static).update("")
+                self.query_one("#mr-disc", Static).update("")
+            except Exception:
+                pass
+            return
+        try:
+            self.query_one("#mr-col-left", Static).update(self._build_left_col())
+            self.query_one("#mr-col-right", Static).update(self._build_right_col())
+            self.query_one("#mr-approvals", Static).update(self._build_approvals())
+            self.query_one("#mr-desc-heading", Static).update(Text(" DESCRIPTION ", style="bold white on #89b4fa"))
+            desc = (self.mr.get('description') or '').strip()
+            self.query_one("#mr-desc", Markdown).update(desc if desc else "*(no description)*")
+            self.query_one("#mr-disc-heading", Static).update(self._disc_heading_text())
+            self.query_one("#mr-disc", Static).update(self._build_discussions())
+        except Exception:
+            pass
+
+    async def action_back(self) -> None:
+        self.app.pop_screen()
+
+    async def action_refresh(self) -> None:
+        await self.load_mr()
+
+    async def action_browser(self) -> None:
+        if self.mr:
+            webbrowser.open(self.mr['web_url'])
+
+    async def action_yank(self) -> None:
+        if self.mr and copy_to_clipboard(self.mr['web_url']):
+            self.notify(f"Copied MR !{self.mr['iid']} URL", timeout=2)
+
+    async def action_pipelines(self) -> None:
+        if not self.mr:
+            return
+        self.app.push_screen(MRPipelineListScreen(self.api, self.project_path, self.mr))
+
+    async def action_toggle_resolved(self) -> None:
+        self.show_resolved = not self.show_resolved
+        try:
+            self.query_one("#header", K9sHeader).set_keys(self._keys())
+        except Exception:
+            pass
+        self._render_body()
+
+    async def action_toggle_auto(self) -> None:
+        if self._refresh_timer is not None:
+            self._refresh_timer.stop()
+            self._refresh_timer = None
+            self.notify("Auto-refresh off", timeout=2)
+        else:
+            self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
+            self.notify(f"Auto-refresh on ({self.REFRESH_INTERVAL}s)", timeout=2)
+        try:
+            self.query_one("#header", K9sHeader).set_keys(self._keys())
+        except Exception:
+            pass
+        self._refresh_status()
+
+    async def action_goto(self) -> None:
+        def _after(result):
+            if result:
+                project_path, iid = result
+                asyncio.ensure_future(self._open_mr(project_path, iid))
+        self.app.push_screen(MRPickerModal(default_project=self.project_path, recents=self.api.config.recent_projects), _after)
+
+    async def _open_mr(self, project_path: str, iid: int) -> None:
+        self.app.push_screen(MergeRequestDetailScreen(self.api, project_path, iid))
+
+    async def action_approve(self) -> None:
+        if not self.mr:
+            return
+        if self.mr['state'] != 'opened':
+            self.notify(f"Cannot approve — MR is {self.mr['state']}", severity="warning", timeout=3)
+            return
+
+        def _after(confirmed):
+            if confirmed:
+                asyncio.ensure_future(self._do_approve())
+
+        modal = ConfirmModal(
+            f"Approve MR !{self.mr['iid']}?",
+            detail=(self.mr['title'] or '')[:60],
+        )
+        self.app.push_screen(modal, _after)
+
+    async def _do_approve(self) -> None:
+        try:
+            await asyncio.to_thread(self.api.approve_merge_request, self.project_path, self.iid)
+            self.notify(f"Approved MR !{self.iid}", timeout=2)
+            await self.load_mr()
+        except Exception as e:
+            self.notify(f"Approve failed: {e}", severity="error", timeout=4)
+
+    async def action_close(self) -> None:
+        if not self.mr:
+            return
+        if self.mr['state'] != 'opened':
+            self.notify(f"Cannot close — MR is {self.mr['state']}", severity="warning", timeout=3)
+            return
+
+        def _after(confirmed):
+            if confirmed:
+                asyncio.ensure_future(self._do_close())
+
+        modal = ConfirmModal(
+            f"Close MR !{self.mr['iid']}?",
+            detail=(self.mr['title'] or '')[:60],
+        )
+        self.app.push_screen(modal, _after)
+
+    async def _do_close(self) -> None:
+        try:
+            await asyncio.to_thread(self.api.close_merge_request, self.project_path, self.iid)
+            self.notify(f"Closed MR !{self.iid}", timeout=2)
+            await self.load_mr()
+        except Exception as e:
+            self.notify(f"Close failed: {e}", severity="error", timeout=4)
+
+    async def action_comment(self) -> None:
+        if not self.mr:
+            return
+
+        def _after(body):
+            if body:
+                asyncio.ensure_future(self._do_comment(body))
+
+        modal = TextInputModal(
+            f"Comment on MR !{self.iid}",
+            placeholder="Type your comment...",
+        )
+        self.app.push_screen(modal, _after)
+
+    async def _do_comment(self, body: str) -> None:
+        try:
+            await asyncio.to_thread(self.api.create_mr_note, self.project_path, self.iid, body)
+            self.notify("Comment posted", timeout=2)
+            await self.load_mr()
+        except Exception as e:
+            self.notify(f"Comment failed: {e}", severity="error", timeout=4)
+
+
+class MRPipelineListScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "b": "browser", "y": "yank"}
+
+    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+
+    def __init__(self, api: GitLabAPI, project_path: str, mr: dict):
+        super().__init__()
+        self.api = api
+        self.project_path = project_path
+        self.mr = mr
+        self.pipelines = []
+        self._refresh_timer = None
+        self._refreshing = False
+
+    def _info_pairs(self):
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Project", self.project_path),
+            ("MR", f"!{self.mr['iid']}  {(self.mr.get('title') or '')[:40]}"),
+            ("Source", self.mr.get('source_branch') or ''),
+            ("Pipelines", str(len(self.pipelines))),
+        ]
+
+    def _keys(self):
+        return [
+            ("q", "back"),
+            ("r", "refresh"),
+            ("b", "browser"),
+            ("y", "copy url"),
+            ("enter", "jobs"),
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield DataTable(id="mr-pipeline-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _status_text(self):
+        return _status_line([f"{len(self.pipelines)} pipelines", ("MR", f"!{self.mr['iid']}")])
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(self._status_text())
+            sb.set_right(_auto_refresh_indicator(
+                self.REFRESH_INTERVAL,
+                active=self._refresh_timer is not None,
+                refreshing=self._refreshing,
+            ))
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#mr-pipeline-table", DataTable)
+        table.add_columns("ID", "Status", "Ref", "SHA", "Last Run")
+        table.cursor_type = "row"
+        await self.load_pipelines()
+        table.focus()
+        # auto-refresh only if any pipeline is active
+        if any(p['status'] not in TERMINAL_STATUSES for p in self.pipelines):
+            self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
+        self._refresh_status()
+
+    async def load_pipelines(self) -> None:
+        self.pipelines = await asyncio.to_thread(self.api.get_mr_pipelines, self.project_path, self.mr['iid'])
+        # head pipeline first (most recent) — gitlab returns desc by default
+        self._update_table()
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+        except Exception:
+            pass
+
+    async def _safe_refresh(self) -> None:
+        if self._refreshing:
+            return
+        self._refreshing = True
+        self._refresh_status()
+        try:
+            await self.load_pipelines()
+        except Exception:
+            pass
+        finally:
+            self._refreshing = False
+            self._refresh_status()
+
+    def on_unmount(self) -> None:
+        if self._refresh_timer:
+            self._refresh_timer.stop()
+
+    def _update_table(self) -> None:
+        table = self.query_one("#mr-pipeline-table", DataTable)
+        prev = table.cursor_row
+        table.clear()
+        for i, p in enumerate(self.pipelines):
+            id_text = Text(str(p['id']), style="bold #89b4fa" if i == 0 else "bold")
+            ref_text = Text((p['ref'] or '')[:40], style="cyan")
+            table.add_row(
+                id_text,
+                status_badge(p['status']),
+                ref_text,
+                Text(p['sha'], style="dim"),
+                Text(format_age(p['updated_at'] or p['created_at']), style="dim italic"),
+            )
+        if prev is not None and self.pipelines:
+            table.move_cursor(row=min(prev, len(self.pipelines) - 1))
+        self._refresh_status()
+
+    async def action_back(self) -> None:
+        self.app.pop_screen()
+
+    async def action_refresh(self) -> None:
+        await self.load_pipelines()
+
+    async def action_browser(self) -> None:
+        table = self.query_one("#mr-pipeline-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.pipelines):
+            url = self.pipelines[table.cursor_row].get('web_url')
+            if url:
+                webbrowser.open(url)
+
+    async def action_yank(self) -> None:
+        table = self.query_one("#mr-pipeline-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.pipelines):
+            url = self.pipelines[table.cursor_row].get('web_url')
+            if url and copy_to_clipboard(url):
+                self.notify("Copied URL", timeout=2)
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        idx = event.cursor_row
+        if idx is None or idx >= len(self.pipelines):
+            return
+        pipeline = self.pipelines[idx]
+        # Ensure api is bound to the MR's project so JobListScreen calls work
+        ds_api = GitLabAPI(self.api.config)
+        try:
+            ds_api.set_project(self.project_path)
+        except Exception:
+            self.notify(f"Cannot access {self.project_path}", severity="error", timeout=3)
+            return
+        self.app.push_screen(JobListScreen(ds_api, pipeline))
+
+
 # -- modals ------------------------------------------------------------------
 
 class ConfirmModal(ModalScreen[bool]):
@@ -1594,6 +2898,155 @@ class ConfirmModal(ModalScreen[bool]):
         event.prevent_default()
         event.stop()
         self.dismiss(event.key.lower() == "y")
+
+
+class TextInputModal(ModalScreen[str | None]):
+    """Multi-line input modal. Returns text on ctrl+s, None on escape."""
+
+    def __init__(self, title: str, placeholder: str = "", initial: str = ""):
+        super().__init__()
+        self.title_text = title
+        self.placeholder = placeholder
+        self.initial = initial
+
+    def compose(self) -> ComposeResult:
+        header = Text()
+        header.append(self.title_text, style="bold #cdd6f4")
+        header.append("\n")
+        header.append("ctrl+s submit · esc cancel", style="dim #a6adc8")
+        ta = TextArea(self.initial, id="text-input-area")
+        ta.show_line_numbers = False
+        yield Container(
+            Static(header, id="text-input-header"),
+            ta,
+            id="text-input-box",
+        )
+
+    def on_mount(self) -> None:
+        try:
+            self.query_one("#text-input-area", TextArea).focus()
+        except Exception:
+            pass
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self.dismiss(None)
+        elif event.key == "ctrl+s":
+            event.prevent_default()
+            event.stop()
+            try:
+                text = self.query_one("#text-input-area", TextArea).text
+            except Exception:
+                text = ""
+            text = text.strip()
+            self.dismiss(text if text else None)
+
+
+class MRPickerModal(ModalScreen[tuple[str, int] | None]):
+    """Pick MR by project path + ID. Ghost-text autocomplete from recents. Returns (project_path, iid) on submit."""
+
+    def __init__(self, default_project: str = "", recents=None):
+        super().__init__()
+        self.default_project = default_project
+        self.recents_store = recents
+        self.all_recents = list(recents.list()) if recents else []
+
+    def compose(self) -> ComposeResult:
+        header = Text()
+        header.append("Open MR by ID", style="bold #cdd6f4")
+        header.append("\n")
+        header.append("→/tab accept suggestion · ctrl+d remove current from recents · esc cancel",
+                      style="dim #a6adc8")
+        suggester = SuggestFromList(self.all_recents, case_sensitive=False) if self.all_recents else None
+        yield Container(
+            Static(header, id="picker-header"),
+            Label("Project", classes="picker-label"),
+            Input(
+                value=self.default_project,
+                placeholder="group/project",
+                id="picker-project",
+                suggester=suggester,
+            ),
+            Label("MR ID", classes="picker-label"),
+            Input(placeholder="123", id="picker-iid"),
+            Static("", id="picker-error"),
+            id="picker-box",
+        )
+
+    def on_mount(self) -> None:
+        try:
+            target = "#picker-iid" if self.default_project else "#picker-project"
+            self.query_one(target, Input).focus()
+        except Exception:
+            pass
+
+    def _submit(self) -> None:
+        try:
+            proj = self.query_one("#picker-project", Input).value.strip()
+            iid_str = self.query_one("#picker-iid", Input).value.strip()
+        except Exception:
+            return
+        if not proj or not iid_str:
+            self._set_error("project and id required")
+            return
+        try:
+            iid = int(iid_str)
+        except ValueError:
+            self._set_error("id must be integer")
+            return
+        if self.recents_store:
+            self.recents_store.remember(proj)
+        self.dismiss((proj, iid))
+
+    def _set_error(self, msg: str) -> None:
+        try:
+            self.query_one("#picker-error", Static).update(Text(msg, style="bold #f38ba8"))
+        except Exception:
+            pass
+
+    def _remove_current_recent(self) -> None:
+        try:
+            current = self.query_one("#picker-project", Input).value.strip()
+        except Exception:
+            return
+        if not current:
+            return
+        match = next((p for p in self.all_recents if p.lower() == current.lower()), None)
+        if not match:
+            self.notify(f"'{current}' not in recents", severity="warning", timeout=2)
+            return
+        if self.recents_store:
+            self.recents_store.remove(match)
+        self.all_recents.remove(match)
+        # rebuild suggester w/ updated list
+        try:
+            inp = self.query_one("#picker-project", Input)
+            inp.suggester = SuggestFromList(self.all_recents, case_sensitive=False) if self.all_recents else None
+            inp.value = ""
+        except Exception:
+            pass
+        self.notify(f"Removed {match} from recents", timeout=2)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "picker-project":
+            try:
+                self.query_one("#picker-iid", Input).focus()
+            except Exception:
+                pass
+        elif event.input.id == "picker-iid":
+            self._submit()
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self.dismiss(None)
+        elif event.key == "ctrl+d":
+            event.prevent_default()
+            event.stop()
+            self._remove_current_recent()
 
 
 # -- app ---------------------------------------------------------------------
@@ -1724,14 +3177,153 @@ class PipelineMonitor(App):
         height: auto;
         color: #cdd6f4;
     }
+
+    TextInputModal {
+        align: center middle;
+        background: #1e1e2e 60%;
+    }
+
+    #text-input-box {
+        width: 80;
+        height: 24;
+        background: #313244;
+        border: tall #89b4fa;
+        padding: 1 2;
+    }
+
+    #text-input-header {
+        width: 100%;
+        height: auto;
+        color: #cdd6f4;
+        margin-bottom: 1;
+    }
+
+    #text-input-area {
+        width: 100%;
+        height: 1fr;
+        background: #1e1e2e;
+        color: #cdd6f4;
+    }
+
+    MRPickerModal {
+        align: center middle;
+        background: #1e1e2e 60%;
+    }
+
+    #picker-box {
+        width: 70;
+        height: auto;
+        background: #313244;
+        border: tall #89b4fa;
+        padding: 1 2;
+    }
+
+    #picker-header {
+        width: 100%;
+        height: auto;
+        color: #cdd6f4;
+        margin-bottom: 1;
+    }
+
+    .picker-label {
+        color: #f9e2af;
+        text-style: bold;
+        margin-top: 1;
+    }
+
+    #picker-project, #picker-iid {
+        width: 100%;
+        background: #1e1e2e;
+        color: #cdd6f4;
+        border: tall #45475a;
+    }
+
+    #picker-project:focus, #picker-iid:focus {
+        border: tall #89b4fa;
+    }
+
+    #picker-error {
+        width: 100%;
+        height: auto;
+        color: #f38ba8;
+        margin-top: 1;
+    }
+
+    #mr-body-scroll {
+        background: #1e1e2e;
+        color: #cdd6f4;
+        padding: 1 2;
+        height: 1fr;
+        scrollbar-size: 1 1;
+    }
+
+    #mr-cols {
+        width: 100%;
+        height: auto;
+        background: #1e1e2e;
+        margin-bottom: 1;
+    }
+
+    .mr-col {
+        width: 1fr;
+        height: auto;
+        background: #1e1e2e;
+        color: #cdd6f4;
+        padding: 0 2 0 0;
+    }
+
+    #mr-approvals {
+        width: 100%;
+        height: auto;
+        background: #181825;
+        color: #cdd6f4;
+        padding: 1 2;
+        margin: 1 0;
+    }
+
+    .mr-section {
+        width: 100%;
+        height: auto;
+        background: #1e1e2e;
+        color: #cdd6f4;
+        margin-top: 1;
+    }
+
+    #mr-desc {
+        width: 100%;
+        height: auto;
+        background: #1e1e2e;
+        color: #cdd6f4;
+        margin-bottom: 1;
+    }
+
+    #mr-desc MarkdownH1, #mr-desc MarkdownH2, #mr-desc MarkdownH3 {
+        background: #1e1e2e;
+        color: #89b4fa;
+    }
+
+    #mr-desc MarkdownFence, #mr-desc MarkdownCode {
+        background: #181825;
+        color: #f9e2af;
+    }
+
+    #mr-disc {
+        width: 100%;
+        height: auto;
+        background: #1e1e2e;
+        color: #cdd6f4;
+        padding: 1 0;
+    }
     """
 
-    def __init__(self, config: Config, default_age_days=DEFAULT_PIPELINE_AGE_DAYS, default_branch_filter: str = ""):
+    def __init__(self, config: Config, default_age_days=DEFAULT_PIPELINE_AGE_DAYS, default_branch_filter: str = "", resume: bool = True, explicit_project: bool = False):
         super().__init__()
         self.config = config
         self.api = GitLabAPI(config)
         self.default_age_days = default_age_days
         self.default_branch_filter = default_branch_filter or ""
+        self.resume = resume
+        self.explicit_project = explicit_project
 
     def action_quit(self) -> None:
         self.exit()
@@ -1744,17 +3336,49 @@ class PipelineMonitor(App):
     async def _finish_loading(self) -> None:
         try:
             await asyncio.to_thread(self.api.connect_project)
-        except Exception as e:
+        except Exception:
             self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
             self.notify(f"Project not found: {self.config.project_path}", severity="error", timeout=5)
             return
         self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
-        if self.api.project:
+        # explicit -p / GITLAB_PROJECT wins over resume
+        if self.explicit_project and self.api.project:
             self.push_screen(PipelineListScreen(
                 self.api,
                 age_days=self.default_age_days,
                 initial_filter=self.default_branch_filter,
             ))
+            return
+        if not self.resume:
+            return
+        last = self.config.get_last_view()
+        if not last:
+            # legacy fallback: auto-jump to default project if GITLAB_PROJECT set
+            if self.api.project:
+                self.push_screen(PipelineListScreen(
+                    self.api,
+                    age_days=self.default_age_days,
+                    initial_filter=self.default_branch_filter,
+                ))
+            return
+        view_type = last.get('type')
+        try:
+            if view_type == 'my_mrs':
+                self.push_screen(MyMergeRequestsScreen(self.api))
+            elif view_type == 'pipelines':
+                proj = last.get('project')
+                if proj:
+                    try:
+                        await asyncio.to_thread(self.api.set_project, proj)
+                        self.push_screen(PipelineListScreen(
+                            self.api,
+                            age_days=self.default_age_days,
+                            initial_filter=self.default_branch_filter,
+                        ))
+                    except Exception:
+                        self.notify(f"Could not resume project {proj}", severity="warning", timeout=3)
+        except Exception:
+            pass
 
 
 def _detect_cwd_branch() -> str:
@@ -1777,6 +3401,8 @@ def main():
                         help="Pre-fill pipeline filter with this branch (clearable in the UI)")
     parser.add_argument("-B", "--cwd-branch", action="store_true",
                         help="Pre-fill pipeline filter with current git branch from CWD")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="Skip restoring last view (MR list / pipelines)")
     args = parser.parse_args()
 
     branch_filter = ""
@@ -1802,7 +3428,13 @@ def main():
         print("  --project group/project")
         sys.exit(1)
 
-    app = PipelineMonitor(config, default_age_days=args.days, default_branch_filter=branch_filter)
+    app = PipelineMonitor(
+        config,
+        default_age_days=args.days,
+        default_branch_filter=branch_filter,
+        resume=not args.no_resume,
+        explicit_project=bool(args.project),
+    )
     app.run()
 
 

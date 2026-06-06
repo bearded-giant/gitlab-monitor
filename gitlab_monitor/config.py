@@ -8,6 +8,48 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 
+class RecentProjects:
+    """Persist most-recent project paths to ~/.config/gitlab-monitor/recent_projects.json"""
+
+    def __init__(self, config_dir: Path, limit: int = 20):
+        self.path = config_dir / "recent_projects.json"
+        self.limit = limit
+        self._items: List[str] = []
+        self._load()
+
+    def _load(self) -> None:
+        if self.path.exists():
+            try:
+                with open(self.path, 'r') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        self._items = [str(x) for x in data][:self.limit]
+            except Exception:
+                self._items = []
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, 'w') as f:
+            json.dump(self._items, f, indent=2)
+
+    def list(self) -> List[str]:
+        return list(self._items)
+
+    def remember(self, project_path: str) -> None:
+        if not project_path:
+            return
+        if project_path in self._items:
+            self._items.remove(project_path)
+        self._items.insert(0, project_path)
+        self._items = self._items[:self.limit]
+        self._save()
+
+    def remove(self, project_path: str) -> None:
+        if project_path in self._items:
+            self._items.remove(project_path)
+            self._save()
+
+
 class Favorites:
     """Persist starred project paths to ~/.config/gitlab-monitor/favorites.json"""
 
@@ -61,8 +103,38 @@ class Config:
     def __init__(self):
         self.config_dir = Path.home() / ".config" / "gitlab-monitor"
         self.config_file = self.config_dir / "config.json"
+        self.last_view_file = self.config_dir / "last_view.json"
         self._config = self._load_config()
         self.favorites = Favorites(self.config_dir)
+        self.recent_projects = RecentProjects(self.config_dir)
+
+    def get_last_view(self) -> Optional[Dict[str, Any]]:
+        if not self.last_view_file.exists():
+            return None
+        try:
+            with open(self.last_view_file, 'r') as f:
+                data = json.load(f)
+                if isinstance(data, dict) and data.get('type'):
+                    return data
+        except Exception:
+            pass
+        return None
+
+    def save_last_view(self, view_type: str, **extra) -> None:
+        try:
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            payload = {'type': view_type, **extra}
+            with open(self.last_view_file, 'w') as f:
+                json.dump(payload, f, indent=2)
+        except Exception:
+            pass
+
+    def clear_last_view(self) -> None:
+        try:
+            if self.last_view_file.exists():
+                self.last_view_file.unlink()
+        except Exception:
+            pass
     
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from file and environment variables"""
