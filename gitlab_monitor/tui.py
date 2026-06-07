@@ -271,14 +271,35 @@ class KeyBar(Static):
     pass
 
 
+def _breadcrumb_text(parts):
+    """parts: list of str or (text, style) tuples. Renders with › separators."""
+    t = Text()
+    sep = Text("  ›  ", style="#585b70")
+    first = True
+    for p in parts:
+        if p is None or p == "":
+            continue
+        if not first:
+            t.append_text(sep)
+        first = False
+        if isinstance(p, tuple):
+            text, style = p
+            t.append(text, style=style)
+        else:
+            t.append(str(p), style="bold #89b4fa")
+    return t
+
+
 class StatusBar(Horizontal):
     def __init__(self, left=None, right=None, **kw):
         super().__init__(**kw)
         self._initial_left = left or ""
         self._initial_right = right or ""
+        self._initial_loading = ""
 
     def compose(self) -> ComposeResult:
         yield Static(self._initial_left, id="status-left")
+        yield Static(self._initial_loading, id="status-loading")
         yield Static(self._initial_right, id="status-right")
 
     def set_text(self, text) -> None:
@@ -293,21 +314,27 @@ class StatusBar(Horizontal):
         except Exception:
             self._initial_right = text
 
+    def set_loading(self, text) -> None:
+        try:
+            self.query_one("#status-loading", Static).update(text)
+        except Exception:
+            self._initial_loading = text
 
-def _auto_refresh_indicator(interval_seconds, active=True, refreshing=False):
-    """Build right-side status text showing auto-refresh state."""
+
+def _auto_refresh_indicator(interval_seconds, active=True, refreshing=False, loading_label=None):
+    """Build right-side status text showing auto-refresh state. loading_label ignored — loading is in its own slot now."""
     t = Text()
+    if refreshing:
+        t.append("⟳ ", style="bold #f9e2af")
+        t.append("refreshing", style="bold #f9e2af")
+        return t
     if not active or interval_seconds is None:
         t.append("auto-refresh: ", style="#6c7086")
         t.append("off", style="bold #f38ba8")
         return t
-    if refreshing:
-        t.append("⟳ ", style="bold #f9e2af")
-        t.append("refreshing", style="bold #f9e2af")
-    else:
-        t.append("↻ ", style="#a6e3a1")
-        t.append("auto-refresh: ", style="#6c7086")
-        t.append(f"{interval_seconds}s", style="bold #a6e3a1")
+    t.append("↻ ", style="#a6e3a1")
+    t.append("auto-refresh: ", style="#6c7086")
+    t.append(f"{interval_seconds}s", style="bold #a6e3a1")
     return t
 
 
@@ -344,6 +371,34 @@ class ScreenBase(Screen):
 
     # subclasses define: KEY_MAP = {"q": "back", "r": "refresh", ...}
     KEY_MAP: dict[str, str] = {}
+
+    # when set, _refresh_status implementations show this as the right-side loading text
+    _user_loading_label: str | None = None
+
+    async def _show_loading(self, label: str) -> None:
+        self._user_loading_label = label
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_loading(_loading_indicator(label))
+            sb.refresh()
+        except Exception as e:
+            try:
+                self.notify(f"_show_loading failed: {e}", severity="error", timeout=5)
+            except Exception:
+                pass
+        # yield so event loop renders the loading text before caller awaits a long task
+        await asyncio.sleep(0)
+
+    def _clear_loading(self) -> None:
+        self._user_loading_label = None
+        try:
+            self.query_one("#statusbar", StatusBar).set_loading("")
+        except Exception:
+            pass
+        try:
+            self._refresh_status()
+        except Exception:
+            pass
 
     def _input_focused(self) -> bool:
         try:
@@ -748,6 +803,43 @@ class GitLabAPI:
         notes = disc_dict.get('notes', []) if isinstance(disc_dict, dict) else []
         return any(n.get('resolvable') and not n.get('resolved') for n in notes if isinstance(n, dict))
 
+    def get_mr_commits(self, project_path, iid):
+        try:
+            project = self.gl.projects.get(project_path)
+            mr = project.mergerequests.get(iid)
+            commits = mr.commits()
+            results = []
+            for c in commits:
+                cd = c.attributes if hasattr(c, 'attributes') else {}
+                sha = cd.get('id') or getattr(c, 'id', '') or ''
+                results.append({
+                    'sha': sha,
+                    'short_sha': (sha or '')[:8],
+                    'title': cd.get('title') or getattr(c, 'title', '') or '',
+                    'author_name': cd.get('author_name') or getattr(c, 'author_name', '') or '',
+                    'created_at': cd.get('created_at') or getattr(c, 'created_at', '') or '',
+                    'web_url': cd.get('web_url') or getattr(c, 'web_url', '') or '',
+                    'pipeline_status': '',
+                })
+            return results
+        except Exception:
+            return []
+
+    def get_commit_pipeline_status(self, project_path, sha):
+        if not sha:
+            return ''
+        try:
+            project = self.gl.projects.get(project_path)
+            commit = project.commits.get(sha)
+            lp = getattr(commit, 'last_pipeline', None)
+            if isinstance(lp, dict):
+                return lp.get('status', '') or ''
+            if lp is not None:
+                return getattr(lp, 'status', '') or ''
+            return ''
+        except Exception:
+            return ''
+
     def get_mr_discussions(self, project_path, iid):
         try:
             project = self.gl.projects.get(project_path)
@@ -855,12 +947,16 @@ class ProjectSelectScreen(ScreenBase):
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
         yield Container(
             Input(placeholder="/  filter projects...", id="project-search"),
             id="filter-bar",
         )
         yield DataTable(id="project-table")
         yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text(["Projects"])
 
     def _status_text(self):
         total = len(getattr(self, 'projects', []) or [])
@@ -879,8 +975,9 @@ class ProjectSelectScreen(ScreenBase):
         try:
             sb = self.query_one("#statusbar", StatusBar)
             sb.set_text(self._status_text())
-            if self._loading:
-                sb.set_right(_loading_indicator("loading projects..."))
+            label = self._user_loading_label or ("loading projects..." if self._loading else None)
+            if label:
+                sb.set_right(_loading_indicator(label))
             else:
                 sb.set_right("")
         except Exception:
@@ -1019,8 +1116,13 @@ class ProjectSelectScreen(ScreenBase):
         # clear search when toggling
         self.query_one("#project-search", Input).value = ""
         self._refresh_keys()
-        await self.load_projects()
-        self.notify(f"Showing: {'favorites' if self.mode == 'fav' else 'all projects'}", timeout=2)
+        label = "favorites" if self.mode == "fav" else "all projects"
+        self._user_loading_label = f"loading {label}..."
+        try:
+            await self.load_projects()
+        finally:
+            self._clear_loading()
+        self.notify(f"Showing: {label}", timeout=2)
 
     def _refresh_keys(self) -> None:
         try:
@@ -1116,12 +1218,16 @@ class PipelineListScreen(ScreenBase):
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
         yield Container(
             Input(value=self.initial_filter, placeholder="/  filter pipelines...", id="pipeline-filter"),
             id="filter-bar",
         )
         yield DataTable(id="pipeline-table")
         yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text([self.api.project_name or "Project", "Pipelines"])
 
     def _status_text(self):
         total = len(getattr(self, 'pipelines', []) or [])
@@ -1147,6 +1253,7 @@ class PipelineListScreen(ScreenBase):
                 self.REFRESH_INTERVAL,
                 active=self._refresh_timer is not None,
                 refreshing=self._refreshing,
+                loading_label=self._user_loading_label,
             ))
         except Exception:
             pass
@@ -1157,7 +1264,11 @@ class PipelineListScreen(ScreenBase):
         table = self.query_one("#pipeline-table", DataTable)
         table.add_columns("ID", "Status", "Branch", "SHA", "Age", "User")
         table.cursor_type = "row"
-        await self.load_pipelines()
+        await self._show_loading("loading pipelines...")
+        try:
+            await self.load_pipelines()
+        finally:
+            self._clear_loading()
         table.focus()
         self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
@@ -1296,7 +1407,13 @@ class PipelineListScreen(ScreenBase):
         self.app.pop_screen()
 
     async def action_refresh(self) -> None:
-        await self.load_pipelines()
+        if self._refreshing:
+            return
+        await self._show_loading("loading pipelines...")
+        try:
+            await self.load_pipelines()
+        finally:
+            self._clear_loading()
 
     async def action_search(self) -> None:
         self.query_one("#pipeline-filter", Input).focus()
@@ -1471,12 +1588,20 @@ class JobListScreen(ScreenBase):
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
         yield Container(
             Input(placeholder="/  filter jobs...", id="job-filter"),
             id="filter-bar",
         )
         yield DataTable(id="job-table")
         yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text([
+            self.api.project_name or "Project",
+            f"Pipeline {self.pipeline['id']}",
+            "Jobs",
+        ])
 
     def _status_text(self):
         total = len(getattr(self, 'jobs', []) or [])
@@ -1502,6 +1627,7 @@ class JobListScreen(ScreenBase):
                 self.REFRESH_INTERVAL,
                 active=self._refresh_timer is not None,
                 refreshing=self._refreshing,
+                loading_label=self._user_loading_label,
             ))
         except Exception:
             pass
@@ -1512,7 +1638,11 @@ class JobListScreen(ScreenBase):
         table = self.query_one("#job-table", DataTable)
         table.add_columns("Stage", "Name", "Status", "Duration", "ID")
         table.cursor_type = "row"
-        await self.load_jobs()
+        await self._show_loading("loading jobs...")
+        try:
+            await self.load_jobs()
+        finally:
+            self._clear_loading()
         table.focus()
         self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
@@ -1612,7 +1742,13 @@ class JobListScreen(ScreenBase):
         self.app.pop_screen()
 
     async def action_refresh(self) -> None:
-        await self.load_jobs()
+        if self._refreshing:
+            return
+        await self._show_loading("loading jobs...")
+        try:
+            await self.load_jobs()
+        finally:
+            self._clear_loading()
 
     async def action_search(self) -> None:
         self.query_one("#job-filter", Input).focus()
@@ -1708,8 +1844,16 @@ class JobDetailScreen(ScreenBase):
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
         yield RichLog(id="job-log", wrap=True, max_lines=MAX_LOG_LINES)
         yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text([
+            self.api.project_name or "Project",
+            f"Pipeline {self.job.get('pipeline_id') or '?'}",
+            f"Job: {self.job.get('name') or '?'}",
+        ])
 
     def _status_text(self):
         dur = format_duration(self.job.get('duration'))
@@ -1930,11 +2074,19 @@ class FailedJobsScreen(ScreenBase):
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
         yield RichLog(id="failures-log", wrap=True, max_lines=MAX_LOG_LINES)
         yield StatusBar(
             _status_line([f"{len(self.failed_jobs)} failed jobs", ("pipeline", f"#{self.pipeline['id']}")]),
             id="statusbar",
         )
+
+    def _breadcrumb(self):
+        return _breadcrumb_text([
+            self.api.project_name or "Project",
+            f"Pipeline {self.pipeline['id']}",
+            "Failed jobs",
+        ])
 
     async def on_mount(self) -> None:
         await self.load_failures()
@@ -2063,12 +2215,16 @@ class MyMergeRequestsScreen(ScreenBase):
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
         yield Container(
             Input(placeholder="/  filter MRs...", id="mr-filter"),
             id="filter-bar",
         )
         yield DataTable(id="mr-table")
         yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text(["Merge Requests"])
 
     def _status_text(self):
         total = len(self.mrs)
@@ -2092,6 +2248,7 @@ class MyMergeRequestsScreen(ScreenBase):
                 self.REFRESH_INTERVAL,
                 active=self._refresh_timer is not None,
                 refreshing=self._refreshing,
+                loading_label=self._user_loading_label,
             ))
         except Exception:
             pass
@@ -2100,11 +2257,11 @@ class MyMergeRequestsScreen(ScreenBase):
         table = self.query_one("#mr-table", DataTable)
         table.add_columns("IID", "Project", "Title", "MR", "Pipeline", "Unresolved", "Age")
         table.cursor_type = "row"
+        await self._show_loading("loading MRs...")
         try:
-            self.query_one("#statusbar", StatusBar).set_right(_loading_indicator("loading MRs..."))
-        except Exception:
-            pass
-        await self.load_mrs()
+            await self.load_mrs()
+        finally:
+            self._clear_loading()
         table.focus()
         self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
@@ -2212,8 +2369,14 @@ class MyMergeRequestsScreen(ScreenBase):
         self.app.switch_screen(ProjectSelectScreen(self.api, self.api.config.favorites))
 
     async def action_refresh(self) -> None:
+        if self._refreshing:
+            return
         self._unresolved_cache.clear()
-        await self.load_mrs()
+        await self._show_loading("loading MRs...")
+        try:
+            await self.load_mrs()
+        finally:
+            self._clear_loading()
 
     async def action_search(self) -> None:
         self.query_one("#mr-filter", Input).focus()
@@ -2225,7 +2388,11 @@ class MyMergeRequestsScreen(ScreenBase):
             idx = -1
         self.state = MR_STATE_CYCLE[(idx + 1) % len(MR_STATE_CYCLE)]
         self._unresolved_cache.clear()
-        await self.load_mrs()
+        await self._show_loading("loading MRs...")
+        try:
+            await self.load_mrs()
+        finally:
+            self._clear_loading()
 
     async def action_goto(self) -> None:
         def _after(result):
@@ -2297,12 +2464,16 @@ class ProjectMergeRequestsScreen(ScreenBase):
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
         yield Container(
             Input(placeholder="/  filter MRs...", id="proj-mr-filter"),
             id="filter-bar",
         )
         yield DataTable(id="proj-mr-table")
         yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text([self.project_path or "Project", "Merge Requests"])
 
     def _status_text(self):
         total = len(self.mrs)
@@ -2326,6 +2497,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
                 self.REFRESH_INTERVAL,
                 active=self._refresh_timer is not None,
                 refreshing=self._refreshing,
+                loading_label=self._user_loading_label,
             ))
         except Exception:
             pass
@@ -2334,7 +2506,11 @@ class ProjectMergeRequestsScreen(ScreenBase):
         table = self.query_one("#proj-mr-table", DataTable)
         table.add_columns("IID", "Title", "MR", "Pipeline", "Author", "Age")
         table.cursor_type = "row"
-        await self.load_mrs()
+        await self._show_loading("loading MRs...")
+        try:
+            await self.load_mrs()
+        finally:
+            self._clear_loading()
         table.focus()
         self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
@@ -2417,7 +2593,13 @@ class ProjectMergeRequestsScreen(ScreenBase):
         self.app.pop_screen()
 
     async def action_refresh(self) -> None:
-        await self.load_mrs()
+        if self._refreshing:
+            return
+        await self._show_loading("loading MRs...")
+        try:
+            await self.load_mrs()
+        finally:
+            self._clear_loading()
 
     async def action_search(self) -> None:
         self.query_one("#proj-mr-filter", Input).focus()
@@ -2428,7 +2610,11 @@ class ProjectMergeRequestsScreen(ScreenBase):
         except ValueError:
             idx = -1
         self.state = self.STATE_CYCLE[(idx + 1) % len(self.STATE_CYCLE)]
-        await self.load_mrs()
+        await self._show_loading("loading MRs...")
+        try:
+            await self.load_mrs()
+        finally:
+            self._clear_loading()
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         idx = event.cursor_row
@@ -2457,6 +2643,7 @@ class MergeRequestDetailScreen(ScreenBase):
         "b": "browser",
         "y": "yank",
         "p": "pipelines",
+        "k": "commits",
         "a": "approve",
         "x": "close",
         "c": "comment",
@@ -2507,6 +2694,7 @@ class MergeRequestDetailScreen(ScreenBase):
             ("q", "back"),
             ("r", "refresh"),
             ("p", "pipelines"),
+            ("k", "commits"),
             ("a", "approve"),
             ("x", "close"),
             ("c", "comment"),
@@ -2519,6 +2707,7 @@ class MergeRequestDetailScreen(ScreenBase):
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
         yield ScrollableContainer(
             Horizontal(
                 Static("", id="mr-col-left", classes="mr-col"),
@@ -2533,6 +2722,9 @@ class MergeRequestDetailScreen(ScreenBase):
             id="mr-body-scroll",
         )
         yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text([self.project_path or "Project", f"MR !{self.iid}"])
 
     def _status_text(self):
         if not self.mr:
@@ -2556,6 +2748,7 @@ class MergeRequestDetailScreen(ScreenBase):
                 self.REFRESH_INTERVAL,
                 active=self._refresh_timer is not None,
                 refreshing=self._refreshing,
+                loading_label=self._user_loading_label,
             ))
         except Exception:
             pass
@@ -2563,7 +2756,11 @@ class MergeRequestDetailScreen(ScreenBase):
     async def on_mount(self) -> None:
         if self.project_path:
             self.api.config.recent_projects.remember(self.project_path)
-        await self.load_mr()
+        await self._show_loading("loading MR...")
+        try:
+            await self.load_mr()
+        finally:
+            self._clear_loading()
         if self.mr and self.mr.get('state') == 'opened':
             self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
@@ -2766,7 +2963,13 @@ class MergeRequestDetailScreen(ScreenBase):
         self.app.pop_screen()
 
     async def action_refresh(self) -> None:
-        await self.load_mr()
+        if self._refreshing:
+            return
+        await self._show_loading("loading MR...")
+        try:
+            await self.load_mr()
+        finally:
+            self._clear_loading()
 
     async def action_browser(self) -> None:
         if self.mr:
@@ -2780,6 +2983,11 @@ class MergeRequestDetailScreen(ScreenBase):
         if not self.mr:
             return
         self.app.push_screen(MRPipelineListScreen(self.api, self.project_path, self.mr))
+
+    async def action_commits(self) -> None:
+        if not self.mr:
+            return
+        self.app.push_screen(MRCommitListScreen(self.api, self.project_path, self.mr))
 
     async def action_toggle_resolved(self) -> None:
         self.show_resolved = not self.show_resolved
@@ -2921,8 +3129,16 @@ class MRPipelineListScreen(ScreenBase):
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
         yield DataTable(id="mr-pipeline-table")
         yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text([
+            self.project_path or "Project",
+            f"MR !{self.mr['iid']}",
+            "Pipelines",
+        ])
 
     def _status_text(self):
         return _status_line([f"{len(self.pipelines)} pipelines", ("MR", f"!{self.mr['iid']}")])
@@ -2935,6 +3151,7 @@ class MRPipelineListScreen(ScreenBase):
                 self.REFRESH_INTERVAL,
                 active=self._refresh_timer is not None,
                 refreshing=self._refreshing,
+                loading_label=self._user_loading_label,
             ))
         except Exception:
             pass
@@ -2943,7 +3160,11 @@ class MRPipelineListScreen(ScreenBase):
         table = self.query_one("#mr-pipeline-table", DataTable)
         table.add_columns("ID", "Status", "Ref", "SHA", "Last Run")
         table.cursor_type = "row"
-        await self.load_pipelines()
+        await self._show_loading("loading pipelines...")
+        try:
+            await self.load_pipelines()
+        finally:
+            self._clear_loading()
         table.focus()
         # auto-refresh only if any pipeline is active
         if any(p['status'] not in TERMINAL_STATUSES for p in self.pipelines):
@@ -2998,7 +3219,13 @@ class MRPipelineListScreen(ScreenBase):
         self.app.pop_screen()
 
     async def action_refresh(self) -> None:
-        await self.load_pipelines()
+        if self._refreshing:
+            return
+        await self._show_loading("loading pipelines...")
+        try:
+            await self.load_pipelines()
+        finally:
+            self._clear_loading()
 
     async def action_browser(self) -> None:
         table = self.query_one("#mr-pipeline-table", DataTable)
@@ -3027,6 +3254,140 @@ class MRPipelineListScreen(ScreenBase):
             self.notify(f"Cannot access {self.project_path}", severity="error", timeout=3)
             return
         self.app.push_screen(JobListScreen(ds_api, pipeline))
+
+
+class MRCommitListScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "b": "browser", "y": "yank"}
+
+    def __init__(self, api: GitLabAPI, project_path: str, mr: dict):
+        super().__init__()
+        self.api = api
+        self.project_path = project_path
+        self.mr = mr
+        self.commits = []
+        self._refreshing = False
+
+    def _info_pairs(self):
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Project", self.project_path),
+            ("MR", f"!{self.mr['iid']}  {(self.mr.get('title') or '')[:40]}"),
+            ("Source", self.mr.get('source_branch') or ''),
+            ("Commits", str(len(self.commits))),
+        ]
+
+    def _keys(self):
+        return [
+            ("q", "back"),
+            ("r", "refresh"),
+            ("b", "browser"),
+            ("y", "copy sha"),
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield DataTable(id="mr-commit-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text([
+            self.project_path or "Project",
+            f"MR !{self.mr['iid']}",
+            "Commits",
+        ])
+
+    def _status_text(self):
+        return _status_line([f"{len(self.commits)} commits", ("MR", f"!{self.mr['iid']}")])
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(self._status_text())
+            if self._user_loading_label:
+                sb.set_right(_loading_indicator(self._user_loading_label))
+            else:
+                sb.set_right("")
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#mr-commit-table", DataTable)
+        table.add_columns("SHA", "Title", "Created", "Author", "Pipeline")
+        table.cursor_type = "row"
+        await self._show_loading("loading commits...")
+        try:
+            await self.load_commits()
+        finally:
+            self._clear_loading()
+        table.focus()
+        self._refresh_status()
+
+    async def load_commits(self) -> None:
+        commits = await asyncio.to_thread(self.api.get_mr_commits, self.project_path, self.mr['iid'])
+        if commits:
+            statuses = await asyncio.gather(*(
+                asyncio.to_thread(self.api.get_commit_pipeline_status, self.project_path, c['sha']) for c in commits
+            ), return_exceptions=True)
+            for c, s in zip(commits, statuses):
+                c['pipeline_status'] = s if isinstance(s, str) else ''
+        self.commits = commits
+        self._update_table()
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+        except Exception:
+            pass
+
+    def _update_table(self) -> None:
+        table = self.query_one("#mr-commit-table", DataTable)
+        prev = table.cursor_row
+        table.clear()
+        for c in self.commits:
+            title = (c.get('title') or '')[:70]
+            status = c.get('pipeline_status') or ''
+            pipeline_cell = status_badge(status) if status else Text('—', style="dim")
+            table.add_row(
+                Text(c['short_sha'], style="bold #89b4fa"),
+                Text(title),
+                Text(format_age(c.get('created_at') or ''), style="dim italic"),
+                Text(c.get('author_name') or 'unknown', style="dim"),
+                pipeline_cell,
+            )
+        if prev is not None and self.commits:
+            table.move_cursor(row=min(prev, len(self.commits) - 1))
+        self._refresh_status()
+
+    async def action_back(self) -> None:
+        self.app.pop_screen()
+
+    async def action_refresh(self) -> None:
+        if self._refreshing:
+            return
+        self._refreshing = True
+        await self._show_loading("loading commits...")
+        try:
+            await self.load_commits()
+        finally:
+            self._refreshing = False
+            self._clear_loading()
+
+    async def action_browser(self) -> None:
+        table = self.query_one("#mr-commit-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.commits):
+            url = self.commits[table.cursor_row].get('web_url')
+            if url:
+                webbrowser.open(url)
+
+    async def action_yank(self) -> None:
+        table = self.query_one("#mr-commit-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.commits):
+            sha = self.commits[table.cursor_row].get('sha') or ''
+            if sha and copy_to_clipboard(sha):
+                self.notify(f"Copied {sha[:8]}", timeout=2)
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        await self.action_browser()
 
 
 # -- modals ------------------------------------------------------------------
@@ -3230,6 +3591,13 @@ class PipelineMonitor(App):
         color: #cdd6f4;
     }
 
+    .breadcrumb {
+        height: 1;
+        padding: 0 2;
+        background: #1e1e2e;
+        color: #89b4fa;
+    }
+
     #filter-bar {
         height: 3;
         background: #1e1e2e;
@@ -3268,6 +3636,14 @@ class PipelineMonitor(App):
         width: 1fr;
         background: #313244;
         color: #a6adc8;
+    }
+
+    #statusbar #status-loading {
+        width: 30;
+        background: #313244;
+        color: #f9e2af;
+        content-align: right middle;
+        padding: 0 2 0 0;
     }
 
     #statusbar #status-right {
