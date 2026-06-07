@@ -313,11 +313,16 @@ class StatusBar(Horizontal):
         self._initial_left = left or ""
         self._initial_right = right or ""
         self._initial_loading = ""
+        v = Text()
+        v.append("  ", style="#585b70")
+        v.append(f"v{__version__}", style="#6c7086")
+        self._version_text = v
 
     def compose(self) -> ComposeResult:
         yield Static(self._initial_left, id="status-left")
         yield Static(self._initial_loading, id="status-loading")
         yield Static(self._initial_right, id="status-right")
+        yield Static(self._version_text, id="status-version")
 
     def set_text(self, text) -> None:
         try:
@@ -3852,6 +3857,51 @@ class MRNoteModal(ModalScreen[tuple[str, str] | None]):
             self.dismiss(("delete", ""))
 
 
+class AboutModal(ModalScreen[None]):
+    """About modal showing version, credit, links. g/b open URLs, esc closes."""
+
+    GITHUB_URL = "https://github.com/bearded-giant/gitlab-tools"
+    SITE_URL = "https://beardedgiantllc.com"
+
+    def compose(self) -> ComposeResult:
+        body = Text()
+        body.append("GitLab Monitor (glmon)\n", style="bold #cdd6f4")
+        body.append("\n")
+        body.append("version ", style="#6c7086")
+        body.append(f"{__version__}\n", style="bold #cdd6f4")
+        body.append("\n")
+        body.append("by ", style="#6c7086")
+        body.append("Bearded Giant LLC\n", style="bold #d97706")
+        body.append("\n")
+        body.append(f"{self.GITHUB_URL}\n", style="#89b4fa underline")
+        body.append(f"{self.SITE_URL}\n", style="#89b4fa underline")
+        body.append("\n")
+        body.append("g ", style="bold #f9e2af")
+        body.append("github  ·  ", style="#6c7086")
+        body.append("b ", style="bold #f9e2af")
+        body.append("website  ·  ", style="#6c7086")
+        body.append("esc ", style="bold #f9e2af")
+        body.append("close", style="#6c7086")
+        yield Container(
+            Static(body, id="about-body"),
+            id="about-box",
+        )
+
+    def on_key(self, event) -> None:
+        if event.key == "escape" or event.key == "question_mark":
+            event.prevent_default()
+            event.stop()
+            self.dismiss(None)
+        elif event.key == "g":
+            event.prevent_default()
+            event.stop()
+            webbrowser.open(self.GITHUB_URL)
+        elif event.key == "b":
+            event.prevent_default()
+            event.stop()
+            webbrowser.open(self.SITE_URL)
+
+
 class MRPickerModal(ModalScreen[tuple[str, int] | None]):
     """Pick MR by project path + ID. Ghost-text autocomplete from recents. Returns (project_path, iid) on submit."""
 
@@ -3966,7 +4016,16 @@ class PipelineMonitor(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
+        Binding("question_mark", "about", "About", show=False, priority=True),
     ]
+
+    async def action_about(self) -> None:
+        if isinstance(self.screen, AboutModal):
+            return
+        for s in self.screen_stack:
+            if isinstance(s, AboutModal):
+                return
+        self.push_screen(AboutModal())
 
     CSS = """
     Screen {
@@ -4041,6 +4100,34 @@ class PipelineMonitor(App):
         background: #313244;
         color: #a6adc8;
         content-align: right middle;
+    }
+
+    #statusbar #status-version {
+        width: auto;
+        background: #313244;
+        color: #6c7086;
+        content-align: right middle;
+        padding: 0 0 0 0;
+    }
+
+    AboutModal {
+        align: center middle;
+        background: #1e1e2e 70%;
+    }
+
+    #about-box {
+        width: 60;
+        height: auto;
+        background: #313244;
+        border: tall #d97706;
+        padding: 1 3;
+    }
+
+    #about-body {
+        width: 100%;
+        height: auto;
+        content-align: center middle;
+        color: #cdd6f4;
     }
 
     DataTable {
