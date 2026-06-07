@@ -14,8 +14,28 @@ brew install gitlab-monitor
 ### From source (development)
 
 ```bash
-pipx install -e ./gitlab-monitor
+cd gitlab-monitor
+make install        # release version from pyproject.toml
+make install-dev    # bakes a dev build, version becomes 1.4.1.dev0+<7sha>[.dirty]
+make dev            # editable install (-e), source changes auto-apply
+make version        # print the dev version that install-dev would use
 ```
+
+`make install-dev` rewrites the version in `pyproject.toml` temporarily so the installed package carries a sha-tagged dev version. `glmon --version` confirms which build is running. The LoadingScreen splash also shows the version.
+
+### Debug logging (dev builds)
+
+Dev builds (any version containing `.dev`) automatically write to `/tmp/glmon-debug.log`. Useful for verifying which screen mounted, when loading indicators fire, and any silent exceptions in the status-bar update path.
+
+```bash
+make install-dev
+glmon            # use normally
+tail -f /tmp/glmon-debug.log
+```
+
+- Override path: `GLMON_DEBUG_LOG=/some/other/path glmon`
+- Disable on a dev build: `GLMON_DEBUG_LOG=off glmon`
+- Release builds (e.g. `1.4.1`) never log regardless of env
 
 ## Configuration
 

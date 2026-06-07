@@ -21,6 +21,23 @@ from textual.binding import Binding
 from rich.text import Text
 
 from .config import Config
+from . import __version__
+
+
+# Dev builds (version contains ".dev") write to a debug log. Release builds skip this.
+# Override path with env GLMON_DEBUG_LOG. Disable explicitly with GLMON_DEBUG_LOG=off.
+_DEBUG_LOG_ENABLED = ".dev" in __version__ and os.environ.get("GLMON_DEBUG_LOG", "").lower() != "off"
+_DEBUG_LOG_PATH = os.environ.get("GLMON_DEBUG_LOG") or "/tmp/glmon-debug.log"
+
+def _dbg(msg: str) -> None:
+    if not _DEBUG_LOG_ENABLED:
+        return
+    try:
+        from datetime import datetime as _dt
+        with open(_DEBUG_LOG_PATH, "a") as f:
+            f.write(f"{_dt.now().isoformat()} {msg}\n")
+    except Exception:
+        pass
 
 
 # pipeline age filter cycle: 3d -> 7d -> 30d -> all (None)
@@ -377,24 +394,21 @@ class ScreenBase(Screen):
 
     async def _show_loading(self, label: str) -> None:
         self._user_loading_label = label
+        sb_found = False
+        exc = ""
         try:
             sb = self.query_one("#statusbar", StatusBar)
-            sb.set_loading(_loading_indicator(label))
+            sb_found = True
+            sb.set_text(_loading_indicator(label))
             sb.refresh()
         except Exception as e:
-            try:
-                self.notify(f"_show_loading failed: {e}", severity="error", timeout=5)
-            except Exception:
-                pass
-        # yield so event loop renders the loading text before caller awaits a long task
+            exc = f"{type(e).__name__}:{e}"
+        _dbg(f"_show_loading screen={type(self).__name__} label={label!r} sb_found={sb_found} exc={exc!r}")
         await asyncio.sleep(0)
 
     def _clear_loading(self) -> None:
         self._user_loading_label = None
-        try:
-            self.query_one("#statusbar", StatusBar).set_loading("")
-        except Exception:
-            pass
+        _dbg(f"_clear_loading screen={type(self).__name__}")
         try:
             self._refresh_status()
         except Exception:
@@ -926,6 +940,7 @@ class LoadingScreen(Screen):
         splash.update(
             f"[bold #89b4fa]{logo}[/]\n"
             f"\n[dim #a6adc8]built by Bearded Giant[/]  [dim #585b70]{REPO_URL}[/]"
+            f"\n[dim #6c7086]v{__version__}[/]"
             "\n\n\n[#a6adc8]loading projects...[/]"
         )
 
@@ -974,7 +989,7 @@ class ProjectSelectScreen(ScreenBase):
     def _refresh_status(self) -> None:
         try:
             sb = self.query_one("#statusbar", StatusBar)
-            sb.set_text(self._status_text())
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
             label = self._user_loading_label or ("loading projects..." if self._loading else None)
             if label:
                 sb.set_right(_loading_indicator(label))
@@ -1006,9 +1021,24 @@ class ProjectSelectScreen(ScreenBase):
         table = self.query_one("#project-table", DataTable)
         table.add_columns("", "Project", "Description", "Last Activity")
         table.cursor_type = "row"
-        await self.load_projects()
-        table.focus()
-        # mark pipelines module active. don't clobber pinned project from PipelineListScreen.
+        # show loading immediately, defer actual fetch until after first render
+        self._user_loading_label = "loading projects..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
+        try:
+            await self.load_projects()
+        finally:
+            self._clear_loading()
+        try:
+            self.query_one("#project-table", DataTable).focus()
+        except Exception:
+            pass
         try:
             last = self.api.config.get_last_view() or {}
             if last.get('type') != 'pipelines':
@@ -1248,7 +1278,7 @@ class PipelineListScreen(ScreenBase):
     def _refresh_status(self) -> None:
         try:
             sb = self.query_one("#statusbar", StatusBar)
-            sb.set_text(self._status_text())
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
             sb.set_right(_auto_refresh_indicator(
                 self.REFRESH_INTERVAL,
                 active=self._refresh_timer is not None,
@@ -1264,12 +1294,23 @@ class PipelineListScreen(ScreenBase):
         table = self.query_one("#pipeline-table", DataTable)
         table.add_columns("ID", "Status", "Branch", "SHA", "Age", "User")
         table.cursor_type = "row"
-        await self._show_loading("loading pipelines...")
+        self._user_loading_label = "loading pipelines..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
         try:
             await self.load_pipelines()
         finally:
             self._clear_loading()
-        table.focus()
+        try:
+            self.query_one("#pipeline-table", DataTable).focus()
+        except Exception:
+            pass
         self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
         if self.api.project_name:
@@ -1622,7 +1663,7 @@ class JobListScreen(ScreenBase):
     def _refresh_status(self) -> None:
         try:
             sb = self.query_one("#statusbar", StatusBar)
-            sb.set_text(self._status_text())
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
             sb.set_right(_auto_refresh_indicator(
                 self.REFRESH_INTERVAL,
                 active=self._refresh_timer is not None,
@@ -1638,12 +1679,23 @@ class JobListScreen(ScreenBase):
         table = self.query_one("#job-table", DataTable)
         table.add_columns("Stage", "Name", "Status", "Duration", "ID")
         table.cursor_type = "row"
-        await self._show_loading("loading jobs...")
+        self._user_loading_label = "loading jobs..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
         try:
             await self.load_jobs()
         finally:
             self._clear_loading()
-        table.focus()
+        try:
+            self.query_one("#job-table", DataTable).focus()
+        except Exception:
+            pass
         self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
 
@@ -1862,7 +1914,7 @@ class JobDetailScreen(ScreenBase):
     def _refresh_status(self) -> None:
         try:
             sb = self.query_one("#statusbar", StatusBar)
-            sb.set_text(self._status_text())
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
             sb.set_right(self._build_refresh_indicator())
         except Exception:
             pass
@@ -1894,7 +1946,19 @@ class JobDetailScreen(ScreenBase):
         self._refresh_status()
 
     async def on_mount(self) -> None:
-        await self.load_trace()
+        self._user_loading_label = "loading job log..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
+        try:
+            await self.load_trace()
+        finally:
+            self._clear_loading()
         if self.job.get('status') not in TERMINAL_STATUSES:
             self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._refresh_meta)
             self._trace_timer = self.set_interval(self.TRACE_INTERVAL, self._refresh_trace)
@@ -2089,7 +2153,24 @@ class FailedJobsScreen(ScreenBase):
         ])
 
     async def on_mount(self) -> None:
-        await self.load_failures()
+        self._user_loading_label = "loading failures..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
+        try:
+            await self.load_failures()
+        finally:
+            self._user_loading_label = None
+            try:
+                sb = self.query_one("#statusbar", StatusBar)
+                sb.set_text(_status_line([f"{len(self.failed_jobs)} failed jobs", ("pipeline", f"#{self.pipeline['id']}")]))
+            except Exception:
+                pass
 
     async def load_failures(self) -> None:
         log = self.query_one("#failures-log", RichLog)
@@ -2243,7 +2324,7 @@ class MyMergeRequestsScreen(ScreenBase):
     def _refresh_status(self) -> None:
         try:
             sb = self.query_one("#statusbar", StatusBar)
-            sb.set_text(self._status_text())
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
             sb.set_right(_auto_refresh_indicator(
                 self.REFRESH_INTERVAL,
                 active=self._refresh_timer is not None,
@@ -2257,12 +2338,24 @@ class MyMergeRequestsScreen(ScreenBase):
         table = self.query_one("#mr-table", DataTable)
         table.add_columns("IID", "Project", "Title", "MR", "Pipeline", "Unresolved", "Age")
         table.cursor_type = "row"
-        await self._show_loading("loading MRs...")
+        # set loading text + schedule the actual load AFTER first render so user sees the loading state
+        self._user_loading_label = "loading MRs..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
         try:
             await self.load_mrs()
         finally:
             self._clear_loading()
-        table.focus()
+        try:
+            self.query_one("#mr-table", DataTable).focus()
+        except Exception:
+            pass
         self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
         self.api.config.save_last_view('my_mrs')
@@ -2492,7 +2585,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
     def _refresh_status(self) -> None:
         try:
             sb = self.query_one("#statusbar", StatusBar)
-            sb.set_text(self._status_text())
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
             sb.set_right(_auto_refresh_indicator(
                 self.REFRESH_INTERVAL,
                 active=self._refresh_timer is not None,
@@ -2506,12 +2599,23 @@ class ProjectMergeRequestsScreen(ScreenBase):
         table = self.query_one("#proj-mr-table", DataTable)
         table.add_columns("IID", "Title", "MR", "Pipeline", "Author", "Age")
         table.cursor_type = "row"
-        await self._show_loading("loading MRs...")
+        self._user_loading_label = "loading MRs..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
         try:
             await self.load_mrs()
         finally:
             self._clear_loading()
-        table.focus()
+        try:
+            self.query_one("#proj-mr-table", DataTable).focus()
+        except Exception:
+            pass
         self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
 
@@ -2743,7 +2847,7 @@ class MergeRequestDetailScreen(ScreenBase):
     def _refresh_status(self) -> None:
         try:
             sb = self.query_one("#statusbar", StatusBar)
-            sb.set_text(self._status_text())
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
             sb.set_right(_auto_refresh_indicator(
                 self.REFRESH_INTERVAL,
                 active=self._refresh_timer is not None,
@@ -2756,7 +2860,15 @@ class MergeRequestDetailScreen(ScreenBase):
     async def on_mount(self) -> None:
         if self.project_path:
             self.api.config.recent_projects.remember(self.project_path)
-        await self._show_loading("loading MR...")
+        self._user_loading_label = "loading MR..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
         try:
             await self.load_mr()
         finally:
@@ -3146,7 +3258,7 @@ class MRPipelineListScreen(ScreenBase):
     def _refresh_status(self) -> None:
         try:
             sb = self.query_one("#statusbar", StatusBar)
-            sb.set_text(self._status_text())
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
             sb.set_right(_auto_refresh_indicator(
                 self.REFRESH_INTERVAL,
                 active=self._refresh_timer is not None,
@@ -3160,13 +3272,23 @@ class MRPipelineListScreen(ScreenBase):
         table = self.query_one("#mr-pipeline-table", DataTable)
         table.add_columns("ID", "Status", "Ref", "SHA", "Last Run")
         table.cursor_type = "row"
-        await self._show_loading("loading pipelines...")
+        self._user_loading_label = "loading pipelines..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
         try:
             await self.load_pipelines()
         finally:
             self._clear_loading()
-        table.focus()
-        # auto-refresh only if any pipeline is active
+        try:
+            self.query_one("#mr-pipeline-table", DataTable).focus()
+        except Exception:
+            pass
         if any(p['status'] not in TERMINAL_STATUSES for p in self.pipelines):
             self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
@@ -3304,7 +3426,7 @@ class MRCommitListScreen(ScreenBase):
     def _refresh_status(self) -> None:
         try:
             sb = self.query_one("#statusbar", StatusBar)
-            sb.set_text(self._status_text())
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
             if self._user_loading_label:
                 sb.set_right(_loading_indicator(self._user_loading_label))
             else:
@@ -3316,12 +3438,23 @@ class MRCommitListScreen(ScreenBase):
         table = self.query_one("#mr-commit-table", DataTable)
         table.add_columns("SHA", "Title", "Created", "Author", "Pipeline")
         table.cursor_type = "row"
-        await self._show_loading("loading commits...")
+        self._user_loading_label = "loading commits..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
         try:
             await self.load_commits()
         finally:
             self._clear_loading()
-        table.focus()
+        try:
+            self.query_one("#mr-commit-table", DataTable).focus()
+        except Exception:
+            pass
         self._refresh_status()
 
     async def load_commits(self) -> None:
@@ -3926,7 +4059,9 @@ def _detect_cwd_branch() -> str:
 
 
 def main():
+    _dbg(f"=== glmon start version={__version__} argv={sys.argv[1:]!r} ===")
     parser = argparse.ArgumentParser(prog="glmon", description="GitLab pipeline monitor TUI")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("-p", "--project", help="Project path (group/project) to jump into directly")
     parser.add_argument("--days", type=int, default=DEFAULT_PIPELINE_AGE_DAYS,
                         help=f"Default pipeline age window in days (default {DEFAULT_PIPELINE_AGE_DAYS})")
