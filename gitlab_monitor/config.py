@@ -203,6 +203,13 @@ class Config:
     @property
     def max_pipelines(self) -> int:
         return self._config.get('max_pipelines', 50)
+
+    @property
+    def export_dir(self) -> str:
+        return self._config.get('export_dir') or str(Path.home())
+
+    def set_export_dir(self, path: str) -> None:
+        self.save_config(export_dir=path)
     
     def validate(self) -> tuple[bool, str]:
         """Validate required configuration (project_path is optional now)"""

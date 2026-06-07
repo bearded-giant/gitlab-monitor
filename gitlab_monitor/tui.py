@@ -2262,7 +2262,7 @@ def _pipeline_status_text(status):
 
 class MyMergeRequestsScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "toggle_module"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "toggle_module", "e": "export"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -2275,6 +2275,7 @@ class MyMergeRequestsScreen(ScreenBase):
         self._refresh_timer = None
         self._refreshing = False
         self._unresolved_cache = {}
+        self._row_to_mr = []
 
     def _info_pairs(self):
         total = len(self.mrs)
@@ -2292,6 +2293,7 @@ class MyMergeRequestsScreen(ScreenBase):
             [("q", "quit"),     ("r", "refresh"),              ("m", "pipelines")],
             [("/", "filter"),   ("s", f"state:{self.state}"),  ("g", "goto MR")],
             [("enter", "view"), ("b", "browser"),              ("y", "copy url")],
+            [("e", "export md")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2336,7 +2338,7 @@ class MyMergeRequestsScreen(ScreenBase):
 
     async def on_mount(self) -> None:
         table = self.query_one("#mr-table", DataTable)
-        table.add_columns("IID", "Project", "Title", "MR", "Pipeline", "Unresolved", "Age")
+        table.add_columns("IID", "Title", "MR", "Pipeline", "Unresolved", "Age")
         table.cursor_type = "row"
         # set loading text + schedule the actual load AFTER first render so user sees the loading state
         self._user_loading_label = "loading MRs..."
@@ -2419,32 +2421,56 @@ class MyMergeRequestsScreen(ScreenBase):
         table = self.query_one("#mr-table", DataTable)
         prev = table.cursor_row
         table.clear()
+        self._row_to_mr = []
+        groups = {}
+        order = []
         for m in self.filtered_mrs:
-            iid = Text(f"!{m['iid']}", style="bold #89b4fa")
-            proj = Text((m['project_path'] or '')[:32], style="cyan")
-            title = m['title'] or ''
-            if m['draft']:
-                title = f"[draft] {title}"
-            title_t = Text(title[:50], style="bold #cdd6f4")
-            unresolved = self._unresolved_cache.get((m['project_path'], m['iid']))
-            if unresolved is None:
-                unresolved_t = Text("—", style="dim")
-            elif unresolved == 0:
-                unresolved_t = Text("0", style="dim #a6e3a1")
-            else:
-                unresolved_t = Text(str(unresolved), style="bold #f38ba8")
-            age = format_age(m['updated_at'] or m['created_at'])
-            table.add_row(
-                iid,
-                proj,
-                title_t,
-                _mr_state_badge(m['state']),
-                _pipeline_status_text(m['head_pipeline_status']),
-                unresolved_t,
-                Text(age, style="dim italic"),
-            )
-        if prev is not None and self.filtered_mrs:
-            table.move_cursor(row=min(prev, len(self.filtered_mrs) - 1))
+            key = m['project_path'] or ''
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+        for m in self.filtered_mrs:
+            groups[m['project_path'] or ''].append(m)
+        order.sort(key=lambda p: (p.rsplit('/', 1)[-1] or '').lower())
+        blank = Text("")
+        for i, proj_path in enumerate(order):
+            repo = (proj_path.rsplit('/', 1)[-1] if proj_path else 'UNKNOWN').upper()
+            header = Text(repo, style="bold #89b4fa")
+            table.add_row(header, blank, blank, blank, blank, blank)
+            self._row_to_mr.append(None)
+            for m in groups[proj_path]:
+                iid = Text(f"!{m['iid']}", style="bold #89b4fa")
+                title = m['title'] or ''
+                if m['draft']:
+                    title = f"[draft] {title}"
+                title_t = Text(title[:50], style="bold #cdd6f4")
+                unresolved = self._unresolved_cache.get((m['project_path'], m['iid']))
+                if unresolved is None:
+                    unresolved_t = Text("—", style="dim")
+                elif unresolved == 0:
+                    unresolved_t = Text("0", style="dim #a6e3a1")
+                else:
+                    unresolved_t = Text(str(unresolved), style="bold #f38ba8")
+                age = format_age(m['updated_at'] or m['created_at'])
+                table.add_row(
+                    iid,
+                    title_t,
+                    _mr_state_badge(m['state']),
+                    _pipeline_status_text(m['head_pipeline_status']),
+                    unresolved_t,
+                    Text(age, style="dim italic"),
+                )
+                self._row_to_mr.append(m)
+            if i < len(order) - 1:
+                table.add_row(blank, blank, blank, blank, blank, blank)
+                self._row_to_mr.append(None)
+        if prev is not None and self._row_to_mr:
+            target = min(prev, len(self._row_to_mr) - 1)
+            while target < len(self._row_to_mr) and self._row_to_mr[target] is None:
+                target += 1
+            if target >= len(self._row_to_mr):
+                target = next((i for i, x in enumerate(self._row_to_mr) if x is not None), 0)
+            table.move_cursor(row=target)
 
     async def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "mr-filter":
@@ -2497,23 +2523,119 @@ class MyMergeRequestsScreen(ScreenBase):
     async def _open_mr(self, project_path: str, iid: int) -> None:
         self.app.push_screen(MergeRequestDetailScreen(self.api, project_path, iid))
 
+    def _mr_at_row(self, idx):
+        if idx is None or idx < 0 or idx >= len(self._row_to_mr):
+            return None
+        return self._row_to_mr[idx]
+
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        idx = event.cursor_row
-        if idx is not None and idx < len(self.filtered_mrs):
-            m = self.filtered_mrs[idx]
+        m = self._mr_at_row(event.cursor_row)
+        if m is not None:
             self.app.push_screen(MergeRequestDetailScreen(self.api, m['project_path'], m['iid']))
 
     async def action_browser(self) -> None:
         table = self.query_one("#mr-table", DataTable)
-        if table.cursor_row is not None and table.cursor_row < len(self.filtered_mrs):
-            webbrowser.open(self.filtered_mrs[table.cursor_row]['web_url'])
+        m = self._mr_at_row(table.cursor_row)
+        if m is not None:
+            webbrowser.open(m['web_url'])
 
     async def action_yank(self) -> None:
         table = self.query_one("#mr-table", DataTable)
-        if table.cursor_row is not None and table.cursor_row < len(self.filtered_mrs):
-            m = self.filtered_mrs[table.cursor_row]
-            if copy_to_clipboard(m['web_url']):
-                self.notify(f"Copied MR !{m['iid']} URL", timeout=2)
+        m = self._mr_at_row(table.cursor_row)
+        if m is not None and copy_to_clipboard(m['web_url']):
+            self.notify(f"Copied MR !{m['iid']} URL", timeout=2)
+
+    async def action_export(self) -> None:
+        if not self.filtered_mrs:
+            self.notify("Nothing to export", severity="warning", timeout=2)
+            return
+        initial = self.api.config.export_dir
+        def _after(result):
+            if result is None:
+                return
+            target_dir = os.path.expanduser(result.strip())
+            if not target_dir:
+                self.notify("Export cancelled (empty dir)", severity="warning", timeout=2)
+                return
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except Exception as e:
+                self.notify(f"Cannot create dir: {e}", severity="error", timeout=4)
+                return
+            try:
+                path = self._export_markdown(target_dir)
+            except Exception as e:
+                self.notify(f"Export failed: {e}", severity="error", timeout=4)
+                return
+            try:
+                self.api.config.set_export_dir(target_dir)
+            except Exception:
+                pass
+            self.notify(f"Exported {len(self.filtered_mrs)} MRs → {path}", timeout=4)
+        self.app.push_screen(
+            PathInputModal(
+                title="Export MRs to directory",
+                placeholder="/path/to/dir",
+                initial=initial,
+            ),
+            _after,
+        )
+
+    def _export_markdown(self, target_dir: str) -> str:
+        groups = {}
+        order = []
+        for m in self.filtered_mrs:
+            key = m['project_path'] or ''
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+        for m in self.filtered_mrs:
+            groups[m['project_path'] or ''].append(m)
+        order.sort(key=lambda p: (p.rsplit('/', 1)[-1] or '').lower())
+
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        title_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        lines = [
+            f"# My Merge Requests",
+            "",
+            f"- generated: {title_ts}",
+            f"- state: {self.state}",
+            f"- count: {len(self.filtered_mrs)}",
+            f"- gitlab: {self.api.config.gitlab_url}",
+            "",
+        ]
+        for proj_path in order:
+            repo = (proj_path.rsplit('/', 1)[-1] if proj_path else 'UNKNOWN').upper()
+            lines.append(f"## {repo}")
+            lines.append("")
+            lines.append(f"_project: `{proj_path or 'unknown'}`_")
+            lines.append("")
+            for m in groups[proj_path]:
+                title = m['title'] or ''
+                if m['draft']:
+                    title = f"[draft] {title}"
+                unresolved = self._unresolved_cache.get((m['project_path'], m['iid']))
+                age = format_age(m['updated_at'] or m['created_at'])
+                parts = [
+                    f"**[!{m['iid']}]({m['web_url']})**",
+                    title,
+                ]
+                meta = [f"state: {m['state']}"]
+                if m.get('head_pipeline_status'):
+                    meta.append(f"pipeline: {m['head_pipeline_status']}")
+                if unresolved is not None:
+                    meta.append(f"unresolved: {unresolved}")
+                meta.append(f"age: {age}")
+                if m.get('source_branch') and m.get('target_branch'):
+                    meta.append(f"branch: `{m['source_branch']}` → `{m['target_branch']}`")
+                lines.append(f"- {' — '.join(parts)}  ")
+                lines.append(f"  _{' · '.join(meta)}_")
+            lines.append("")
+
+        path = os.path.join(target_dir, f"mrs-{self.state}-{ts}.md")
+        with open(path, 'w') as f:
+            f.write("\n".join(lines))
+        return path
 
 
 class ProjectMergeRequestsScreen(ScreenBase):
@@ -3595,6 +3717,46 @@ class TextInputModal(ModalScreen[str | None]):
             self.dismiss(text if text else None)
 
 
+class PathInputModal(ModalScreen[str | None]):
+    """Single-line path input. Enter submits, esc cancels."""
+
+    def __init__(self, title: str, placeholder: str = "", initial: str = ""):
+        super().__init__()
+        self.title_text = title
+        self.placeholder = placeholder
+        self.initial = initial
+
+    def compose(self) -> ComposeResult:
+        header = Text()
+        header.append(self.title_text, style="bold #cdd6f4")
+        header.append("\n")
+        header.append("enter submit · esc cancel", style="dim #a6adc8")
+        yield Container(
+            Static(header, id="path-input-header"),
+            Input(value=self.initial, placeholder=self.placeholder, id="path-input"),
+            id="path-input-box",
+        )
+
+    def on_mount(self) -> None:
+        try:
+            inp = self.query_one("#path-input", Input)
+            inp.focus()
+            inp.cursor_position = len(inp.value)
+        except Exception:
+            pass
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "path-input":
+            text = (event.value or "").strip()
+            self.dismiss(text if text else None)
+
+
 class MRPickerModal(ModalScreen[tuple[str, int] | None]):
     """Pick MR by project path + ID. Ghost-text autocomplete from recents. Returns (project_path, iid) on submit."""
 
@@ -3867,6 +4029,32 @@ class PipelineMonitor(App):
     #text-input-area {
         width: 100%;
         height: 1fr;
+        background: #1e1e2e;
+        color: #cdd6f4;
+    }
+
+    PathInputModal {
+        align: center middle;
+        background: #1e1e2e 60%;
+    }
+
+    #path-input-box {
+        width: 80;
+        height: auto;
+        background: #313244;
+        border: tall #89b4fa;
+        padding: 1 2;
+    }
+
+    #path-input-header {
+        width: 100%;
+        height: auto;
+        color: #cdd6f4;
+        margin-bottom: 1;
+    }
+
+    #path-input {
+        width: 100%;
         background: #1e1e2e;
         color: #cdd6f4;
     }
