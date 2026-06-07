@@ -2262,7 +2262,7 @@ def _pipeline_status_text(status):
 
 class MyMergeRequestsScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "toggle_module", "e": "export"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "toggle_module", "e": "export", "n": "note"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -2293,7 +2293,7 @@ class MyMergeRequestsScreen(ScreenBase):
             [("q", "quit"),     ("r", "refresh"),              ("m", "pipelines")],
             [("/", "filter"),   ("s", f"state:{self.state}"),  ("g", "goto MR")],
             [("enter", "view"), ("b", "browser"),              ("y", "copy url")],
-            [("e", "export md")],
+            [("e", "export md"),("n", "note")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2338,7 +2338,7 @@ class MyMergeRequestsScreen(ScreenBase):
 
     async def on_mount(self) -> None:
         table = self.query_one("#mr-table", DataTable)
-        table.add_columns("IID", "Title", "MR", "Pipeline", "Unresolved", "Age")
+        table.add_columns("●", "IID", "Title", "MR", "Pipeline", "Unresolved", "Age")
         table.cursor_type = "row"
         # set loading text + schedule the actual load AFTER first render so user sees the loading state
         self._user_loading_label = "loading MRs..."
@@ -2436,7 +2436,7 @@ class MyMergeRequestsScreen(ScreenBase):
         for i, proj_path in enumerate(order):
             repo = (proj_path.rsplit('/', 1)[-1] if proj_path else 'UNKNOWN').upper()
             header = Text(repo, style="bold #89b4fa")
-            table.add_row(header, blank, blank, blank, blank, blank)
+            table.add_row(blank, header, blank, blank, blank, blank, blank)
             self._row_to_mr.append(None)
             for m in groups[proj_path]:
                 iid = Text(f"!{m['iid']}", style="bold #89b4fa")
@@ -2452,7 +2452,10 @@ class MyMergeRequestsScreen(ScreenBase):
                 else:
                     unresolved_t = Text(str(unresolved), style="bold #f38ba8")
                 age = format_age(m['updated_at'] or m['created_at'])
+                has_note = self.api.config.mr_notes.has(m['project_path'] or '', m['iid'])
+                note_t = Text("●", style="bold #f9e2af") if has_note else blank
                 table.add_row(
+                    note_t,
                     iid,
                     title_t,
                     _mr_state_badge(m['state']),
@@ -2462,7 +2465,7 @@ class MyMergeRequestsScreen(ScreenBase):
                 )
                 self._row_to_mr.append(m)
             if i < len(order) - 1:
-                table.add_row(blank, blank, blank, blank, blank, blank)
+                table.add_row(blank, blank, blank, blank, blank, blank, blank)
                 self._row_to_mr.append(None)
         if prev is not None and self._row_to_mr:
             target = min(prev, len(self._row_to_mr) - 1)
@@ -2544,6 +2547,40 @@ class MyMergeRequestsScreen(ScreenBase):
         m = self._mr_at_row(table.cursor_row)
         if m is not None and copy_to_clipboard(m['web_url']):
             self.notify(f"Copied MR !{m['iid']} URL", timeout=2)
+
+    async def action_note(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        m = self._mr_at_row(table.cursor_row)
+        if m is None:
+            return
+        proj = m['project_path'] or ''
+        if not proj:
+            self.notify("MR has no project path — cannot save note", severity="warning", timeout=2)
+            return
+        iid = m['iid']
+        repo = proj.rsplit('/', 1)[-1] if proj else 'unknown'
+        existing = self.api.config.mr_notes.get(proj, iid) or ""
+
+        def _after(result):
+            if result is None:
+                return
+            action, text = result
+            if action == "delete":
+                if self.api.config.mr_notes.delete(proj, iid):
+                    self.notify(f"Note deleted for !{iid}", timeout=2)
+                    self._update_table()
+                return
+            if action == "save":
+                if not text:
+                    if self.api.config.mr_notes.delete(proj, iid):
+                        self.notify(f"Empty note removed for !{iid}", timeout=2)
+                        self._update_table()
+                    return
+                self.api.config.mr_notes.set(proj, iid, text)
+                self.notify(f"Note saved for !{iid}", timeout=2)
+                self._update_table()
+
+        self.app.push_screen(MRNoteModal(repo, iid, initial=existing), _after)
 
     async def action_export(self) -> None:
         if not self.filtered_mrs:
@@ -2630,6 +2667,10 @@ class MyMergeRequestsScreen(ScreenBase):
                     meta.append(f"branch: `{m['source_branch']}` → `{m['target_branch']}`")
                 lines.append(f"- {' — '.join(parts)}  ")
                 lines.append(f"  _{' · '.join(meta)}_")
+                note = self.api.config.mr_notes.get(m['project_path'] or '', m['iid'])
+                if note:
+                    for note_line in note.splitlines() or [""]:
+                        lines.append(f"  > {note_line}")
             lines.append("")
 
         path = os.path.join(target_dir, f"mrs-{self.state}-{ts}.md")
@@ -3757,6 +3798,60 @@ class PathInputModal(ModalScreen[str | None]):
             self.dismiss(text if text else None)
 
 
+class MRNoteModal(ModalScreen[tuple[str, str] | None]):
+    """Per-MR local note editor.
+
+    Returns ('save', text) on ctrl+s, ('delete', '') on ctrl+d, None on esc.
+    """
+
+    def __init__(self, project_repo: str, mr_iid: int, initial: str = ""):
+        super().__init__()
+        self.project_repo = project_repo
+        self.mr_iid = mr_iid
+        self.initial = initial
+
+    def compose(self) -> ComposeResult:
+        header = Text()
+        header.append(f"Note · {self.project_repo} !{self.mr_iid}", style="bold #cdd6f4")
+        header.append("\n")
+        hints = "ctrl+s save · esc cancel"
+        if self.initial:
+            hints = "ctrl+s save · ctrl+d delete · esc cancel"
+        header.append(hints, style="dim #a6adc8")
+        ta = TextArea(self.initial, id="mr-note-area")
+        ta.show_line_numbers = False
+        yield Container(
+            Static(header, id="mr-note-header"),
+            ta,
+            id="mr-note-box",
+        )
+
+    def on_mount(self) -> None:
+        try:
+            ta = self.query_one("#mr-note-area", TextArea)
+            ta.focus()
+        except Exception:
+            pass
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self.dismiss(None)
+        elif event.key == "ctrl+s":
+            event.prevent_default()
+            event.stop()
+            try:
+                text = self.query_one("#mr-note-area", TextArea).text
+            except Exception:
+                text = ""
+            self.dismiss(("save", text.strip()))
+        elif event.key == "ctrl+d":
+            event.prevent_default()
+            event.stop()
+            self.dismiss(("delete", ""))
+
+
 class MRPickerModal(ModalScreen[tuple[str, int] | None]):
     """Pick MR by project path + ID. Ghost-text autocomplete from recents. Returns (project_path, iid) on submit."""
 
@@ -4027,6 +4122,33 @@ class PipelineMonitor(App):
     }
 
     #text-input-area {
+        width: 100%;
+        height: 1fr;
+        background: #1e1e2e;
+        color: #cdd6f4;
+    }
+
+    MRNoteModal {
+        align: center middle;
+        background: #1e1e2e 60%;
+    }
+
+    #mr-note-box {
+        width: 80;
+        height: 20;
+        background: #313244;
+        border: tall #f9e2af;
+        padding: 1 2;
+    }
+
+    #mr-note-header {
+        width: 100%;
+        height: auto;
+        color: #cdd6f4;
+        margin-bottom: 1;
+    }
+
+    #mr-note-area {
         width: 100%;
         height: 1fr;
         background: #1e1e2e;

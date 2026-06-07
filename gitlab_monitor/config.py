@@ -4,6 +4,7 @@
 
 import os
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -97,9 +98,71 @@ class Favorites:
         return True
 
 
+class MRNotes:
+    """Persist local per-MR notes to ~/.config/gitlab-monitor/mr_notes.json.
+
+    Keyed by 'project_path:iid'. Notes are local-only reminders, never synced
+    to GitLab.
+    """
+
+    def __init__(self, config_dir: Path):
+        self.path = config_dir / "mr_notes.json"
+        self._notes: Dict[str, Dict[str, str]] = {}
+        self._load()
+
+    @staticmethod
+    def _key(project_path: str, iid: int) -> str:
+        return f"{project_path}:{iid}"
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            with open(self.path, 'r') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    self._notes = {
+                        k: v for k, v in data.items()
+                        if isinstance(v, dict) and isinstance(v.get('text'), str)
+                    }
+        except Exception:
+            self._notes = {}
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix('.json.tmp')
+        with open(tmp, 'w') as f:
+            json.dump(self._notes, f, indent=2, sort_keys=True)
+        os.replace(tmp, self.path)
+
+    def get(self, project_path: str, iid: int) -> Optional[str]:
+        entry = self._notes.get(self._key(project_path, iid))
+        return entry.get('text') if entry else None
+
+    def has(self, project_path: str, iid: int) -> bool:
+        return self._key(project_path, iid) in self._notes
+
+    def set(self, project_path: str, iid: int, text: str) -> None:
+        if not project_path:
+            return
+        self._notes[self._key(project_path, iid)] = {
+            'text': text,
+            'updated_at': datetime.now().isoformat(timespec='seconds'),
+        }
+        self._save()
+
+    def delete(self, project_path: str, iid: int) -> bool:
+        key = self._key(project_path, iid)
+        if key in self._notes:
+            del self._notes[key]
+            self._save()
+            return True
+        return False
+
+
 class Config:
     """Handle configuration from environment variables and config files"""
-    
+
     def __init__(self):
         self.config_dir = Path.home() / ".config" / "gitlab-monitor"
         self.config_file = self.config_dir / "config.json"
@@ -107,6 +170,7 @@ class Config:
         self._config = self._load_config()
         self.favorites = Favorites(self.config_dir)
         self.recent_projects = RecentProjects(self.config_dir)
+        self.mr_notes = MRNotes(self.config_dir)
 
     def get_last_view(self) -> Optional[Dict[str, Any]]:
         if not self.last_view_file.exists():
