@@ -1,0 +1,76 @@
+name: Update Homebrew Tap
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.5.4)'
+        required: true
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+    steps:
+    - name: Get release version
+      id: version
+      run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+    - name: Download release binary and compute checksum
+      id: sha
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release download "$TAG" \
+          --repo bearded-giant/gitlab-monitor \
+          --pattern "glmon-aarch64-apple-darwin" \
+          --dir .
+        sha=$(sha256sum "glmon-aarch64-apple-darwin" | cut -d' ' -f1)
+        echo "sha_arm_macos=${sha}" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout tap repo
+      uses: actions/checkout@v5
+      with:
+        repository: bearded-giant/homebrew-tap
+        token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+    - name: Update formula
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+        SHA_ARM_MACOS: ${{ steps.sha.outputs.sha_arm_macos }}
+      run: |
+        mkdir -p Formula
+        cat > Formula/gitlab-monitor.rb << EOF
+        class GitlabMonitor < Formula
+          desc "K9s-style TUI for monitoring GitLab pipelines"
+          homepage "https://github.com/bearded-giant/gitlab-monitor"
+          version "$VERSION"
+          license "Apache-2.0"
+
+          url "https://github.com/bearded-giant/gitlab-monitor/releases/download/v#{version}/glmon-aarch64-apple-darwin"
+          sha256 "$SHA_ARM_MACOS"
+
+          def install
+            bin.install "glmon-aarch64-apple-darwin" => "glmon"
+            bin.install_symlink "glmon" => "gitlab-monitor"
+          end
+
+          test do
+            assert_match "Error", shell_output("#{bin}/glmon 2>&1", 1)
+          end
+        end
+        EOF
+
+    - name: Commit and push
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add Formula/gitlab-monitor.rb
+        git diff --staged --quiet && exit 0
+        git commit -m "gitlab-monitor ${{ steps.version.outputs.version }}"
+        git pull --rebase
+        git push
