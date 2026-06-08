@@ -3,14 +3,11 @@
 # https://github.com/bearded-giant/gitlab-tools
 # Licensed under Apache License 2.0
 
-import os
 import sys
 import argparse
 import subprocess
-import gitlab
 import webbrowser
-from datetime import datetime, timedelta, timezone
-import re
+from datetime import datetime
 import asyncio
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Static, Input, RichLog, TextArea, Label, Markdown
@@ -22,236 +19,63 @@ from rich.text import Text
 
 from .config import Config
 from . import __version__
+from .constants import (
+    PIPELINE_AGE_CYCLE,
+    DEFAULT_PIPELINE_AGE_DAYS,
+    PIPELINE_REFRESH_INTERVAL,
+    JOB_REFRESH_INTERVAL,
+    LOG_META_REFRESH_INTERVAL,
+    LOG_TRACE_REFRESH_INTERVAL,
+    LOG_FETCH_TIMEOUT,
+    STATUS_STYLES,
+    TERMINAL_STATUSES,
+    MAX_LOG_LINES,
+    INFO_PANE_WIDTH,
+    KEY_COLS,
+    MR_STATE_CYCLE,
+    MERGED_WINDOW_CYCLE,
+    DEFAULT_MERGED_WINDOW_DAYS,
+    LOGO,
+    REPO_URL,
+)
+from .formatting import (
+    _dbg,
+    copy_to_clipboard,
+    status_badge,
+    format_age,
+    format_duration,
+    _info_lines,
+    _key_lines,
+    _key_lines_from_rows,
+    _header_layout,
+    _format_header,
+    _breadcrumb_text,
+    _auto_refresh_indicator,
+    _loading_indicator,
+    _status_line,
+    _pipeline_status_color,
+    _pipeline_status_text,
+    _mr_state_badge,
+    _mr_state_color,
+)
+from .api import GitLabAPI
 
 
-# Dev builds (version contains ".dev") write to a debug log. Release builds skip this.
-# Override path with env GLMON_DEBUG_LOG. Disable explicitly with GLMON_DEBUG_LOG=off.
-_DEBUG_LOG_ENABLED = ".dev" in __version__ and os.environ.get("GLMON_DEBUG_LOG", "").lower() != "off"
-_DEBUG_LOG_PATH = os.environ.get("GLMON_DEBUG_LOG") or "/tmp/glmon-debug.log"
-
-def _dbg(msg: str) -> None:
-    if not _DEBUG_LOG_ENABLED:
-        return
-    try:
-        from datetime import datetime as _dt
-        with open(_DEBUG_LOG_PATH, "a") as f:
-            f.write(f"{_dt.now().isoformat()} {msg}\n")
-    except Exception:
-        pass
 
 
-# pipeline age filter cycle: 3d -> 7d -> 30d -> all (None)
-PIPELINE_AGE_CYCLE = [3, 7, 30, None]
-DEFAULT_PIPELINE_AGE_DAYS = 3
 
-
-def _env_int(name, default):
-    val = os.environ.get(name)
-    if val is None:
-        return default
-    try:
-        return int(val)
-    except ValueError:
-        return default
-
-
-PIPELINE_REFRESH_INTERVAL = _env_int('GLMON_PIPELINE_REFRESH_INTERVAL', 10)
-JOB_REFRESH_INTERVAL = _env_int('GLMON_JOB_REFRESH_INTERVAL', 10)
-LOG_META_REFRESH_INTERVAL = _env_int('GLMON_LOG_REFRESH_INTERVAL', 5)
-LOG_TRACE_REFRESH_INTERVAL = _env_int('GLMON_TRACE_REFRESH_INTERVAL', 20)
-LOG_FETCH_TIMEOUT = _env_int('GLMON_FETCH_TIMEOUT', 30)
-
-
-def copy_to_clipboard(text):
-    try:
-        subprocess.run(['pbcopy'], input=text.encode(), check=True)
-        return True
-    except Exception:
-        try:
-            subprocess.run(['xclip', '-selection', 'clipboard'], input=text.encode(), check=True)
-            return True
-        except Exception:
-            return False
 
 
 # -- status styling ----------------------------------------------------------
 
-STATUS_STYLES = {
-    'success':  ('bold #a6e3a1', ' success '),
-    'failed':   ('bold #f38ba8', ' failed '),
-    'running':  ('bold #f9e2af', ' running '),
-    'pending':  ('bold #a6adc8', ' pending '),
-    'skipped':  ('bold #6c7086', ' skipped '),
-    'canceled': ('bold #a6adc8', ' canceled '),
-    'created':  ('bold #6c7086', ' created '),
-    'manual':   ('bold #89b4fa', ' manual '),
-}
-
-TERMINAL_STATUSES = frozenset({'success', 'failed', 'canceled', 'skipped', 'manual'})
-MAX_LOG_LINES = 5000
 
 
-def status_badge(status):
-    style, label = STATUS_STYLES.get(status, ('', f' {status} '))
-    return Text(label, style=style)
-
-
-def format_duration(seconds):
-    if seconds is None:
-        return "-"
-    m, s = divmod(int(seconds), 60)
-    if m >= 60:
-        h, m = divmod(m, 60)
-        return f"{h}h{m}m"
-    return f"{m}m{s}s"
-
-
-def format_age(iso_str):
-    if not iso_str:
-        return ""
-    dt = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
-    now = datetime.now(dt.tzinfo)
-    diff = (now - dt).total_seconds()
-    if diff < 60:
-        return "just now"
-    elif diff < 3600:
-        return f"{int(diff / 60)}m ago"
-    elif diff < 86400:
-        return f"{int(diff / 3600)}h ago"
-    elif diff < 604800:
-        return f"{int(diff / 86400)}d ago"
-    else:
-        return dt.strftime('%m-%d')
 
 
 # -- k9s-style header --------------------------------------------------------
 
-INFO_PANE_WIDTH = 56
-KEY_COLS = 3
 
 
-def _info_lines(pairs, max_value_width=None):
-    if not pairs:
-        return []
-    label_w = max(len(l) for l, _ in pairs)
-    lines = []
-    for label, value in pairs:
-        t = Text()
-        t.append(f"{label}:".rjust(label_w + 1), style="bold #f9e2af")
-        t.append(" ", style="bold #f9e2af")
-        sval = str(value)
-        if max_value_width is not None and len(sval) > max_value_width:
-            sval = sval[:max(0, max_value_width - 1)] + "…"
-        t.append(sval, style="#cdd6f4")
-        lines.append(t)
-    return lines
-
-
-def _key_lines(keys, cols=KEY_COLS):
-    if not keys:
-        return []
-    # Two shapes supported:
-    #  - flat list[(key, label)] → column-major packing (legacy)
-    #  - list[list[(key, label) | None]] → rows verbatim; slot positions stable across screens
-    if isinstance(keys[0], list):
-        return _key_lines_from_rows(keys, cols)
-    rows_per_col = (len(keys) + cols - 1) // cols
-    columns = [keys[i * rows_per_col:(i + 1) * rows_per_col] for i in range(cols)]
-    col_widths = []
-    for col in columns:
-        if not col:
-            col_widths.append((0, 0))
-            continue
-        max_k = max(len(f"<{k}>") for k, _ in col)
-        max_a = max(len(a) for _, a in col)
-        col_widths.append((max_k, max_a))
-    rows = max((len(c) for c in columns), default=0)
-    lines = []
-    for r in range(rows):
-        line = Text()
-        for ci, col in enumerate(columns):
-            kw, aw = col_widths[ci]
-            if r < len(col):
-                k, a = col[r]
-                line.append(f"<{k}>".ljust(kw), style="bold #89b4fa")
-                line.append(" ")
-                line.append(a.ljust(aw + 3), style="#cdd6f4")
-            else:
-                line.append(" " * (kw + 1 + aw + 3))
-        lines.append(line)
-    return lines
-
-
-def _key_lines_from_rows(rows, cols):
-    n_cols = min(cols, max((len(r) for r in rows), default=0))
-    col_widths = []
-    for ci in range(n_cols):
-        max_k = 0
-        max_a = 0
-        for r in rows:
-            entry = r[ci] if ci < len(r) else None
-            if entry is None:
-                continue
-            k, a = entry
-            max_k = max(max_k, len(f"<{k}>"))
-            max_a = max(max_a, len(a))
-        col_widths.append((max_k, max_a))
-    lines = []
-    for r in rows:
-        line = Text()
-        for ci in range(n_cols):
-            kw, aw = col_widths[ci]
-            entry = r[ci] if ci < len(r) else None
-            if entry is not None:
-                k, a = entry
-                line.append(f"<{k}>".ljust(kw), style="bold #89b4fa")
-                line.append(" ")
-                line.append(a.ljust(aw + 3), style="#cdd6f4")
-            else:
-                line.append(" " * (kw + 1 + aw + 3))
-        lines.append(line)
-    return lines
-
-
-def _header_layout(available_width):
-    # returns (info_width, key_cols, stack). stack=True renders info above keys
-    if available_width is None or available_width >= 130:
-        return INFO_PANE_WIDTH, KEY_COLS, False
-    if available_width >= 100:
-        return 50, 2, False
-    if available_width >= 75:
-        return 42, 1, False
-    return max(20, available_width - 2), 2, True
-
-
-def _format_header(info_pairs, keys, available_width=None):
-    info_width, cols, stack = _header_layout(available_width)
-    info = _info_lines(info_pairs, max_value_width=max(10, info_width - 12))
-    krows = _key_lines(keys, cols=cols)
-    out = Text()
-    if stack:
-        for i, line in enumerate(info):
-            if i > 0:
-                out.append("\n")
-            out.append(line)
-        for line in krows:
-            out.append("\n")
-            out.append(line)
-        return out
-    rows = max(len(info), len(krows))
-    for i in range(rows):
-        if i > 0:
-            out.append("\n")
-        if i < len(info):
-            left = info[i]
-            out.append(left)
-            pad = max(1, info_width - left.cell_len)
-            out.append(" " * pad)
-        else:
-            out.append(" " * info_width)
-        if i < len(krows):
-            out.append(krows[i])
-    return out
 
 
 class K9sHeader(Static):
@@ -288,23 +112,6 @@ class KeyBar(Static):
     pass
 
 
-def _breadcrumb_text(parts):
-    """parts: list of str or (text, style) tuples. Renders with › separators."""
-    t = Text()
-    sep = Text("  ›  ", style="#585b70")
-    first = True
-    for p in parts:
-        if p is None or p == "":
-            continue
-        if not first:
-            t.append_text(sep)
-        first = False
-        if isinstance(p, tuple):
-            text, style = p
-            t.append(text, style=style)
-        else:
-            t.append(str(p), style="bold #89b4fa")
-    return t
 
 
 class StatusBar(Horizontal):
@@ -343,49 +150,6 @@ class StatusBar(Horizontal):
             self._initial_loading = text
 
 
-def _auto_refresh_indicator(interval_seconds, active=True, refreshing=False, loading_label=None):
-    """Build right-side status text showing auto-refresh state. loading_label ignored — loading is in its own slot now."""
-    t = Text()
-    if refreshing:
-        t.append("⟳ ", style="bold #f9e2af")
-        t.append("refreshing", style="bold #f9e2af")
-        return t
-    if not active or interval_seconds is None:
-        t.append("auto-refresh: ", style="#6c7086")
-        t.append("off", style="bold #f38ba8")
-        return t
-    t.append("↻ ", style="#a6e3a1")
-    t.append("auto-refresh: ", style="#6c7086")
-    t.append(f"{interval_seconds}s", style="bold #a6e3a1")
-    return t
-
-
-def _loading_indicator(label="loading"):
-    """Build right-side status text for an in-flight load."""
-    t = Text()
-    t.append("⟳ ", style="bold #f9e2af")
-    t.append(label, style="bold #f9e2af")
-    return t
-
-
-def _status_line(parts):
-    """Render footer line. parts: list of (label, value) or strings."""
-    t = Text()
-    sep = Text("  |  ", style="#585b70")
-    first = True
-    for p in parts:
-        if not p:
-            continue
-        if not first:
-            t.append_text(sep)
-        first = False
-        if isinstance(p, tuple):
-            label, value = p
-            t.append(f"{label}: ", style="#6c7086")
-            t.append(str(value), style="bold #cdd6f4")
-        else:
-            t.append(str(p), style="#cdd6f4")
-    return t
 
 
 class ScreenBase(Screen):
@@ -451,486 +215,10 @@ class ScreenBase(Screen):
 
 # -- api layer ---------------------------------------------------------------
 
-class GitLabAPI:
-
-    def __init__(self, config: Config):
-        self.config = config
-        self.gl = gitlab.Gitlab(config.gitlab_url, private_token=config.gitlab_token)
-        self.project = None
-        self.project_name = None
-
-    def connect_project(self):
-        if self.config.project_path:
-            self.project = self.gl.projects.get(self.config.project_path)
-            self.project_name = self.config.project_path
-
-    def set_project(self, project_path: str):
-        self.project = self.gl.projects.get(project_path)
-        self.project_name = project_path
-
-    @staticmethod
-    def _project_activity(p):
-        # GitLab's last_activity_at lags + skips pipeline events; take max with updated_at
-        a = getattr(p, 'last_activity_at', None) or ''
-        u = getattr(p, 'updated_at', None) or ''
-        return max(a, u) or None
-
-    def get_projects(self, search=None, per_page=50):
-        params = {'per_page': per_page, 'order_by': 'last_activity_at', 'sort': 'desc', 'membership': True}
-        if search:
-            params['search'] = search
-        projects = self.gl.projects.list(**params)
-        return [{
-            'id': p.id,
-            'path': p.path_with_namespace,
-            'name': p.name,
-            'description': p.description or '',
-            'last_activity': self._project_activity(p),
-        } for p in projects]
-
-    def get_project_meta(self, project_path):
-        try:
-            p = self.gl.projects.get(project_path)
-            return {
-                'id': p.id,
-                'path': p.path_with_namespace,
-                'name': p.name,
-                'description': p.description or '',
-                'last_activity': self._project_activity(p),
-            }
-        except Exception:
-            return None
-
-    def get_projects_by_paths(self, paths):
-        results = []
-        for path in paths:
-            meta = self.get_project_meta(path)
-            if meta:
-                results.append(meta)
-        return results
-
-    def get_recent_pipelines(self, limit=50, ref=None, username=None, days=None):
-        params = {'per_page': limit, 'order_by': 'id', 'sort': 'desc'}
-        if ref:
-            params['ref'] = ref
-        if username:
-            params['username'] = username
-        if days is not None:
-            since = datetime.now(timezone.utc) - timedelta(days=days)
-            params['updated_after'] = since.isoformat().replace('+00:00', 'Z')
-        pipelines = self.project.pipelines.list(**params)
-        results = []
-        for p in pipelines:
-            results.append({
-                'id': p.id,
-                'status': p.status,
-                'ref': p.ref,
-                'sha': p.sha[:8],
-                'created_at': p.created_at,
-                'updated_at': p.updated_at,
-                'user': getattr(p, 'user', {}).get('username', 'unknown') if hasattr(p, 'user') and p.user else 'unknown',
-                'web_url': p.web_url,
-            })
-        return results
-
-    def _project_path_from_url(self, web_url):
-        # extract project path from pipeline web_url like
-        # https://gitlab.example.com/group/subgroup/project/-/pipelines/123
-        try:
-            base = self.config.gitlab_url.rstrip('/')
-            path = web_url.replace(base, '').strip('/')
-            # path: group/subgroup/project/-/pipelines/123
-            idx = path.find('/-/')
-            if idx > 0:
-                return path[:idx]
-        except Exception:
-            pass
-        return None
-
-    def get_pipeline_bridges(self, pipeline_id):
-        try:
-            pipeline = self.project.pipelines.get(pipeline_id)
-            bridges = pipeline.bridges.list(all=True)
-            results = []
-            for b in bridges:
-                dp = getattr(b, 'downstream_pipeline', None)
-                if not dp:
-                    continue
-                web_url = dp.get('web_url', '')
-                ds_project_path = self._project_path_from_url(web_url)
-                is_same_project = (ds_project_path == self.project_name) if ds_project_path else True
-                results.append({
-                    'id': dp.get('id'),
-                    'status': dp.get('status', 'unknown'),
-                    'ref': dp.get('ref', ''),
-                    'sha': (dp.get('sha') or '')[:8],
-                    'created_at': dp.get('created_at', ''),
-                    'updated_at': dp.get('updated_at', ''),
-                    'web_url': web_url,
-                    'user': 'unknown',
-                    '_ds_project_path': ds_project_path if not is_same_project else None,
-                    '_is_downstream': True,
-                    '_parent_id': pipeline_id,
-                    '_bridge_name': b.name,
-                })
-            return results
-        except Exception:
-            return []
-
-    def get_pipeline_detail(self, pipeline_id):
-        try:
-            p = self.project.pipelines.get(pipeline_id)
-            user = getattr(p, 'user', None) or {}
-            return {
-                'duration': getattr(p, 'duration', None),
-                'queued_duration': getattr(p, 'queued_duration', None),
-                'started_at': getattr(p, 'started_at', None),
-                'finished_at': getattr(p, 'finished_at', None),
-                'source': getattr(p, 'source', None),
-                'coverage': getattr(p, 'coverage', None),
-                'user': user.get('username') if isinstance(user, dict) else getattr(user, 'username', None),
-            }
-        except Exception:
-            return {}
-
-    def cancel_pipeline(self, pipeline_id):
-        pipeline = self.project.pipelines.get(pipeline_id)
-        pipeline.cancel()
-        return pipeline.status
-
-    def get_pipeline_jobs(self, pipeline_id):
-        try:
-            pipeline = self.project.pipelines.get(pipeline_id)
-            jobs = pipeline.jobs.list(all=True)
-            return [{
-                'id': job.id,
-                'name': job.name,
-                'status': job.status,
-                'stage': job.stage,
-                'duration': job.duration,
-                'started_at': job.started_at,
-                'finished_at': job.finished_at,
-                'web_url': job.web_url,
-            } for job in jobs]
-        except Exception:
-            return []
-
-    def get_job(self, job_id):
-        try:
-            job = self.project.jobs.get(job_id)
-            return {
-                'id': job.id,
-                'name': job.name,
-                'status': job.status,
-                'stage': job.stage,
-                'duration': job.duration,
-                'started_at': job.started_at,
-                'finished_at': job.finished_at,
-                'web_url': job.web_url,
-            }
-        except Exception:
-            return None
-
-    def get_job_trace(self, job_id):
-        try:
-            job = self.project.jobs.get(job_id)
-            trace = job.trace()
-            if isinstance(trace, bytes):
-                trace = trace.decode("utf-8", errors="replace")
-            return trace
-        except Exception as e:
-            return f"Error fetching trace: {e}"
-
-    def get_job_failures(self, job_id):
-        trace = self.get_job_trace(job_id)
-        failures = []
-        summary_pattern = re.compile(
-            r"=+\s*short test summary info\s*=+\n(.*?)(?=^=+|\Z)",
-            re.MULTILINE | re.DOTALL | re.IGNORECASE,
-        )
-        summary_match = summary_pattern.search(trace)
-        if summary_match:
-            for line in summary_match.group(1).strip().split('\n'):
-                if 'FAILED' in line:
-                    failures.append(line.strip())
-        if not failures:
-            for line in trace.split('\n'):
-                if any(kw in line.lower() for kw in ['error:', 'failed:', 'exception:']):
-                    failures.append(line.strip())
-                    if len(failures) > 20:
-                        break
-        return failures
-
-    # -- merge requests ------------------------------------------------------
-
-    @staticmethod
-    def _mr_project_path_from_refs(mr):
-        # `references.full` looks like "group/sub/project!123"
-        try:
-            refs = getattr(mr, 'references', None) or {}
-            full = refs.get('full') if isinstance(refs, dict) else None
-            if full and '!' in full:
-                return full.split('!', 1)[0]
-        except Exception:
-            pass
-        return None
-
-    @staticmethod
-    def _mr_to_dict(mr, project_path=None):
-        author = getattr(mr, 'author', None) or {}
-        head_pipeline = getattr(mr, 'head_pipeline', None) or {}
-        path = project_path or GitLabAPI._mr_project_path_from_refs(mr)
-        return {
-            'id': mr.id,
-            'iid': mr.iid,
-            'project_id': mr.project_id,
-            'project_path': path or '',
-            'title': mr.title,
-            'description': getattr(mr, 'description', '') or '',
-            'state': mr.state,
-            'draft': bool(getattr(mr, 'draft', False) or getattr(mr, 'work_in_progress', False)),
-            'merge_status': getattr(mr, 'merge_status', None) or getattr(mr, 'detailed_merge_status', None),
-            'source_branch': mr.source_branch,
-            'target_branch': mr.target_branch,
-            'created_at': mr.created_at,
-            'updated_at': mr.updated_at,
-            'merged_at': getattr(mr, 'merged_at', None),
-            'closed_at': getattr(mr, 'closed_at', None),
-            'author': author.get('username') if isinstance(author, dict) else getattr(author, 'username', 'unknown'),
-            'web_url': mr.web_url,
-            'user_notes_count': getattr(mr, 'user_notes_count', 0) or 0,
-            'upvotes': getattr(mr, 'upvotes', 0) or 0,
-            'downvotes': getattr(mr, 'downvotes', 0) or 0,
-            'head_pipeline_status': head_pipeline.get('status') if isinstance(head_pipeline, dict) else getattr(head_pipeline, 'status', None),
-            'head_pipeline_id': head_pipeline.get('id') if isinstance(head_pipeline, dict) else getattr(head_pipeline, 'id', None),
-            'head_pipeline_web_url': head_pipeline.get('web_url') if isinstance(head_pipeline, dict) else getattr(head_pipeline, 'web_url', None),
-            'has_conflicts': getattr(mr, 'has_conflicts', False),
-            'blocking_discussions_resolved': getattr(mr, 'blocking_discussions_resolved', True),
-        }
-
-    def get_my_merge_requests(self, state='opened', limit=50):
-        try:
-            mrs = self.gl.mergerequests.list(
-                scope='created_by_me',
-                state=state,
-                per_page=limit,
-                order_by='updated_at',
-                sort='desc',
-            )
-            return [self._mr_to_dict(mr) for mr in mrs]
-        except Exception:
-            return []
-
-    def get_project_merge_requests(self, project_path, state='merged', limit=50):
-        try:
-            project = self.gl.projects.get(project_path)
-            mrs = project.mergerequests.list(
-                state=state,
-                per_page=limit,
-                order_by='updated_at',
-                sort='desc',
-            )
-            return [self._mr_to_dict(mr, project_path=project_path) for mr in mrs]
-        except Exception:
-            return []
-
-    def get_merge_request(self, project_path, iid):
-        try:
-            project = self.gl.projects.get(project_path)
-            mr = project.mergerequests.get(iid)
-            data = self._mr_to_dict(mr, project_path=project_path)
-            # diff stats
-            try:
-                changes = mr.changes()
-                data['changes_count'] = len(changes.get('changes', [])) if isinstance(changes, dict) else 0
-            except Exception:
-                data['changes_count'] = 0
-            # commits count
-            try:
-                commits = mr.commits()
-                data['commits_count'] = sum(1 for _ in commits)
-            except Exception:
-                data['commits_count'] = 0
-            # approvals
-            try:
-                approvals = mr.approvals.get()
-                approved_by = getattr(approvals, 'approved_by', None) or []
-                data['approvals_count'] = len(approved_by)
-                data['approved_by'] = [
-                    (a.get('user') or {}).get('username', '') if isinstance(a, dict) else ''
-                    for a in approved_by
-                ]
-                data['approvals_required'] = getattr(approvals, 'approvals_required', 0) or 0
-            except Exception:
-                data['approvals_count'] = 0
-                data['approved_by'] = []
-                data['approvals_required'] = 0
-            return data
-        except Exception:
-            return None
-
-    def get_mr_approval_state(self, project_path, iid):
-        try:
-            project = self.gl.projects.get(project_path)
-            mr = project.mergerequests.get(iid)
-            state = mr.approval_state.get()
-            rules_raw = getattr(state, 'rules', None) or []
-            rules = []
-            for r in rules_raw:
-                d = r if isinstance(r, dict) else (r.attributes if hasattr(r, 'attributes') else dict(r))
-                approved_by = d.get('approved_by') or []
-                approved_names = [
-                    (a.get('username') if isinstance(a, dict) else getattr(a, 'username', '')) or ''
-                    for a in approved_by
-                ]
-                rules.append({
-                    'id': d.get('id'),
-                    'name': d.get('name') or '',
-                    'rule_type': d.get('rule_type') or '',
-                    'approvals_required': d.get('approvals_required', 0) or 0,
-                    'approved': bool(d.get('approved', False)),
-                    'approved_by': [n for n in approved_names if n],
-                })
-            return rules
-        except Exception:
-            return []
-
-    def get_mr_pipelines(self, project_path, iid):
-        try:
-            project = self.gl.projects.get(project_path)
-            mr = project.mergerequests.get(iid)
-            pipelines = mr.pipelines.list(all=False, per_page=50)
-            results = []
-            for p in pipelines:
-                pd = p.attributes if hasattr(p, 'attributes') else {}
-                results.append({
-                    'id': pd.get('id') or getattr(p, 'id', None),
-                    'status': pd.get('status') or getattr(p, 'status', 'unknown'),
-                    'ref': pd.get('ref') or getattr(p, 'ref', ''),
-                    'sha': (pd.get('sha') or getattr(p, 'sha', '') or '')[:8],
-                    'created_at': pd.get('created_at') or getattr(p, 'created_at', ''),
-                    'updated_at': pd.get('updated_at') or getattr(p, 'updated_at', ''),
-                    'web_url': pd.get('web_url') or getattr(p, 'web_url', ''),
-                    'user': 'unknown',
-                })
-            return results
-        except Exception:
-            return []
-
-    @staticmethod
-    def _discussion_unresolved(disc_dict):
-        notes = disc_dict.get('notes', []) if isinstance(disc_dict, dict) else []
-        return any(n.get('resolvable') and not n.get('resolved') for n in notes if isinstance(n, dict))
-
-    def get_mr_commits(self, project_path, iid):
-        try:
-            project = self.gl.projects.get(project_path)
-            mr = project.mergerequests.get(iid)
-            commits = mr.commits()
-            results = []
-            for c in commits:
-                cd = c.attributes if hasattr(c, 'attributes') else {}
-                sha = cd.get('id') or getattr(c, 'id', '') or ''
-                results.append({
-                    'sha': sha,
-                    'short_sha': (sha or '')[:8],
-                    'title': cd.get('title') or getattr(c, 'title', '') or '',
-                    'author_name': cd.get('author_name') or getattr(c, 'author_name', '') or '',
-                    'created_at': cd.get('created_at') or getattr(c, 'created_at', '') or '',
-                    'web_url': cd.get('web_url') or getattr(c, 'web_url', '') or '',
-                    'pipeline_status': '',
-                })
-            return results
-        except Exception:
-            return []
-
-    def get_commit_pipeline_status(self, project_path, sha):
-        if not sha:
-            return ''
-        try:
-            project = self.gl.projects.get(project_path)
-            commit = project.commits.get(sha)
-            lp = getattr(commit, 'last_pipeline', None)
-            if isinstance(lp, dict):
-                return lp.get('status', '') or ''
-            if lp is not None:
-                return getattr(lp, 'status', '') or ''
-            return ''
-        except Exception:
-            return ''
-
-    def get_mr_discussions(self, project_path, iid):
-        try:
-            project = self.gl.projects.get(project_path)
-            mr = project.mergerequests.get(iid)
-            discussions = mr.discussions.list(all=True)
-            results = []
-            for d in discussions:
-                dd = d.attributes if hasattr(d, 'attributes') else dict(d)
-                notes = dd.get('notes', []) or []
-                if not notes:
-                    continue
-                first = notes[0]
-                results.append({
-                    'id': dd.get('id'),
-                    'unresolved': self._discussion_unresolved(dd),
-                    'resolvable': any(n.get('resolvable') for n in notes),
-                    'notes': [
-                        {
-                            'id': n.get('id'),
-                            'author': (n.get('author') or {}).get('username', 'unknown'),
-                            'body': n.get('body') or '',
-                            'created_at': n.get('created_at', ''),
-                            'system': bool(n.get('system')),
-                            'resolved': bool(n.get('resolved')),
-                            'resolvable': bool(n.get('resolvable')),
-                        }
-                        for n in notes
-                    ],
-                    'first_author': (first.get('author') or {}).get('username', 'unknown'),
-                    'first_created_at': first.get('created_at', ''),
-                    'system': bool(first.get('system')),
-                })
-            return results
-        except Exception:
-            return []
-
-    def get_mr_unresolved_count(self, project_path, iid):
-        discussions = self.get_mr_discussions(project_path, iid)
-        return sum(1 for d in discussions if d.get('unresolved'))
-
-    def approve_merge_request(self, project_path, iid):
-        project = self.gl.projects.get(project_path)
-        mr = project.mergerequests.get(iid)
-        mr.approve()
-        return True
-
-    def close_merge_request(self, project_path, iid):
-        project = self.gl.projects.get(project_path)
-        mr = project.mergerequests.get(iid)
-        mr.state_event = 'close'
-        mr.save()
-        return True
-
-    def create_mr_note(self, project_path, iid, body):
-        project = self.gl.projects.get(project_path)
-        mr = project.mergerequests.get(iid)
-        return mr.notes.create({'body': body})
 
 
 # -- screens -----------------------------------------------------------------
 
-LOGO = r"""
-       _
-  __ _| |_ __ ___   ___  _ __
- / _` | | '_ ` _ \ / _ \| '_ \
-| (_| | | | | | | | (_) | | | |
- \__, |_|_| |_| |_|\___/|_| |_|
- |___/
-"""
-
-
-REPO_URL = "https://github.com/bearded-giant/gitlab-monitor"
 
 
 class LoadingScreen(Screen):
@@ -952,7 +240,7 @@ class LoadingScreen(Screen):
 
 class ProjectSelectScreen(ScreenBase):
 
-    KEY_MAP = {"q": "quit", "r": "refresh", "slash": "search", "s": "star", "a": "toggle_all", "c": "clear_filter", "m": "toggle_module", "g": "goto_mr"}
+    KEY_MAP = {"q": "quit", "r": "refresh", "slash": "search", "s": "star", "a": "toggle_all", "c": "clear_filter", "m": "open_modules", "tab": "open_modules", "g": "goto_mr", "p": "my_pipelines"}
 
     DEBOUNCE_SECONDS = 0.4
 
@@ -1014,9 +302,10 @@ class ProjectSelectScreen(ScreenBase):
     def _keys(self):
         toggle_label = "show all" if self.mode == "fav" else "favorites only"
         return [
-            [("q", "quit"),       ("r", "refresh"), ("m", "MRs")],
-            [("/", "filter"),     ("s", "star"),    ("g", "goto MR")],
-            [("enter", "select"), ("c", "clear"),   ("a", toggle_label)],
+            [("tab", "modules"),  ("/", "filter"),     ("enter", "select")],
+            [("r", "refresh"),    ("s", "star"),       ("a", toggle_label)],
+            [("p", "my pipelines"),("g", "goto MR"),   ("c", "clear")],
+            [("q", "quit")],
         ]
 
     def _refresh_breadcrumb(self) -> None:
@@ -1186,8 +475,12 @@ class ProjectSelectScreen(ScreenBase):
     async def action_quit(self) -> None:
         self.app.exit()
 
-    async def action_toggle_module(self) -> None:
-        self.app.switch_screen(MyMergeRequestsScreen(self.api))
+    async def action_open_modules(self) -> None:
+        self.app.open_modules()
+
+    async def action_my_pipelines(self) -> None:
+        age = getattr(self.app, 'default_age_days', DEFAULT_PIPELINE_AGE_DAYS)
+        self.app.switch_screen(MyPipelineListScreen(self.api, age_days=age))
 
     async def action_goto_mr(self) -> None:
         def _after(result):
@@ -1202,7 +495,7 @@ class ProjectSelectScreen(ScreenBase):
 
 class PipelineListScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel", "s": "toggle_status", "f": "failed", "c": "clear_filter", "M": "project_mrs"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel", "s": "toggle_status", "f": "failed", "c": "clear_filter", "M": "project_mrs", "P": "my_pipelines"}
 
     STATUS_CYCLE = [None, 'running', 'pending']
 
@@ -1237,18 +530,11 @@ class PipelineListScreen(ScreenBase):
         status_label = f"status:{self.status_filter}" if self.status_filter else "status"
         failed_label = "failed*" if self.status_filter == 'failed' else "failed"
         return [
-            ("q", "back"),
-            ("/", "filter"),
-            ("c", "clear"),
-            ("r", "refresh"),
-            ("t", "age"),
-            ("s", status_label),
-            ("f", failed_label),
-            ("M", "MRs"),
-            ("b", "browser"),
-            ("y", "copy url"),
-            ("x", "cancel"),
-            ("enter", "jobs"),
+            [("/", "filter"),    ("enter", "jobs"),  ("r", "refresh")],
+            [("b", "browser"),   ("y", "copy url"),  ("c", "clear")],
+            [("t", "age"),       ("s", status_label),("f", failed_label)],
+            [("M", "MRs"),       ("P", "my pipes"),  ("x", "cancel")],
+            [("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -1566,6 +852,9 @@ class PipelineListScreen(ScreenBase):
         if self.api.project_name:
             self.app.push_screen(ProjectMergeRequestsScreen(self.api, self.api.project_name))
 
+    async def action_my_pipelines(self) -> None:
+        self.app.push_screen(MyPipelineListScreen(self.api, age_days=self.age_days))
+
 
 class JobListScreen(ScreenBase):
 
@@ -1621,15 +910,10 @@ class JobListScreen(ScreenBase):
     def _keys(self):
         status_label = f"status:{self.status_filter}" if self.status_filter else "status"
         return [
-            ("q", "back"),
-            ("/", "filter"),
-            ("c", "clear"),
-            ("r", "refresh"),
-            ("b", "browser"),
-            ("f", "failures"),
-            ("s", status_label),
-            ("y", "copy url"),
-            ("enter", "logs"),
+            [("/", "filter"),   ("enter", "logs"),  ("r", "refresh")],
+            [("b", "browser"),  ("y", "copy url"),  ("c", "clear")],
+            [("s", status_label),("f", "failures")],
+            [("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -1892,11 +1176,9 @@ class JobDetailScreen(ScreenBase):
 
     def _keys(self):
         return [
-            ("q", "back"),
-            ("r", "refresh"),
-            ("b", "browser"),
-            ("f", "failures only"),
-            ("y", "copy"),
+            [("r", "refresh"),  ("b", "browser"),       ("y", "copy")],
+            [("f", "failures only")],
+            [("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2139,7 +1421,7 @@ class FailedJobsScreen(ScreenBase):
         ]
 
     def _keys(self):
-        return [("q", "back"), ("y", "copy")]
+        return [("y", "copy"), ("q", "back")]
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
@@ -2157,48 +1439,6 @@ class FailedJobsScreen(ScreenBase):
             "Failed jobs",
         ])
 
-    async def on_mount(self) -> None:
-        self._user_loading_label = "loading failures..."
-        try:
-            sb = self.query_one("#statusbar", StatusBar)
-            sb.set_text(_loading_indicator(self._user_loading_label))
-        except Exception:
-            pass
-        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
-
-    async def _initial_load(self) -> None:
-        try:
-            await self.load_failures()
-        finally:
-            self._user_loading_label = None
-            try:
-                sb = self.query_one("#statusbar", StatusBar)
-                sb.set_text(_status_line([f"{len(self.failed_jobs)} failed jobs", ("pipeline", f"#{self.pipeline['id']}")]))
-            except Exception:
-                pass
-
-    async def load_failures(self) -> None:
-        log = self.query_one("#failures-log", RichLog)
-        log.clear()
-        for job in self.failed_jobs:
-            dur = format_duration(job['duration'])
-            log.write(Text(
-                f" {job['name']} ",
-                style="bold white on #f38ba8",
-            ))
-            log.write(Text(
-                f"  stage: {job['stage']}  duration: {dur}  id: {job['id']}",
-                style="dim",
-            ))
-            log.write("")
-            failures = await asyncio.to_thread(self.api.get_job_failures, job['id'])
-            if failures:
-                for f in failures[:10]:
-                    log.write(Text(f"  {f}", style="#f38ba8"))
-            else:
-                log.write(Text("  no specific failures extracted", style="dim"))
-            log.write("")
-            log.write("")
 
     async def action_back(self) -> None:
         self.app.pop_screen()
@@ -2219,7 +1459,6 @@ class FailedJobsScreen(ScreenBase):
 
 # -- merge request screens ---------------------------------------------------
 
-MR_STATE_CYCLE = ['opened', 'merged', 'closed', 'all']
 
 
 def _mr_state_badge(state):
@@ -2267,7 +1506,7 @@ def _pipeline_status_text(status):
 
 class MyMergeRequestsScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "toggle_module", "e": "export", "n": "note"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -2277,28 +1516,39 @@ class MyMergeRequestsScreen(ScreenBase):
         self.mrs = []
         self.filtered_mrs = []
         self.state = 'opened'
+        self.window_days = DEFAULT_MERGED_WINDOW_DAYS
         self._refresh_timer = None
         self._refreshing = False
         self._unresolved_cache = {}
+        self._related_cache = {}
         self._row_to_mr = []
+        self._unresolved_col_key = None
+
+    def _is_windowed_state(self):
+        return self.state in ('merged', 'closed', 'all')
 
     def _info_pairs(self):
         total = len(self.mrs)
         shown = len(self.filtered_mrs)
         count = f"{shown}/{total}" if shown != total else str(total)
-        return [
+        pairs = [
             ("GitLab", self.api.config.gitlab_url),
             ("Scope", "created_by_me"),
             ("State", self.state),
             ("MRs", count),
         ]
+        if self._is_windowed_state():
+            pairs.append(("Window", f"{self.window_days}d"))
+        return pairs
 
     def _keys(self):
+        window_slot = ("w", f"window:{self.window_days}d") if self._is_windowed_state() else None
         return [
-            [("q", "quit"),     ("r", "refresh"),              ("m", "pipelines")],
-            [("/", "filter"),   ("s", f"state:{self.state}"),  ("g", "goto MR")],
-            [("enter", "view"), ("b", "browser"),              ("y", "copy url")],
-            [("e", "export md"),("n", "note")],
+            [("tab", "modules"),  ("/", "filter"),              ("enter", "view")],
+            [("r", "refresh"),    ("b", "browser"),             ("y", "copy url")],
+            [("p", "pipelines"),  ("s", f"state:{self.state}"), ("g", "goto MR")],
+            [("e", "export md"),  ("n", "note"),                window_slot],
+            [("q", "quit")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2343,7 +1593,11 @@ class MyMergeRequestsScreen(ScreenBase):
 
     async def on_mount(self) -> None:
         table = self.query_one("#mr-table", DataTable)
-        table.add_columns("●", "IID", "Title", "MR", "Pipeline", "Unresolved", "Age")
+        col_keys = table.add_columns("●", "IID", "Title", "MR", "Pipeline", "Unresolved", "Age")
+        try:
+            self._unresolved_col_key = col_keys[5]
+        except Exception:
+            self._unresolved_col_key = None
         table.cursor_type = "row"
         # set loading text + schedule the actual load AFTER first render so user sees the loading state
         self._user_loading_label = "loading MRs..."
@@ -2353,6 +1607,18 @@ class MyMergeRequestsScreen(ScreenBase):
         except Exception:
             pass
         self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    def _set_unresolved_col_label(self, label: str) -> None:
+        if self._unresolved_col_key is None:
+            return
+        try:
+            table = self.query_one("#mr-table", DataTable)
+            col = table.columns.get(self._unresolved_col_key)
+            if col is not None:
+                col.label = Text(label)
+                table.refresh()
+        except Exception:
+            pass
 
     async def _initial_load(self) -> None:
         try:
@@ -2368,8 +1634,8 @@ class MyMergeRequestsScreen(ScreenBase):
         self.api.config.save_last_view('my_mrs')
 
     async def load_mrs(self) -> None:
-        self.mrs = await asyncio.to_thread(self.api.get_my_merge_requests, self.state)
-        # Fetch unresolved counts in parallel for opened MRs only
+        days = self.window_days if self._is_windowed_state() else None
+        self.mrs = await asyncio.to_thread(self.api.get_my_merge_requests, self.state, 50, days)
         if self.state == 'opened' and self.mrs:
             todo = [(m['project_path'], m['iid']) for m in self.mrs if m['project_path']]
             results = await asyncio.gather(*(
@@ -2378,12 +1644,53 @@ class MyMergeRequestsScreen(ScreenBase):
             for (p, i), r in zip(todo, results):
                 if isinstance(r, int):
                     self._unresolved_cache[(p, i)] = r
+        elif self._is_windowed_state() and self.mrs:
+            await self._enrich_merged_mrs()
+        self._set_unresolved_col_label("Related" if self._is_windowed_state() else "Unresolved")
         self._apply_filter()
         try:
             self.query_one("#header", K9sHeader).set_info(self._info_pairs())
             self.query_one("#header", K9sHeader).set_keys(self._keys())
         except Exception:
             pass
+
+    async def _enrich_merged_mrs(self) -> None:
+        backfill_todo = []
+        related_todo = []
+        for m in self.mrs:
+            proj = m.get('project_path') or ''
+            iid = m.get('iid')
+            if not proj or iid is None:
+                continue
+            if not m.get('head_pipeline_status'):
+                backfill_todo.append((proj, iid, m))
+            if m.get('state') == 'merged':
+                key = (proj, iid)
+                if key in self._related_cache:
+                    continue
+                target = m.get('target_branch') or ''
+                merged_at = m.get('merged_at') or ''
+                if target and merged_at:
+                    related_todo.append((proj, iid, target, merged_at))
+
+        if backfill_todo:
+            results = await asyncio.gather(*(
+                asyncio.to_thread(self.api.get_mr_pipelines, p, i)
+                for p, i, _ in backfill_todo
+            ), return_exceptions=True)
+            for (p, i, mr), r in zip(backfill_todo, results):
+                if isinstance(r, list) and r:
+                    mr['head_pipeline_status'] = r[0].get('status') or mr.get('head_pipeline_status')
+                    mr['head_pipeline_id'] = r[0].get('id') or mr.get('head_pipeline_id')
+                    mr['head_pipeline_web_url'] = r[0].get('web_url') or mr.get('head_pipeline_web_url')
+
+        if related_todo:
+            results = await asyncio.gather(*(
+                asyncio.to_thread(self.api.list_pipelines_for_ref_since, p, ref, since)
+                for p, _, ref, since in related_todo
+            ), return_exceptions=True)
+            for (p, i, _, _), r in zip(related_todo, results):
+                self._related_cache[(p, i)] = r if isinstance(r, list) else []
 
     async def _safe_refresh(self) -> None:
         if self._refreshing:
@@ -2449,13 +1756,7 @@ class MyMergeRequestsScreen(ScreenBase):
                 if m['draft']:
                     title = f"[draft] {title}"
                 title_t = Text(title[:50], style="bold #cdd6f4")
-                unresolved = self._unresolved_cache.get((m['project_path'], m['iid']))
-                if unresolved is None:
-                    unresolved_t = Text("—", style="dim")
-                elif unresolved == 0:
-                    unresolved_t = Text("0", style="dim #a6e3a1")
-                else:
-                    unresolved_t = Text(str(unresolved), style="bold #f38ba8")
+                related_or_unresolved_t = self._render_related_or_unresolved(m)
                 age = format_age(m['updated_at'] or m['created_at'])
                 has_note = self.api.config.mr_notes.has(m['project_path'] or '', m['iid'])
                 note_t = Text("●", style="bold #f9e2af") if has_note else blank
@@ -2465,7 +1766,7 @@ class MyMergeRequestsScreen(ScreenBase):
                     title_t,
                     _mr_state_badge(m['state']),
                     _pipeline_status_text(m['head_pipeline_status']),
-                    unresolved_t,
+                    related_or_unresolved_t,
                     Text(age, style="dim italic"),
                 )
                 self._row_to_mr.append(m)
@@ -2480,6 +1781,26 @@ class MyMergeRequestsScreen(ScreenBase):
                 target = next((i for i, x in enumerate(self._row_to_mr) if x is not None), 0)
             table.move_cursor(row=target)
 
+    def _render_related_or_unresolved(self, m) -> Text:
+        key = (m.get('project_path') or '', m.get('iid'))
+        if self._is_windowed_state():
+            related = self._related_cache.get(key)
+            if related is None:
+                return Text("—", style="dim")
+            count = len(related)
+            if count == 0:
+                return Text("0", style="dim")
+            active = sum(1 for p in related if p.get('status') not in TERMINAL_STATUSES)
+            if active:
+                return Text(f"{count} ({active}*)", style="bold #f9e2af")
+            return Text(str(count), style="bold #89b4fa")
+        unresolved = self._unresolved_cache.get(key)
+        if unresolved is None:
+            return Text("—", style="dim")
+        if unresolved == 0:
+            return Text("0", style="dim #a6e3a1")
+        return Text(str(unresolved), style="bold #f38ba8")
+
     async def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "mr-filter":
             self._apply_filter()
@@ -2492,13 +1813,47 @@ class MyMergeRequestsScreen(ScreenBase):
     async def action_back(self) -> None:
         self.app.exit()
 
-    async def action_toggle_module(self) -> None:
-        self.app.switch_screen(ProjectSelectScreen(self.api, self.api.config.favorites))
+    async def action_open_modules(self) -> None:
+        self.app.open_modules()
+
+    async def action_pipelines(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        m = self._mr_at_row(table.cursor_row)
+        if m is None:
+            return
+        proj = m.get('project_path') or ''
+        if not proj:
+            self.notify("MR has no project path", severity="warning", timeout=2)
+            return
+        ds_api = GitLabAPI(self.api.config)
+        try:
+            ds_api.set_project(proj)
+        except Exception:
+            self.notify(f"Cannot access {proj}", severity="error", timeout=3)
+            return
+        self.app.push_screen(MRPipelineListScreen(ds_api, proj, m))
+
+    async def action_toggle_window(self) -> None:
+        if not self._is_windowed_state():
+            return
+        try:
+            idx = MERGED_WINDOW_CYCLE.index(self.window_days)
+        except ValueError:
+            idx = -1
+        self.window_days = MERGED_WINDOW_CYCLE[(idx + 1) % len(MERGED_WINDOW_CYCLE)]
+        self._related_cache.clear()
+        self._unresolved_cache.clear()
+        await self._show_loading(f"loading {self.window_days}d MRs...")
+        try:
+            await self.load_mrs()
+        finally:
+            self._clear_loading()
 
     async def action_refresh(self) -> None:
         if self._refreshing:
             return
         self._unresolved_cache.clear()
+        self._related_cache.clear()
         await self._show_loading("loading MRs...")
         try:
             await self.load_mrs()
@@ -2515,6 +1870,7 @@ class MyMergeRequestsScreen(ScreenBase):
             idx = -1
         self.state = MR_STATE_CYCLE[(idx + 1) % len(MR_STATE_CYCLE)]
         self._unresolved_cache.clear()
+        self._related_cache.clear()
         await self._show_loading("loading MRs...")
         try:
             await self.load_mrs()
@@ -2714,13 +2070,9 @@ class ProjectMergeRequestsScreen(ScreenBase):
 
     def _keys(self):
         return [
-            ("q", "back"),
-            ("/", "filter"),
-            ("r", "refresh"),
-            ("s", f"state:{self.state}"),
-            ("b", "browser"),
-            ("y", "copy url"),
-            ("enter", "view"),
+            [("/", "filter"),   ("enter", "view"),         ("r", "refresh")],
+            [("b", "browser"),  ("y", "copy url"),         ("s", f"state:{self.state}")],
+            [("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2963,18 +2315,11 @@ class MergeRequestDetailScreen(ScreenBase):
         resolved_label = "hide resolved" if self.show_resolved else "show resolved"
         auto_label = "auto off" if self._refresh_timer is not None else "auto on"
         return [
-            ("q", "back"),
-            ("r", "refresh"),
-            ("p", "pipelines"),
-            ("k", "commits"),
-            ("a", "approve"),
-            ("x", "close"),
-            ("c", "comment"),
-            ("f", resolved_label),
-            ("t", auto_label),
-            ("g", "goto MR"),
-            ("b", "browser"),
-            ("y", "copy url"),
+            [("r", "refresh"),    ("b", "browser"),    ("y", "copy url")],
+            [("p", "pipelines"),  ("k", "commits"),    ("g", "goto MR")],
+            [("a", "approve"),    ("c", "comment"),    ("x", "close")],
+            [("f", resolved_label),("t", auto_label)],
+            [("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -3386,25 +2731,28 @@ class MRPipelineListScreen(ScreenBase):
         self.project_path = project_path
         self.mr = mr
         self.pipelines = []
+        self.related = []
+        self._row_pipelines = []
         self._refresh_timer = None
         self._refreshing = False
 
     def _info_pairs(self):
+        counts = str(len(self.pipelines))
+        if self.related:
+            counts = f"{len(self.pipelines)} + {len(self.related)} related"
         return [
             ("GitLab", self.api.config.gitlab_url),
             ("Project", self.project_path),
             ("MR", f"!{self.mr['iid']}  {(self.mr.get('title') or '')[:40]}"),
             ("Source", self.mr.get('source_branch') or ''),
-            ("Pipelines", str(len(self.pipelines))),
+            ("Pipelines", counts),
         ]
 
     def _keys(self):
         return [
-            ("q", "back"),
-            ("r", "refresh"),
-            ("b", "browser"),
-            ("y", "copy url"),
-            ("enter", "jobs"),
+            [("enter", "jobs"), ("r", "refresh"),  ("b", "browser")],
+            [("y", "copy url")],
+            [("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -3421,7 +2769,10 @@ class MRPipelineListScreen(ScreenBase):
         ])
 
     def _status_text(self):
-        return _status_line([f"{len(self.pipelines)} pipelines", ("MR", f"!{self.mr['iid']}")])
+        parts = [f"{len(self.pipelines)} pipelines", ("MR", f"!{self.mr['iid']}")]
+        if self.related:
+            parts.insert(1, ("related", str(len(self.related))))
+        return _status_line(parts)
 
     def _refresh_status(self) -> None:
         try:
@@ -3438,7 +2789,7 @@ class MRPipelineListScreen(ScreenBase):
 
     async def on_mount(self) -> None:
         table = self.query_one("#mr-pipeline-table", DataTable)
-        table.add_columns("ID", "Status", "Ref", "SHA", "Last Run")
+        table.add_columns("Source", "ID", "Status", "Ref", "SHA", "Last Run")
         table.cursor_type = "row"
         self._user_loading_label = "loading pipelines..."
         try:
@@ -3457,13 +2808,25 @@ class MRPipelineListScreen(ScreenBase):
             self.query_one("#mr-pipeline-table", DataTable).focus()
         except Exception:
             pass
-        if any(p['status'] not in TERMINAL_STATUSES for p in self.pipelines):
+        active = any(p['status'] not in TERMINAL_STATUSES for p in (self.pipelines + self.related))
+        if active:
             self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
 
     async def load_pipelines(self) -> None:
-        self.pipelines = await asyncio.to_thread(self.api.get_mr_pipelines, self.project_path, self.mr['iid'])
-        # head pipeline first (most recent) — gitlab returns desc by default
+        merged_at = self.mr.get('merged_at') or ''
+        target_branch = self.mr.get('target_branch') or ''
+        if merged_at and target_branch:
+            mr_pipes, related = await asyncio.gather(
+                asyncio.to_thread(self.api.get_mr_pipelines, self.project_path, self.mr['iid']),
+                asyncio.to_thread(self.api.list_pipelines_for_ref_since, self.project_path, target_branch, merged_at),
+            )
+            self.pipelines = mr_pipes or []
+            mr_ids = {p['id'] for p in self.pipelines}
+            self.related = [p for p in (related or []) if p.get('id') not in mr_ids]
+        else:
+            self.pipelines = await asyncio.to_thread(self.api.get_mr_pipelines, self.project_path, self.mr['iid'])
+            self.related = []
         self._update_table()
         try:
             self.query_one("#header", K9sHeader).set_info(self._info_pairs())
@@ -3491,18 +2854,33 @@ class MRPipelineListScreen(ScreenBase):
         table = self.query_one("#mr-pipeline-table", DataTable)
         prev = table.cursor_row
         table.clear()
+        self._row_pipelines = []
         for i, p in enumerate(self.pipelines):
             id_text = Text(str(p['id']), style="bold #89b4fa" if i == 0 else "bold")
             ref_text = Text((p['ref'] or '')[:40], style="cyan")
             table.add_row(
+                Text("MR", style="bold #89b4fa"),
                 id_text,
                 status_badge(p['status']),
                 ref_text,
                 Text(p['sha'], style="dim"),
                 Text(format_age(p['updated_at'] or p['created_at']), style="dim italic"),
             )
-        if prev is not None and self.pipelines:
-            table.move_cursor(row=min(prev, len(self.pipelines) - 1))
+            self._row_pipelines.append(p)
+        for p in self.related:
+            ref_text = Text((p['ref'] or '')[:40], style="cyan")
+            table.add_row(
+                Text("related", style="bold #f9e2af"),
+                Text(str(p['id']), style="#cdd6f4"),
+                status_badge(p['status']),
+                ref_text,
+                Text(p['sha'], style="dim"),
+                Text(format_age(p['updated_at'] or p['created_at']), style="dim italic"),
+            )
+            self._row_pipelines.append(p)
+        total = len(self._row_pipelines)
+        if prev is not None and total:
+            table.move_cursor(row=min(prev, total - 1))
         self._refresh_status()
 
     async def action_back(self) -> None:
@@ -3519,24 +2897,23 @@ class MRPipelineListScreen(ScreenBase):
 
     async def action_browser(self) -> None:
         table = self.query_one("#mr-pipeline-table", DataTable)
-        if table.cursor_row is not None and table.cursor_row < len(self.pipelines):
-            url = self.pipelines[table.cursor_row].get('web_url')
+        if table.cursor_row is not None and table.cursor_row < len(self._row_pipelines):
+            url = self._row_pipelines[table.cursor_row].get('web_url')
             if url:
                 webbrowser.open(url)
 
     async def action_yank(self) -> None:
         table = self.query_one("#mr-pipeline-table", DataTable)
-        if table.cursor_row is not None and table.cursor_row < len(self.pipelines):
-            url = self.pipelines[table.cursor_row].get('web_url')
+        if table.cursor_row is not None and table.cursor_row < len(self._row_pipelines):
+            url = self._row_pipelines[table.cursor_row].get('web_url')
             if url and copy_to_clipboard(url):
                 self.notify("Copied URL", timeout=2)
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         idx = event.cursor_row
-        if idx is None or idx >= len(self.pipelines):
+        if idx is None or idx >= len(self._row_pipelines):
             return
-        pipeline = self.pipelines[idx]
-        # Ensure api is bound to the MR's project so JobListScreen calls work
+        pipeline = self._row_pipelines[idx]
         ds_api = GitLabAPI(self.api.config)
         try:
             ds_api.set_project(self.project_path)
@@ -3544,6 +2921,294 @@ class MRPipelineListScreen(ScreenBase):
             self.notify(f"Cannot access {self.project_path}", severity="error", timeout=3)
             return
         self.app.push_screen(JobListScreen(ds_api, pipeline))
+
+
+class MyPipelineListScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "b": "browser", "y": "yank", "t": "toggle_age", "slash": "search", "c": "clear_filter", "tab": "open_modules", "a": "pick_project"}
+
+    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+
+    def __init__(self, api: GitLabAPI, age_days=DEFAULT_PIPELINE_AGE_DAYS):
+        super().__init__()
+        self.api = api
+        self.age_days = age_days
+        self.pipelines = []
+        self.filtered_pipelines = []
+        self.username = ''
+        self._row_to_pipeline = []
+        self._refresh_timer = None
+        self._refreshing = False
+
+    def _age_label(self) -> str:
+        return f"last {self.age_days}d" if self.age_days is not None else "all"
+
+    def _favorites(self):
+        return self.api.config.favorites.list()
+
+    def _info_pairs(self):
+        favs = self._favorites()
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("User", self.username or "—"),
+            ("Favorites", str(len(favs))),
+            ("Scope", self._age_label()),
+            ("Pipelines", str(len(self.pipelines))),
+        ]
+
+    def _keys(self):
+        return [
+            [("tab", "modules"), ("/", "filter"),   ("enter", "jobs")],
+            [("r", "refresh"),   ("b", "browser"),  ("y", "copy url")],
+            [("a", "pick project"), ("t", "age"),   ("c", "clear")],
+            [("q", "back")],
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield Container(
+            Input(placeholder="/  filter pipelines...", id="my-pipe-filter"),
+            id="filter-bar",
+        )
+        yield DataTable(id="my-pipe-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text(["My Pipelines"])
+
+    def _status_text(self):
+        total = len(self.pipelines)
+        shown = len(self.filtered_pipelines)
+        count = f"{shown}/{total} pipelines" if shown != total else f"{total} pipelines"
+        parts = [count, ("scope", self._age_label())]
+        if not self._favorites():
+            parts.append("no favorites starred — press 's' on Projects to star")
+        return _status_line(parts)
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
+            sb.set_right(_auto_refresh_indicator(
+                self.REFRESH_INTERVAL,
+                active=self._refresh_timer is not None,
+                refreshing=self._refreshing,
+                loading_label=self._user_loading_label,
+            ))
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#my-pipe-table", DataTable)
+        table.add_columns("Project", "ID", "Status", "Branch", "SHA", "Age")
+        table.cursor_type = "row"
+        self._user_loading_label = "loading my pipelines..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
+        try:
+            await self.load_pipelines()
+        finally:
+            self._clear_loading()
+        try:
+            self.query_one("#my-pipe-table", DataTable).focus()
+        except Exception:
+            pass
+        if any(p['status'] not in TERMINAL_STATUSES for p in self.pipelines):
+            self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
+        self._refresh_status()
+        self.api.config.save_last_view('my_pipelines')
+
+    async def load_pipelines(self) -> None:
+        self.username = await asyncio.to_thread(self.api.current_username)
+        favs = self._favorites()
+        if not self.username or not favs:
+            self.pipelines = []
+            self._apply_filter()
+            try:
+                self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+            except Exception:
+                pass
+            return
+        results = await asyncio.gather(*(
+            asyncio.to_thread(
+                self.api.list_my_pipelines_for_project,
+                proj, self.username, 25, self.age_days,
+            ) for proj in favs
+        ), return_exceptions=True)
+        all_pipes = []
+        for r in results:
+            if isinstance(r, list):
+                all_pipes.extend(r)
+        all_pipes.sort(key=lambda p: p.get('updated_at') or p.get('created_at') or '', reverse=True)
+        self.pipelines = all_pipes
+        self._apply_filter()
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+        except Exception:
+            pass
+
+    async def _safe_refresh(self) -> None:
+        if self._refreshing:
+            return
+        self._refreshing = True
+        self._refresh_status()
+        try:
+            await self.load_pipelines()
+        except Exception:
+            pass
+        finally:
+            self._refreshing = False
+            self._refresh_status()
+
+    def on_unmount(self) -> None:
+        if self._refresh_timer:
+            self._refresh_timer.stop()
+
+    def _apply_filter(self) -> None:
+        try:
+            q = self.query_one("#my-pipe-filter", Input).value.strip().lower()
+        except Exception:
+            q = ""
+        if not q:
+            self.filtered_pipelines = list(self.pipelines)
+        else:
+            self.filtered_pipelines = [
+                p for p in self.pipelines
+                if q in (p.get('project_path') or '').lower()
+                or q in (p.get('ref') or '').lower()
+                or q in (p.get('status') or '').lower()
+                or q in str(p.get('id') or '')
+                or q in (p.get('sha') or '').lower()
+            ]
+        self._update_table()
+        self._refresh_status()
+
+    def _update_table(self) -> None:
+        table = self.query_one("#my-pipe-table", DataTable)
+        prev = table.cursor_row
+        table.clear()
+        self._row_to_pipeline = []
+        groups = {}
+        order = []
+        for p in self.filtered_pipelines:
+            proj = p.get('project_path') or ''
+            if proj not in groups:
+                groups[proj] = []
+                order.append(proj)
+        for p in self.filtered_pipelines:
+            groups[p.get('project_path') or ''].append(p)
+        blank = Text("")
+        for proj in order:
+            repo = (proj.rsplit('/', 1)[-1] if proj else 'UNKNOWN').upper()
+            header = Text(repo, style="bold #89b4fa")
+            table.add_row(header, blank, blank, blank, blank, blank)
+            self._row_to_pipeline.append(None)
+            for p in groups[proj]:
+                age = format_age(p.get('updated_at') or p.get('created_at') or '')
+                table.add_row(
+                    Text("  " + proj, style="dim"),
+                    Text(str(p['id']), style="bold"),
+                    status_badge(p['status']),
+                    Text((p.get('ref') or '')[:35], style="cyan"),
+                    Text(p['sha'], style="dim"),
+                    Text(age, style="dim italic"),
+                )
+                self._row_to_pipeline.append(p)
+        if prev is not None and self._row_to_pipeline:
+            target = min(prev, len(self._row_to_pipeline) - 1)
+            while target < len(self._row_to_pipeline) and self._row_to_pipeline[target] is None:
+                target += 1
+            if target >= len(self._row_to_pipeline):
+                target = next((i for i, x in enumerate(self._row_to_pipeline) if x is not None), 0)
+            table.move_cursor(row=target)
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "my-pipe-filter":
+            self._apply_filter()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "my-pipe-filter":
+            self._apply_filter()
+            self.query_one("#my-pipe-table", DataTable).focus()
+
+    def _pipeline_at_row(self, idx):
+        if idx is None or idx < 0 or idx >= len(self._row_to_pipeline):
+            return None
+        return self._row_to_pipeline[idx]
+
+    async def action_back(self) -> None:
+        self.app.exit()
+
+    async def action_open_modules(self) -> None:
+        self.app.open_modules()
+
+    async def action_pick_project(self) -> None:
+        self.app.push_screen(ProjectSelectScreen(self.api, self.api.config.favorites))
+
+    async def action_refresh(self) -> None:
+        if self._refreshing:
+            return
+        await self._show_loading("loading my pipelines...")
+        try:
+            await self.load_pipelines()
+        finally:
+            self._clear_loading()
+
+    async def action_search(self) -> None:
+        self.query_one("#my-pipe-filter", Input).focus()
+
+    async def action_clear_filter(self) -> None:
+        inp = self.query_one("#my-pipe-filter", Input)
+        if not inp.value:
+            return
+        inp.value = ""
+        self._apply_filter()
+
+    async def action_toggle_age(self) -> None:
+        try:
+            idx = PIPELINE_AGE_CYCLE.index(self.age_days)
+        except ValueError:
+            idx = -1
+        self.age_days = PIPELINE_AGE_CYCLE[(idx + 1) % len(PIPELINE_AGE_CYCLE)]
+        await self._show_loading("loading my pipelines...")
+        try:
+            await self.load_pipelines()
+        finally:
+            self._clear_loading()
+
+    async def action_browser(self) -> None:
+        table = self.query_one("#my-pipe-table", DataTable)
+        p = self._pipeline_at_row(table.cursor_row)
+        if p and p.get('web_url'):
+            webbrowser.open(p['web_url'])
+
+    async def action_yank(self) -> None:
+        table = self.query_one("#my-pipe-table", DataTable)
+        p = self._pipeline_at_row(table.cursor_row)
+        if p and p.get('web_url') and copy_to_clipboard(p['web_url']):
+            self.notify(f"Copied pipeline #{p['id']} URL", timeout=2)
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        p = self._pipeline_at_row(event.cursor_row)
+        if p is None:
+            return
+        proj = p.get('project_path') or ''
+        if not proj:
+            return
+        ds_api = GitLabAPI(self.api.config)
+        try:
+            ds_api.set_project(proj)
+        except Exception:
+            self.notify(f"Cannot access {proj}", severity="error", timeout=3)
+            return
+        self.app.push_screen(JobListScreen(ds_api, p))
 
 
 class MRCommitListScreen(ScreenBase):
@@ -3569,10 +3234,8 @@ class MRCommitListScreen(ScreenBase):
 
     def _keys(self):
         return [
-            ("q", "back"),
-            ("r", "refresh"),
-            ("b", "browser"),
-            ("y", "copy sha"),
+            [("r", "refresh"), ("b", "browser"), ("y", "copy sha")],
+            [("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -4007,6 +3670,99 @@ class MRPickerModal(ModalScreen[tuple[str, int] | None]):
             self._remove_current_recent()
 
 
+MODULE_PROJECTS = "projects"
+MODULE_MRS = "mrs"
+MODULE_PIPELINES = "pipelines"
+
+
+class ModuleModal(ModalScreen[str | None]):
+    """Module switcher. Returns selected module id or None on cancel."""
+
+    MODULES = [
+        (MODULE_PROJECTS,  "1", "Projects",  "favorites + jump to project pipelines"),
+        (MODULE_MRS,       "2", "MRs",       "my merge requests"),
+        (MODULE_PIPELINES, "3", "Pipelines", "my pipelines (across favorites)"),
+    ]
+
+    BINDINGS = [
+        Binding("1", "pick_index('0')", show=False),
+        Binding("2", "pick_index('1')", show=False),
+        Binding("3", "pick_index('2')", show=False),
+        Binding("k", "cursor_up", show=False),
+        Binding("j", "cursor_down", show=False),
+        Binding("escape", "cancel", show=False),
+        Binding("q", "cancel", show=False),
+        Binding("tab", "cancel", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets import OptionList
+        from textual.widgets.option_list import Option
+
+        title = Text()
+        title.append("Modules", style="bold #cdd6f4")
+        footer = Text()
+        footer.append("↑↓/jk move · enter select · 1-3 jump · esc/q/tab close", style="dim #6c7086")
+        options = []
+        for mod_id, num, name, desc in self.MODULES:
+            row = Text()
+            row.append(f"<{num}>  ", style="bold #89b4fa")
+            row.append(f"{name:<10}", style="bold #cdd6f4")
+            row.append(f"  {desc}", style="#a6adc8")
+            options.append(Option(row, id=mod_id))
+        yield Container(
+            Static(title, id="modules-title"),
+            OptionList(*options, id="modules-list"),
+            Static(footer, id="modules-footer"),
+            id="modules-box",
+        )
+
+    def on_mount(self) -> None:
+        try:
+            from textual.widgets import OptionList
+            ol = self.query_one("#modules-list", OptionList)
+            ol.highlighted = 0
+            ol.focus()
+        except Exception:
+            pass
+
+    def _list(self):
+        from textual.widgets import OptionList
+        return self.query_one("#modules-list", OptionList)
+
+    def action_cursor_up(self) -> None:
+        try:
+            ol = self._list()
+            n = ol.option_count
+            ol.highlighted = ((ol.highlighted or 0) - 1) % n
+        except Exception:
+            pass
+
+    def action_cursor_down(self) -> None:
+        try:
+            ol = self._list()
+            n = ol.option_count
+            ol.highlighted = ((ol.highlighted or 0) + 1) % n
+        except Exception:
+            pass
+
+    def action_pick_index(self, idx: str) -> None:
+        try:
+            i = int(idx)
+        except ValueError:
+            return
+        if 0 <= i < len(self.MODULES):
+            self.dismiss(self.MODULES[i][0])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_option_list_option_selected(self, event) -> None:
+        opt_id = getattr(event.option, "id", None)
+        if opt_id:
+            self.dismiss(opt_id)
+
+
 # -- app ---------------------------------------------------------------------
 
 class PipelineMonitor(App):
@@ -4186,6 +3942,45 @@ class PipelineMonitor(App):
         width: 100%;
         height: auto;
         color: #cdd6f4;
+    }
+
+    ModuleModal {
+        align: center middle;
+        background: #1e1e2e 70%;
+    }
+
+    #modules-box {
+        width: 70;
+        height: auto;
+        background: #313244;
+        border: tall #89b4fa;
+        padding: 1 2;
+    }
+
+    #modules-title {
+        width: 100%;
+        height: 1;
+        color: #cdd6f4;
+        margin-bottom: 1;
+    }
+
+    #modules-list {
+        width: 100%;
+        height: auto;
+        background: #313244;
+        color: #cdd6f4;
+    }
+
+    #modules-list > .option-list--option-highlighted {
+        background: #45475a;
+        color: #f9e2af;
+    }
+
+    #modules-footer {
+        width: 100%;
+        height: 1;
+        color: #6c7086;
+        margin-top: 1;
     }
 
     TextInputModal {
@@ -4391,6 +4186,23 @@ class PipelineMonitor(App):
     def action_quit(self) -> None:
         self.exit()
 
+    def open_modules(self) -> None:
+        for s in self.screen_stack:
+            if isinstance(s, ModuleModal):
+                return
+
+        def _after(result):
+            if not result:
+                return
+            if result == MODULE_PROJECTS:
+                self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
+            elif result == MODULE_MRS:
+                self.switch_screen(MyMergeRequestsScreen(self.api))
+            elif result == MODULE_PIPELINES:
+                self.switch_screen(MyPipelineListScreen(self.api, age_days=self.default_age_days))
+
+        self.push_screen(ModuleModal(), _after)
+
     async def on_mount(self) -> None:
         self.push_screen(LoadingScreen())
         # yield a frame so the splash paints before blocking API calls
@@ -4403,9 +4215,15 @@ class PipelineMonitor(App):
             self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
             self.notify(f"Project not found: {self.config.project_path}", severity="error", timeout=5)
             return
-        self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
+
+        def _default_home():
+            if self.config.favorites.list():
+                return MyPipelineListScreen(self.api, age_days=self.default_age_days)
+            return ProjectSelectScreen(self.api, self.config.favorites)
+
         # explicit -p / GITLAB_PROJECT wins over resume
         if self.explicit_project and self.api.project:
+            self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
             self.push_screen(PipelineListScreen(
                 self.api,
                 age_days=self.default_age_days,
@@ -4413,35 +4231,45 @@ class PipelineMonitor(App):
             ))
             return
         if not self.resume:
+            self.switch_screen(_default_home())
             return
         last = self.config.get_last_view()
         if not last:
-            # legacy fallback: auto-jump to default project if GITLAB_PROJECT set
             if self.api.project:
+                self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
                 self.push_screen(PipelineListScreen(
                     self.api,
                     age_days=self.default_age_days,
                     initial_filter=self.default_branch_filter,
                 ))
+                return
+            self.switch_screen(_default_home())
             return
         view_type = last.get('type')
         try:
             if view_type == 'my_mrs':
-                self.push_screen(MyMergeRequestsScreen(self.api))
+                self.switch_screen(MyMergeRequestsScreen(self.api))
+            elif view_type == 'my_pipelines':
+                self.switch_screen(MyPipelineListScreen(self.api, age_days=self.default_age_days))
             elif view_type == 'pipelines':
                 proj = last.get('project')
                 if proj:
                     try:
                         await asyncio.to_thread(self.api.set_project, proj)
+                        self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
                         self.push_screen(PipelineListScreen(
                             self.api,
                             age_days=self.default_age_days,
                             initial_filter=self.default_branch_filter,
                         ))
+                        return
                     except Exception:
                         self.notify(f"Could not resume project {proj}", severity="warning", timeout=3)
+                self.switch_screen(_default_home())
+            else:
+                self.switch_screen(_default_home())
         except Exception:
-            pass
+            self.switch_screen(_default_home())
 
 
 def _detect_cwd_branch() -> str:

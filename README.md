@@ -119,7 +119,13 @@ Without `GITLAB_PROJECT` or `--project` set, you'll get an interactive project p
 
 ## Views
 
-### 1. Project Picker (when no project set)
+### 1. Module Switcher
+
+![Module switcher](glmon-assets/Module-selector.png)
+
+Press `tab` from any home screen to switch between modules: **Projects** (favorites + jump to project pipelines), **MRs** (my merge requests), **Pipelines** (my pipelines across favorites). Navigate with `↑↓` or `j/k`, press `enter` to confirm. Number keys `1`/`2`/`3` jump directly. `esc`/`q`/`tab` closes.
+
+### 2. Project Picker (when no project set)
 
 ![Project picker](glmon-assets/Project-list.png)
 
@@ -127,7 +133,7 @@ Defaults to **Favorites** view if any projects are starred (fast, no full projec
 
 Favorites persist to `~/.config/gitlab-monitor/favorites.json`.
 
-### 2. Pipeline List View
+### 3. Pipeline List View
 
 ![Pipeline list](glmon-assets/Pipeline-list.png)
 
@@ -141,13 +147,13 @@ Quick status toggles narrow the list to a single status (failed / success / runn
 
 ![Status quick toggle](glmon-assets/Quick-status-toggle.png)
 
-### 3. Job List View
+### 4. Job List View
 
 ![Job list](glmon-assets/Pipeline-job.png)
 
 Shows all jobs in a pipeline grouped by stage (build, test, deploy, cleanup) with color-coded status and duration.
 
-### 4. Job Detail View
+### 5. Job Detail View
 
 ![Job detail with logs](glmon-assets/Pipeline-job-logs.png)
 
@@ -157,16 +163,16 @@ Drill further into per-step breakdown (pipeline → job → steps):
 
 ![Job steps](glmon-assets/Project-pipelines-job-steps.png)
 
-### 5. Failed Jobs Summary View
+### 6. Failed Jobs Summary View
 Quick view of all failed jobs in a pipeline with extracted failure messages.
 
-### 6. My Merge Requests
+### 7. My Merge Requests
 
 ![My MRs grouped by project](glmon-assets/MR-assigned-open-project-grouped.png)
 
 Cross-project view of MRs assigned to you, grouped by repository. Per-MR local notes (yellow `●` glyph marks MRs with notes). `e` exports to markdown.
 
-### 7. Merge Request Detail
+### 8. Merge Request Detail
 
 ![MR detail](glmon-assets/MR-detail.png)
 
@@ -174,7 +180,7 @@ Title, description, author, source/target branches, pipeline status, and approva
 
 ![MR commits](glmon-assets/MR-commits.png)
 
-### 8. MR Notes
+### 9. MR Notes
 
 Local-only notes per MR (`~/.config/gitlab-monitor/mr_notes.json`). Press `n` from the MR list:
 
@@ -184,7 +190,7 @@ Local-only notes per MR (`~/.config/gitlab-monitor/mr_notes.json`). Press `n` fr
 
 Notes survive across runs and inline into the markdown export as blockquotes.
 
-### 9. Destructive Action Confirms
+### 10. Destructive Action Confirms
 
 ![Delete confirm](glmon-assets/MR-delete-confirm.png)
 
