@@ -313,7 +313,7 @@ PipelineMonitor (App)
 
 ## Screenshots
 
-All screenshots in this README come from a synthetic gitlab.com demo project. Seed files to reproduce that project live in [`demo-seed/`](demo-seed/) — `.gitlab-ci.yml`, sample source, and `seed-mrs.sh` that creates branches + MRs with mixed-outcome pipelines.
+All screenshots come from a synthetic gitlab.com demo project so no real work data is shown. See [`DEVELOPMENT.md`](DEVELOPMENT.md) for the demo repo URL, bootstrap steps, and screenshot capture conventions.
 
 ## Future Enhancements
 
