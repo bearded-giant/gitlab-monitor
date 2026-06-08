@@ -1,0 +1,17 @@
+[project]
+name = "glmon-demo"
+version = "0.1.0"
+description = "Demo project for glmon screenshots"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

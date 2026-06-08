@@ -1,0 +1,82 @@
+default:
+  image: python:3.11-alpine
+  before_script:
+    - pip install --quiet pytest mypy ruff
+
+stages:
+  - lint
+  - build
+  - test
+  - deploy
+
+lint-ruff:
+  stage: lint
+  script:
+    - ruff check src/
+
+lint-mypy:
+  stage: lint
+  script:
+    - mypy --strict src/
+
+build-package:
+  stage: build
+  script:
+    - echo "Building package..."
+    - mkdir -p dist
+    - tar czf dist/app.tar.gz src/
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 day
+
+build-docs:
+  stage: build
+  script:
+    - echo "Generating docs..."
+    - sleep 8
+    - mkdir -p public
+    - echo "<h1>glmon demo</h1>" > public/index.html
+  artifacts:
+    paths:
+      - public/
+
+test-unit:
+  stage: test
+  script:
+    - pytest tests/ -k "not integration" -v
+
+test-integration:
+  stage: test
+  script:
+    - pytest tests/ -k "integration" -v
+
+test-coverage:
+  stage: test
+  script:
+    - pip install --quiet coverage
+    - coverage run -m pytest tests/ -k "not integration"
+    - coverage report
+
+deploy-staging:
+  stage: deploy
+  script:
+    - echo "Deploying to staging..."
+    - sleep 3
+    - echo "Staging deploy complete"
+  when: manual
+  environment:
+    name: staging
+    url: https://staging.example.com
+
+deploy-prod:
+  stage: deploy
+  script:
+    - echo "Deploying to production..."
+    - sleep 3
+    - echo "Production deploy complete"
+  when: manual
+  needs: ["deploy-staging"]
+  environment:
+    name: production
+    url: https://example.com

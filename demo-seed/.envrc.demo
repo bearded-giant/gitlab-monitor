@@ -1,0 +1,6 @@
+# Source this file when generating glmon screenshots.
+# Replace <USER> with your gitlab.com username.
+
+export GITLAB_URL=https://gitlab.com
+export GITLAB_TOKEN=glpat-REPLACE_WITH_GLCOM_TOKEN
+export GITLAB_PROJECT=<USER>/glmon-demo

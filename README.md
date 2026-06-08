@@ -2,6 +2,10 @@
 
 A K9s-style Terminal User Interface for monitoring GitLab pipelines with real-time updates, interactive navigation, and detailed job inspection.
 
+<p align="center">
+  <a href="glmon-assets/Pipeline-list.png"><img src="glmon-assets/Pipeline-list.png" alt="glmon pipeline list" width="900"></a>
+</p>
+
 ## Installation
 
 ### Homebrew (recommended)
@@ -116,21 +120,75 @@ Without `GITLAB_PROJECT` or `--project` set, you'll get an interactive project p
 ## Views
 
 ### 1. Project Picker (when no project set)
+
+![Project picker](glmon-assets/Project-list.png)
+
 Defaults to **Favorites** view if any projects are starred (fast, no full project listing). Press `a` to toggle to **All** projects (sorted by last activity, favorites pinned to top). A leading `*` column marks starred projects. Type to filter, Enter to select, `s` to star/unstar.
 
 Favorites persist to `~/.config/gitlab-monitor/favorites.json`.
 
 ### 2. Pipeline List View
+
+![Pipeline list](glmon-assets/Pipeline-list.png)
+
 Shows recent pipelines with ID, status (color-coded), branch, creation time, and commit SHA. Defaults to the last 3 days to keep load fast on busy projects. Press `t` to cycle window: `3d -> 7d -> 30d -> all`. Current window shown in breadcrumb.
 
+K9s-style filter bar — press `/` to filter by branch or user:
+
+![Filter bar](glmon-assets/K9s-filtering.png)
+
+Quick status toggles narrow the list to a single status (failed / success / running) without typing a filter:
+
+![Status quick toggle](glmon-assets/Quick-status-toggle.png)
+
 ### 3. Job List View
+
+![Job list](glmon-assets/Pipeline-job.png)
+
 Shows all jobs in a pipeline grouped by stage (build, test, deploy, cleanup) with color-coded status and duration.
 
 ### 4. Job Detail View
+
+![Job detail with logs](glmon-assets/Pipeline-job-logs.png)
+
 Shows job logs with a live status/duration info bar, failure summary at top (for failed jobs), full trace, and error line highlighting. Log output streams incrementally as the job runs.
+
+Drill further into per-step breakdown (pipeline → job → steps):
+
+![Job steps](glmon-assets/Project-pipelines-job-steps.png)
 
 ### 5. Failed Jobs Summary View
 Quick view of all failed jobs in a pipeline with extracted failure messages.
+
+### 6. My Merge Requests
+
+![My MRs grouped by project](glmon-assets/MR-assigned-open-project-grouped.png)
+
+Cross-project view of MRs assigned to you, grouped by repository. Per-MR local notes (yellow `●` glyph marks MRs with notes). `e` exports to markdown.
+
+### 7. Merge Request Detail
+
+![MR detail](glmon-assets/MR-detail.png)
+
+Title, description, author, source/target branches, pipeline status, and approval state. Drill into pipelines or commits from here.
+
+![MR commits](glmon-assets/MR-commits.png)
+
+### 8. MR Notes
+
+Local-only notes per MR (`~/.config/gitlab-monitor/mr_notes.json`). Press `n` from the MR list:
+
+| Create | Edit |
+|--------|------|
+| ![Create note](glmon-assets/MR-note-create.png) | ![Edit note](glmon-assets/MR-note-edit.png) |
+
+Notes survive across runs and inline into the markdown export as blockquotes.
+
+### 9. Destructive Action Confirms
+
+![Delete confirm](glmon-assets/MR-delete-confirm.png)
+
+Close / delete / merge actions surface a modal confirm before hitting the API.
 
 ## Keyboard Shortcuts
 
@@ -252,6 +310,10 @@ PipelineMonitor (App)
 |------|---------|
 | `~/.config/gitlab-monitor/config.json` | Optional non-token config (url, project, refresh_interval) |
 | `~/.config/gitlab-monitor/favorites.json` | List of starred project paths |
+
+## Screenshots
+
+All screenshots in this README come from a synthetic gitlab.com demo project. Seed files to reproduce that project live in [`demo-seed/`](demo-seed/) — `.gitlab-ci.yml`, sample source, and `seed-mrs.sh` that creates branches + MRs with mixed-outcome pipelines.
 
 ## Future Enhancements
 
