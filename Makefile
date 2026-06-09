@@ -26,6 +26,7 @@ version:
 	@echo "$(DEV_VERSION)"
 
 install:
+	-pipx uninstall $(PKG)
 	pipx install . --force
 
 install-dev:
@@ -33,6 +34,7 @@ install-dev:
 	@cp pyproject.toml pyproject.toml.bak
 	@sed -E -i.tmp 's/^version = .*/version = "$(DEV_VERSION)"/' pyproject.toml
 	@rm -f pyproject.toml.tmp
+	-pipx uninstall $(PKG)
 	@pipx install . --force; \
 	  rc=$$?; \
 	  mv pyproject.toml.bak pyproject.toml; \
