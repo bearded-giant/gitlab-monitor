@@ -54,7 +54,8 @@ from .formatting import (
     _loading_indicator,
     _status_line,
     _pipeline_status_color,
-    _pipeline_status_text,
+    _pipeline_status_with_id,
+    _branch_pair_text,
     _mr_state_badge,
     _mr_state_color,
 )
@@ -1498,10 +1499,6 @@ def _pipeline_status_color(status):
     return colors.get(status, '#cdd6f4')
 
 
-def _pipeline_status_text(status):
-    if not status:
-        return Text("—", style="dim")
-    return status_badge(status)
 
 
 class MyMergeRequestsScreen(ScreenBase):
@@ -1593,9 +1590,9 @@ class MyMergeRequestsScreen(ScreenBase):
 
     async def on_mount(self) -> None:
         table = self.query_one("#mr-table", DataTable)
-        col_keys = table.add_columns("●", "IID", "Title", "MR", "Pipeline", "Unresolved", "Age")
+        col_keys = table.add_columns("●", "IID", "Title", "Branch", "MR", "Pipeline", "Threads", "Age")
         try:
-            self._unresolved_col_key = col_keys[5]
+            self._unresolved_col_key = col_keys[6]
         except Exception:
             self._unresolved_col_key = None
         table.cursor_type = "row"
@@ -1637,16 +1634,13 @@ class MyMergeRequestsScreen(ScreenBase):
         days = self.window_days if self._is_windowed_state() else None
         self.mrs = await asyncio.to_thread(self.api.get_my_merge_requests, self.state, 50, days)
         if self.state == 'opened' and self.mrs:
-            todo = [(m['project_path'], m['iid']) for m in self.mrs if m['project_path']]
-            results = await asyncio.gather(*(
-                asyncio.to_thread(self.api.get_mr_unresolved_count, p, i) for p, i in todo
-            ), return_exceptions=True)
-            for (p, i), r in zip(todo, results):
-                if isinstance(r, int):
-                    self._unresolved_cache[(p, i)] = r
+            await asyncio.gather(
+                self._backfill_head_pipelines(self.mrs),
+                self._fetch_unresolved_counts(self.mrs),
+            )
         elif self._is_windowed_state() and self.mrs:
             await self._enrich_merged_mrs()
-        self._set_unresolved_col_label("Related" if self._is_windowed_state() else "Unresolved")
+        self._set_unresolved_col_label("Related" if self._is_windowed_state() else "Threads")
         self._apply_filter()
         try:
             self.query_one("#header", K9sHeader).set_info(self._info_pairs())
@@ -1654,16 +1648,38 @@ class MyMergeRequestsScreen(ScreenBase):
         except Exception:
             pass
 
+    async def _backfill_head_pipelines(self, mrs) -> None:
+        todo = [m for m in mrs if m.get('project_path') and m.get('iid') is not None and not m.get('head_pipeline_status')]
+        if not todo:
+            return
+        results = await asyncio.gather(*(
+            asyncio.to_thread(self.api.get_mr_pipelines, m['project_path'], m['iid'])
+            for m in todo
+        ), return_exceptions=True)
+        for mr, r in zip(todo, results):
+            if isinstance(r, list) and r:
+                mr['head_pipeline_status'] = r[0].get('status') or mr.get('head_pipeline_status')
+                mr['head_pipeline_id'] = r[0].get('id') or mr.get('head_pipeline_id')
+                mr['head_pipeline_web_url'] = r[0].get('web_url') or mr.get('head_pipeline_web_url')
+
+    async def _fetch_unresolved_counts(self, mrs) -> None:
+        todo = [(m['project_path'], m['iid']) for m in mrs if m.get('project_path')]
+        if not todo:
+            return
+        results = await asyncio.gather(*(
+            asyncio.to_thread(self.api.get_mr_unresolved_count, p, i) for p, i in todo
+        ), return_exceptions=True)
+        for (p, i), r in zip(todo, results):
+            if isinstance(r, int):
+                self._unresolved_cache[(p, i)] = r
+
     async def _enrich_merged_mrs(self) -> None:
-        backfill_todo = []
         related_todo = []
         for m in self.mrs:
             proj = m.get('project_path') or ''
             iid = m.get('iid')
             if not proj or iid is None:
                 continue
-            if not m.get('head_pipeline_status'):
-                backfill_todo.append((proj, iid, m))
             if m.get('state') == 'merged':
                 key = (proj, iid)
                 if key in self._related_cache:
@@ -1673,16 +1689,7 @@ class MyMergeRequestsScreen(ScreenBase):
                 if target and merged_at:
                     related_todo.append((proj, iid, target, merged_at))
 
-        if backfill_todo:
-            results = await asyncio.gather(*(
-                asyncio.to_thread(self.api.get_mr_pipelines, p, i)
-                for p, i, _ in backfill_todo
-            ), return_exceptions=True)
-            for (p, i, mr), r in zip(backfill_todo, results):
-                if isinstance(r, list) and r:
-                    mr['head_pipeline_status'] = r[0].get('status') or mr.get('head_pipeline_status')
-                    mr['head_pipeline_id'] = r[0].get('id') or mr.get('head_pipeline_id')
-                    mr['head_pipeline_web_url'] = r[0].get('web_url') or mr.get('head_pipeline_web_url')
+        await self._backfill_head_pipelines(self.mrs)
 
         if related_todo:
             results = await asyncio.gather(*(
@@ -1748,7 +1755,7 @@ class MyMergeRequestsScreen(ScreenBase):
         for i, proj_path in enumerate(order):
             repo = (proj_path.rsplit('/', 1)[-1] if proj_path else 'UNKNOWN').upper()
             header = Text(repo, style="bold #89b4fa")
-            table.add_row(blank, header, blank, blank, blank, blank, blank)
+            table.add_row(blank, header, blank, blank, blank, blank, blank, blank)
             self._row_to_mr.append(None)
             for m in groups[proj_path]:
                 iid = Text(f"!{m['iid']}", style="bold #89b4fa")
@@ -1756,6 +1763,7 @@ class MyMergeRequestsScreen(ScreenBase):
                 if m['draft']:
                     title = f"[draft] {title}"
                 title_t = Text(title[:50], style="bold #cdd6f4")
+                branch_t = _branch_pair_text(m.get('source_branch'), m.get('target_branch'))
                 related_or_unresolved_t = self._render_related_or_unresolved(m)
                 age = format_age(m['updated_at'] or m['created_at'])
                 has_note = self.api.config.mr_notes.has(m['project_path'] or '', m['iid'])
@@ -1764,14 +1772,15 @@ class MyMergeRequestsScreen(ScreenBase):
                     note_t,
                     iid,
                     title_t,
+                    branch_t,
                     _mr_state_badge(m['state']),
-                    _pipeline_status_text(m['head_pipeline_status']),
+                    _pipeline_status_with_id(m['head_pipeline_status'], m.get('head_pipeline_id')),
                     related_or_unresolved_t,
                     Text(age, style="dim italic"),
                 )
                 self._row_to_mr.append(m)
             if i < len(order) - 1:
-                table.add_row(blank, blank, blank, blank, blank, blank, blank)
+                table.add_row(blank, blank, blank, blank, blank, blank, blank, blank)
                 self._row_to_mr.append(None)
         if prev is not None and self._row_to_mr:
             target = min(prev, len(self._row_to_mr) - 1)
@@ -2197,7 +2206,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
                 iid,
                 Text(title[:60], style="bold #cdd6f4"),
                 _mr_state_badge(m['state']),
-                _pipeline_status_text(m['head_pipeline_status']),
+                _pipeline_status_with_id(m['head_pipeline_status'], m.get('head_pipeline_id')),
                 Text(m['author'] or '', style="dim"),
                 Text(format_age(ref_age), style="dim italic"),
             )

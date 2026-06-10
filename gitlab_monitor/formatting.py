@@ -272,6 +272,35 @@ def _pipeline_status_text(status):
     return status_badge(status)
 
 
+def _pipeline_status_with_id(status, pipeline_id):
+    if not status and not pipeline_id:
+        return Text("—", style="dim")
+    out = Text()
+    if status:
+        out.append_text(status_badge(status))
+    if pipeline_id:
+        if status:
+            out.append(" ")
+        out.append(f"#{pipeline_id}", style="dim")
+    return out
+
+
+def _branch_pair_text(source, target, max_each=20):
+    src = (source or '').strip()
+    tgt = (target or '').strip()
+    if not src and not tgt:
+        return Text("—", style="dim")
+    if len(src) > max_each:
+        src = src[: max_each - 1] + "…"
+    if len(tgt) > max_each:
+        tgt = tgt[: max_each - 1] + "…"
+    out = Text()
+    out.append(src, style="#cdd6f4")
+    out.append(" → ", style="dim")
+    out.append(tgt, style="dim #a6adc8")
+    return out
+
+
 def _mr_state_badge(state):
     styles = {
         'opened': ('bold #a6e3a1', ' open '),
