@@ -184,6 +184,13 @@ class GitLabAPI:
                     '_is_downstream': True,
                     '_parent_id': pipeline_id,
                     '_bridge_name': b.name,
+                    '_bridge_id': getattr(b, 'id', None),
+                    '_bridge_status': getattr(b, 'status', None),
+                    '_bridge_stage': getattr(b, 'stage', None),
+                    '_bridge_duration': getattr(b, 'duration', None),
+                    '_bridge_started_at': getattr(b, 'started_at', None),
+                    '_bridge_finished_at': getattr(b, 'finished_at', None),
+                    '_bridge_web_url': getattr(b, 'web_url', None),
                 })
             return results
         except Exception:

@@ -863,20 +863,27 @@ class JobListScreen(ScreenBase):
 
     STAGE_ORDER = ['build', 'test', 'deploy', 'cleanup']
 
-    STATUS_CYCLE = [None, 'running', 'pending']
+    STATUS_CYCLE = [None, 'failed', 'running', 'pending']
 
     def __init__(self, api: GitLabAPI, pipeline: dict):
         super().__init__()
         self.api = api
         self.pipeline = pipeline
         self.jobs = []
+        self.bridges = []
+        self.rows = []
         self.filtered_jobs = []
         self.status_filter = None
         self._refresh_timer = None
         self._refreshing = False
 
     def _info_pairs(self):
-        jobs_label = str(len(getattr(self, 'jobs', []) or []))
+        job_count = len(getattr(self, 'jobs', []) or [])
+        bridge_count = len(getattr(self, 'bridges', []) or [])
+        total = job_count + bridge_count
+        jobs_label = str(total)
+        if bridge_count:
+            jobs_label = f"{total} ({job_count} jobs + {bridge_count} bridges)"
         if self.status_filter:
             jobs_label = f"{len(self.filtered_jobs)}/{jobs_label}  ({self.status_filter})"
         p = self.pipeline
@@ -995,18 +1002,39 @@ class JobListScreen(ScreenBase):
             self._refreshing = True
             self._refresh_status()
         try:
-            jobs, detail = await asyncio.gather(
+            jobs, detail, bridges = await asyncio.gather(
                 asyncio.to_thread(self.api.get_pipeline_jobs, self.pipeline['id']),
                 asyncio.to_thread(self.api.get_pipeline_detail, self.pipeline['id']),
+                asyncio.to_thread(self.api.get_pipeline_bridges, self.pipeline['id']),
             )
             self.jobs = jobs
+            self.bridges = bridges or []
             if detail:
                 self.pipeline.update(detail)
             order = self.STAGE_ORDER
-            self.jobs.sort(key=lambda j: (
-                order.index(j['stage']) if j['stage'] in order else len(order),
-                j['name'],
-            ))
+
+            def _stage_key(stage):
+                return order.index(stage) if stage in order else len(order)
+
+            self.jobs.sort(key=lambda j: (_stage_key(j['stage']), j['name']))
+            self.rows = []
+            for j in self.jobs:
+                self.rows.append({'_kind': 'job', **j})
+            for b in self.bridges:
+                stage = b.get('_bridge_stage') or ''
+                self.rows.append({
+                    '_kind': 'bridge',
+                    'id': b.get('_bridge_id') or b.get('id'),
+                    'name': b.get('_bridge_name') or '',
+                    'status': b.get('_bridge_status') or b.get('status') or 'unknown',
+                    'stage': stage,
+                    'duration': b.get('_bridge_duration'),
+                    'started_at': b.get('_bridge_started_at'),
+                    'finished_at': b.get('_bridge_finished_at'),
+                    'web_url': b.get('_bridge_web_url') or b.get('web_url'),
+                    '_downstream': b,
+                })
+            self.rows.sort(key=lambda r: (_stage_key(r.get('stage') or ''), r.get('name') or ''))
             self._apply_filter()
             try:
                 self.query_one("#header", K9sHeader).set_info(self._info_pairs())
@@ -1019,19 +1047,19 @@ class JobListScreen(ScreenBase):
 
     def _apply_filter(self) -> None:
         query = self.query_one("#job-filter", Input).value.strip().lower()
-        jobs = self.jobs
+        rows = self.rows
         if self.status_filter:
-            jobs = [j for j in jobs if j['status'] == self.status_filter]
+            rows = [r for r in rows if r.get('status') == self.status_filter]
         if query:
             self.filtered_jobs = [
-                j for j in jobs
-                if query in j['name'].lower()
-                or query in j['stage'].lower()
-                or query in j['status'].lower()
-                or query in str(j['id'])
+                r for r in rows
+                if query in (r.get('name') or '').lower()
+                or query in (r.get('stage') or '').lower()
+                or query in (r.get('status') or '').lower()
+                or query in str(r.get('id') or '')
             ]
         else:
-            self.filtered_jobs = jobs
+            self.filtered_jobs = rows
         self._update_table()
         self._refresh_status()
 
@@ -1039,17 +1067,37 @@ class JobListScreen(ScreenBase):
         table = self.query_one("#job-table", DataTable)
         prev_row = table.cursor_row
         table.clear()
-        for job in self.filtered_jobs:
-            failed = job['status'] == 'failed'
-            name_style = "bold red" if failed else ""
-            stage_style = "red" if failed else "dim"
-            dur = format_duration(job['duration'])
+        for row in self.filtered_jobs:
+            failed = row.get('status') == 'failed'
+            is_bridge = row.get('_kind') == 'bridge'
+            name_style = "bold red" if failed else ("bold #b4befe" if is_bridge else "")
+            stage_style = "red" if failed else ("#b4befe" if is_bridge else "dim")
+            dur = format_duration(row.get('duration'))
+            if is_bridge:
+                ds = row.get('_downstream') or {}
+                ds_id = ds.get('id')
+                ds_path = ds.get('_ds_project_path')
+                bridge_name = row.get('name') or ''
+                if ds_path and ds_id:
+                    suffix = f"  → {ds_path} #{ds_id}"
+                elif ds_path:
+                    suffix = f"  → {ds_path}"
+                elif ds_id:
+                    suffix = f"  → pipeline #{ds_id}"
+                else:
+                    suffix = ""
+                name_text = Text()
+                name_text.append("↳ ", style="#b4befe")
+                name_text.append(bridge_name[:40], style=name_style)
+                name_text.append(suffix, style="dim #b4befe")
+            else:
+                name_text = Text((row.get('name') or '')[:50], style=name_style)
             table.add_row(
-                Text(job['stage'], style=stage_style),
-                Text(job['name'][:50], style=name_style),
-                status_badge(job['status']),
+                Text(row.get('stage') or '', style=stage_style),
+                name_text,
+                status_badge(row.get('status') or 'unknown'),
                 Text(dur, style="red" if failed else "dim"),
-                Text(str(job['id']), style="dim"),
+                Text(str(row.get('id') or ''), style="dim"),
             )
         if prev_row is not None and self.filtered_jobs:
             table.move_cursor(row=min(prev_row, len(self.filtered_jobs) - 1))
@@ -1113,18 +1161,50 @@ class JobListScreen(ScreenBase):
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         idx = event.cursor_row
-        if idx is not None and idx < len(self.filtered_jobs):
-            self.app.push_screen(JobDetailScreen(self.api, self.filtered_jobs[idx]))
+        if idx is None or idx >= len(self.filtered_jobs):
+            return
+        row = self.filtered_jobs[idx]
+        if row.get('_kind') == 'bridge':
+            ds = row.get('_downstream') or {}
+            ds_path = ds.get('_ds_project_path')
+            if ds_path:
+                ds_api = GitLabAPI(self.api.config)
+                try:
+                    ds_api.set_project(ds_path)
+                except Exception:
+                    self.notify(f"Cannot access {ds_path}", severity="error", timeout=3)
+                    return
+                self.app.push_screen(JobListScreen(ds_api, ds))
+            else:
+                self.app.push_screen(JobListScreen(self.api, ds))
+            return
+        self.app.push_screen(JobDetailScreen(self.api, row))
 
     async def action_browser(self) -> None:
         table = self.query_one("#job-table", DataTable)
         if table.cursor_row is not None and table.cursor_row < len(self.filtered_jobs):
-            webbrowser.open(self.filtered_jobs[table.cursor_row]['web_url'])
+            url = self.filtered_jobs[table.cursor_row].get('web_url')
+            if url:
+                webbrowser.open(url)
 
     async def action_failures(self) -> None:
-        failed = [j for j in self.jobs if j['status'] == 'failed']
-        if failed:
-            self.app.push_screen(FailedJobsScreen(self.api, self.pipeline, failed))
+        failed = [r for r in self.rows if r.get('status') == 'failed']
+        if not failed:
+            self.notify("No failed jobs in this pipeline", timeout=2)
+            return
+        if all(r.get('_kind') == 'bridge' for r in failed):
+            self.status_filter = 'failed'
+            self._apply_filter()
+            try:
+                header = self.query_one("#header", K9sHeader)
+                header.set_keys(self._keys())
+                header.set_info(self._info_pairs())
+            except Exception:
+                pass
+            self.notify("Failures are in child pipelines — press <enter> to drill in", timeout=3)
+            return
+        failed_jobs = [r for r in failed if r.get('_kind') == 'job']
+        self.app.push_screen(FailedJobsScreen(self.api, self.pipeline, failed_jobs))
 
     async def action_toggle_status(self) -> None:
         idx = self.STATUS_CYCLE.index(self.status_filter)
@@ -1141,8 +1221,10 @@ class JobListScreen(ScreenBase):
         table = self.query_one("#job-table", DataTable)
         if table.cursor_row is not None and table.cursor_row < len(self.filtered_jobs):
             j = self.filtered_jobs[table.cursor_row]
-            if copy_to_clipboard(j['web_url']):
-                self.notify(f"Copied job #{j['id']} URL", timeout=2)
+            url = j.get('web_url')
+            if url and copy_to_clipboard(url):
+                label = "bridge" if j.get('_kind') == 'bridge' else "job"
+                self.notify(f"Copied {label} #{j.get('id')} URL", timeout=2)
 
 
 class JobDetailScreen(ScreenBase):
