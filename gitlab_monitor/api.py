@@ -3,11 +3,17 @@
 # Licensed under Apache License 2.0
 
 import re
+import time
 from datetime import datetime, timedelta, timezone
 
 import gitlab
 
 from .config import Config
+
+
+ACTIVITY_TTL = 300
+ACTIVITY_WINDOW_DAYS = 7
+ACTIVITY_PAGE_CAP = 5
 
 
 class GitLabAPI:
@@ -18,6 +24,7 @@ class GitLabAPI:
         self.project = None
         self.project_name = None
         self._username_cache = None
+        self._activity_cache = None  # (timestamp, result)
 
     def current_username(self):
         if self._username_cache is None:
@@ -233,6 +240,57 @@ class GitLabAPI:
             } for job in jobs]
         except Exception:
             return []
+
+    def get_my_activity_counts(self, days=ACTIVITY_WINDOW_DAYS, force=False):
+        # cache check
+        now = time.time()
+        if not force and self._activity_cache is not None:
+            ts, cached = self._activity_cache
+            if now - ts < ACTIVITY_TTL:
+                return cached
+        try:
+            since = datetime.now(timezone.utc) - timedelta(days=days - 1)
+            since_iso = since.strftime('%Y-%m-%d')
+            events = self.gl.events.list(
+                after=since_iso,
+                per_page=100,
+                iterator=True,
+            )
+            counts_by_date = {}
+            seen = 0
+            cap = ACTIVITY_PAGE_CAP * 100
+            for ev in events:
+                seen += 1
+                if seen > cap:
+                    break
+                created = getattr(ev, 'created_at', None)
+                if not created:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                except Exception:
+                    continue
+                local_date = dt.astimezone().date()
+                counts_by_date[local_date] = counts_by_date.get(local_date, 0) + 1
+            today = datetime.now().astimezone().date()
+            result = []
+            for offset in range(days):
+                d = today - timedelta(days=offset)
+                result.append({
+                    'date': d.isoformat(),
+                    'day_offset': offset,
+                    'count': counts_by_date.get(d, 0),
+                })
+            self._activity_cache = (now, result)
+            return result
+        except Exception:
+            # cache empty result briefly to avoid hammering on persistent failure
+            empty = [
+                {'date': '', 'day_offset': i, 'count': 0}
+                for i in range(days)
+            ]
+            self._activity_cache = (now, empty)
+            return empty
 
     def get_job(self, job_id):
         try:
