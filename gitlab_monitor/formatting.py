@@ -224,6 +224,33 @@ def _auto_refresh_indicator(interval_seconds, active=True, refreshing=False, loa
     return t
 
 
+def format_activity_strip(counts, width):
+    if not counts or width is None or width < 5:
+        return Text("")
+    # counts: newest-first list of {date, day_offset, count}
+    segments = []
+    for entry in counts:
+        offset = entry.get('day_offset', 0)
+        n = entry.get('count', 0)
+        label = "T" if offset == 0 else f"-{offset}"
+        segments.append((label, n))
+    sep = " │ "
+    while segments:
+        t = Text()
+        first = True
+        for label, n in segments:
+            if not first:
+                t.append(sep, style="#585b70")
+            first = False
+            style = "bold #cdd6f4" if n > 0 else "#6c7086"
+            t.append(f"{label}:", style="#6c7086")
+            t.append(str(n), style=style)
+        if t.cell_len <= width:
+            return t
+        segments.pop()  # drop oldest day, retry
+    return Text("")
+
+
 def _loading_indicator(label="loading"):
     t = Text()
     t.append("⟳ ", style="bold #f9e2af")

@@ -58,8 +58,9 @@ from .formatting import (
     _branch_pair_text,
     _mr_state_badge,
     _mr_state_color,
+    format_activity_strip,
 )
-from .api import GitLabAPI
+from .api import GitLabAPI, ACTIVITY_TTL
 
 
 
@@ -120,7 +121,8 @@ class StatusBar(Horizontal):
         super().__init__(**kw)
         self._initial_left = left or ""
         self._initial_right = right or ""
-        self._initial_loading = ""
+        self._initial_center = ""
+        self._activity_counts = []
         v = Text()
         v.append("  ", style="#585b70")
         v.append(f"v{__version__}", style="#6c7086")
@@ -128,7 +130,7 @@ class StatusBar(Horizontal):
 
     def compose(self) -> ComposeResult:
         yield Static(self._initial_left, id="status-left")
-        yield Static(self._initial_loading, id="status-loading")
+        yield Static(self._initial_center, id="status-activity")
         yield Static(self._initial_right, id="status-right")
         yield Static(self._version_text, id="status-version")
 
@@ -144,11 +146,42 @@ class StatusBar(Horizontal):
         except Exception:
             self._initial_right = text
 
-    def set_loading(self, text) -> None:
+    def set_center(self, text) -> None:
         try:
-            self.query_one("#status-loading", Static).update(text)
+            self.query_one("#status-activity", Static).update(text)
         except Exception:
-            self._initial_loading = text
+            self._initial_center = text
+
+    def set_activity_counts(self, counts) -> None:
+        self._activity_counts = counts or []
+        self._render_activity()
+
+    def _render_activity(self) -> None:
+        if not self._activity_counts:
+            self.set_center("")
+            return
+        width = self._activity_slot_width()
+        if width <= 0:
+            # not sized yet — render full strip up to a generous default; on_resize re-renders
+            width = 60
+        self.set_center(format_activity_strip(self._activity_counts, width))
+
+    def _activity_slot_width(self) -> int:
+        try:
+            return self.query_one("#status-activity", Static).size.width
+        except Exception:
+            return 0
+
+    def on_resize(self, event) -> None:
+        self._render_activity()
+
+    def on_mount(self) -> None:
+        try:
+            counts = getattr(self.app, '_activity_counts', None)
+            if counts:
+                self.set_activity_counts(counts)
+        except Exception:
+            pass
 
 
 
@@ -3934,12 +3967,12 @@ class PipelineMonitor(App):
         color: #a6adc8;
     }
 
-    #statusbar #status-loading {
-        width: 30;
+    #statusbar #status-activity {
+        width: 60;
         background: #313244;
-        color: #f9e2af;
-        content-align: right middle;
-        padding: 0 2 0 0;
+        color: #cdd6f4;
+        content-align: center middle;
+        padding: 0 1;
     }
 
     #statusbar #status-right {
@@ -4273,6 +4306,8 @@ class PipelineMonitor(App):
         self.default_branch_filter = default_branch_filter or ""
         self.resume = resume
         self.explicit_project = explicit_project
+        self._activity_counts = []
+        self._activity_timer = None
 
     def action_quit(self) -> None:
         self.exit()
@@ -4298,6 +4333,29 @@ class PipelineMonitor(App):
         self.push_screen(LoadingScreen())
         # yield a frame so the splash paints before blocking API calls
         self.set_timer(0.1, self._finish_loading)
+        # kick activity fetch + refresh every ACTIVITY_TTL seconds
+        self.set_timer(2.0, lambda: asyncio.create_task(self._refresh_activity()))
+        self._activity_timer = self.set_interval(
+            ACTIVITY_TTL, lambda: asyncio.create_task(self._refresh_activity())
+        )
+
+    async def _refresh_activity(self) -> None:
+        try:
+            counts = await asyncio.to_thread(self.api.get_my_activity_counts)
+        except Exception as e:
+            _dbg(f"activity fetch failed: {type(e).__name__}: {e}")
+            return
+        self._activity_counts = counts or []
+        total = sum(c.get('count', 0) for c in self._activity_counts)
+        bars = 0
+        for screen in list(self.screen_stack):
+            try:
+                for sb in screen.query(StatusBar):
+                    sb.set_activity_counts(self._activity_counts)
+                    bars += 1
+            except Exception as e:
+                _dbg(f"activity broadcast screen={type(screen).__name__} err={e}")
+        _dbg(f"activity refresh: total={total} bars_updated={bars}")
 
     async def _finish_loading(self) -> None:
         try:
