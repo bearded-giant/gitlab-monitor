@@ -1269,7 +1269,8 @@ class JobDetailScreen(ScreenBase):
         self.api = api
         self.job = job
         self.trace = ""
-        self.trace_lines_written = 0
+        self.trace_bytes_read = 0
+        self._line_buffer = ""
         self.failures = []
         self._refresh_timer = None
         self._trace_timer = None
@@ -1337,7 +1338,7 @@ class JobDetailScreen(ScreenBase):
         t.append("↻ ", style="#a6e3a1")
         t.append("status ", style="#6c7086")
         t.append(f"{self.REFRESH_INTERVAL}s", style="bold #a6e3a1")
-        t.append(" · log ", style="#6c7086")
+        t.append(" · tail ", style="#6c7086")
         t.append(f"{self.TRACE_INTERVAL}s", style="bold #a6e3a1")
         return t
 
@@ -1420,6 +1421,7 @@ class JobDetailScreen(ScreenBase):
                 await asyncio.wait_for(self._append_new_trace(), timeout=self.FETCH_TIMEOUT)
             except Exception:
                 pass
+            self._flush_line_buffer()
         finally:
             self._refreshing_trace = False
 
@@ -1444,22 +1446,37 @@ class JobDetailScreen(ScreenBase):
             log.write(line)
 
     async def _append_new_trace(self) -> None:
-        new_trace = await asyncio.to_thread(self.api.get_job_trace, self.job['id'])
-        if new_trace == self.trace:
+        new_bytes, total = await asyncio.to_thread(
+            self.api.get_job_trace_range, self.job['id'], self.trace_bytes_read
+        )
+        if not new_bytes:
             return
+        self.trace_bytes_read = total
+        chunk = new_bytes.decode("utf-8", errors="replace")
+        self.trace += chunk
+        buf = self._line_buffer + chunk
+        parts = buf.split('\n')
+        self._line_buffer = parts[-1]
         log = self.query_one("#job-log", RichLog)
-        new_lines = new_trace.split('\n')
-        # append only lines beyond what we already wrote
-        for line in new_lines[self.trace_lines_written:]:
+        for line in parts[:-1]:
             self._write_trace_line(log, line)
-        self.trace = new_trace
-        self.trace_lines_written = len(new_lines)
+
+    def _flush_line_buffer(self) -> None:
+        if not self._line_buffer:
+            return
+        try:
+            log = self.query_one("#job-log", RichLog)
+            self._write_trace_line(log, self._line_buffer)
+        except Exception:
+            pass
+        self._line_buffer = ""
 
     async def load_trace(self) -> None:
         log = self.query_one("#job-log", RichLog)
         log.clear()
-        self.trace = await asyncio.to_thread(self.api.get_job_trace, self.job['id'])
-        self.trace_lines_written = 0
+        self.trace = ""
+        self.trace_bytes_read = 0
+        self._line_buffer = ""
 
         if self.job['status'] == 'failed':
             self.failures = await asyncio.to_thread(self.api.get_job_failures, self.job['id'])
@@ -1475,10 +1492,9 @@ class JobDetailScreen(ScreenBase):
                 ))
                 log.write("")
 
-        lines = self.trace.split('\n')
-        for line in lines:
-            self._write_trace_line(log, line)
-        self.trace_lines_written = len(lines)
+        await self._append_new_trace()
+        if self.job.get('status') in TERMINAL_STATUSES:
+            self._flush_line_buffer()
 
     def on_unmount(self) -> None:
         if self._refresh_timer:
