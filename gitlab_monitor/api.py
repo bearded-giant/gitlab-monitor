@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import gitlab
 
 from .config import Config
+from .constants import LOG_FETCH_TIMEOUT
 
 
 class GitLabAPI:
@@ -259,6 +260,34 @@ class GitLabAPI:
             return trace
         except Exception as e:
             return f"Error fetching trace: {e}"
+
+    def get_job_trace_range(self, job_id, offset):
+        try:
+            project_id = self.project.id
+            url = f"{self.gl.api_url}/projects/{project_id}/jobs/{int(job_id)}/trace"
+            headers = dict(getattr(self.gl, 'headers', {}) or {})
+            headers["Range"] = f"bytes={int(offset)}-"
+            if getattr(self.gl, 'private_token', None):
+                headers["PRIVATE-TOKEN"] = self.gl.private_token
+            elif getattr(self.gl, 'oauth_token', None):
+                headers["Authorization"] = f"Bearer {self.gl.oauth_token}"
+            elif getattr(self.gl, 'job_token', None):
+                headers["JOB-TOKEN"] = self.gl.job_token
+            resp = self.gl.session.get(url, headers=headers, timeout=LOG_FETCH_TIMEOUT)
+            if resp.status_code == 416:
+                return b"", offset
+            if resp.status_code not in (200, 206):
+                return b"", offset
+            total = offset + len(resp.content)
+            cr = resp.headers.get("Content-Range") or ""
+            if "/" in cr:
+                try:
+                    total = int(cr.rsplit("/", 1)[1])
+                except ValueError:
+                    pass
+            return resp.content, total
+        except Exception:
+            return b"", offset
 
     def get_job_failures(self, job_id):
         trace = self.get_job_trace(job_id)
