@@ -609,6 +609,19 @@ class GitLabAPI:
         discussions = self.get_mr_discussions(project_path, iid)
         return sum(1 for d in discussions if d.get('unresolved'))
 
+    def get_mr_approvals_summary(self, project_path, iid):
+        try:
+            project = self.gl.projects.get(project_path)
+            mr = project.mergerequests.get(iid)
+            approvals = mr.approvals.get()
+            approved_by = getattr(approvals, 'approved_by', None) or []
+            return {
+                'approvals_count': len(approved_by),
+                'approvals_required': getattr(approvals, 'approvals_required', 0) or 0,
+            }
+        except Exception:
+            return None
+
     def approve_merge_request(self, project_path, iid):
         project = self.gl.projects.get(project_path)
         mr = project.mergerequests.get(iid)

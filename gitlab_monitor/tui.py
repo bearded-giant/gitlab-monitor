@@ -58,6 +58,7 @@ from .formatting import (
     _branch_pair_text,
     _mr_state_badge,
     _mr_state_color,
+    _is_mr_approved,
     format_activity_strip,
 )
 from .api import GitLabAPI, ACTIVITY_TTL
@@ -1593,27 +1594,6 @@ class FailedJobsScreen(ScreenBase):
 
 
 
-def _mr_state_badge(state):
-    styles = {
-        'opened': ('bold #a6e3a1', ' open '),
-        'merged': ('bold #89b4fa', ' merged '),
-        'closed': ('bold #f38ba8', ' closed '),
-        'locked': ('bold #6c7086', ' locked '),
-    }
-    style, label = styles.get(state, ('', f' {state} '))
-    return Text(label, style=style)
-
-
-def _mr_state_color(state):
-    colors = {
-        'opened': '#a6e3a1',
-        'merged': '#89b4fa',
-        'closed': '#f38ba8',
-        'locked': '#6c7086',
-    }
-    return colors.get(state, '#cdd6f4')
-
-
 def _pipeline_status_color(status):
     if not status:
         return '#6c7086'
@@ -1768,6 +1748,7 @@ class MyMergeRequestsScreen(ScreenBase):
             await asyncio.gather(
                 self._backfill_head_pipelines(self.mrs),
                 self._fetch_unresolved_counts(self.mrs),
+                self._backfill_approvals(self.mrs),
             )
         elif self._is_windowed_state() and self.mrs:
             await self._enrich_merged_mrs()
@@ -1792,6 +1773,19 @@ class MyMergeRequestsScreen(ScreenBase):
                 mr['head_pipeline_status'] = r[0].get('status') or mr.get('head_pipeline_status')
                 mr['head_pipeline_id'] = r[0].get('id') or mr.get('head_pipeline_id')
                 mr['head_pipeline_web_url'] = r[0].get('web_url') or mr.get('head_pipeline_web_url')
+
+    async def _backfill_approvals(self, mrs) -> None:
+        todo = [m for m in mrs if m.get('project_path') and m.get('iid') is not None and m.get('approvals_count') is None]
+        if not todo:
+            return
+        results = await asyncio.gather(*(
+            asyncio.to_thread(self.api.get_mr_approvals_summary, m['project_path'], m['iid'])
+            for m in todo
+        ), return_exceptions=True)
+        for mr, r in zip(todo, results):
+            if isinstance(r, dict):
+                mr['approvals_count'] = r.get('approvals_count', 0)
+                mr['approvals_required'] = r.get('approvals_required', 0)
 
     async def _fetch_unresolved_counts(self, mrs) -> None:
         todo = [(m['project_path'], m['iid']) for m in mrs if m.get('project_path')]
@@ -1904,7 +1898,7 @@ class MyMergeRequestsScreen(ScreenBase):
                     iid,
                     title_t,
                     branch_t,
-                    _mr_state_badge(m['state']),
+                    _mr_state_badge(m['state'], m),
                     _pipeline_status_with_id(m['head_pipeline_status'], m.get('head_pipeline_id')),
                     related_or_unresolved_t,
                     Text(age, style="dim italic"),
@@ -2281,12 +2275,27 @@ class ProjectMergeRequestsScreen(ScreenBase):
 
     async def load_mrs(self) -> None:
         self.mrs = await asyncio.to_thread(self.api.get_project_merge_requests, self.project_path, self.state)
+        if self.mrs and self.state in ('opened', 'all'):
+            await self._backfill_approvals(self.mrs)
         self._apply_filter()
         try:
             self.query_one("#header", K9sHeader).set_info(self._info_pairs())
             self.query_one("#header", K9sHeader).set_keys(self._keys())
         except Exception:
             pass
+
+    async def _backfill_approvals(self, mrs) -> None:
+        todo = [m for m in mrs if m.get('state') == 'opened' and m.get('project_path') and m.get('iid') is not None and m.get('approvals_count') is None]
+        if not todo:
+            return
+        results = await asyncio.gather(*(
+            asyncio.to_thread(self.api.get_mr_approvals_summary, m['project_path'], m['iid'])
+            for m in todo
+        ), return_exceptions=True)
+        for mr, r in zip(todo, results):
+            if isinstance(r, dict):
+                mr['approvals_count'] = r.get('approvals_count', 0)
+                mr['approvals_required'] = r.get('approvals_required', 0)
 
     async def _safe_refresh(self) -> None:
         if self._refreshing:
@@ -2336,7 +2345,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
             table.add_row(
                 iid,
                 Text(title[:60], style="bold #cdd6f4"),
-                _mr_state_badge(m['state']),
+                _mr_state_badge(m['state'], m),
                 _pipeline_status_with_id(m['head_pipeline_status'], m.get('head_pipeline_id')),
                 Text(m['author'] or '', style="dim"),
                 Text(format_age(ref_age), style="dim italic"),
@@ -2441,11 +2450,12 @@ class MergeRequestDetailScreen(ScreenBase):
         m = self.mr
         title = (m['title'] or '')[:60]
         pipeline = m['head_pipeline_status'] or '—'
+        state_label = 'approved' if _is_mr_approved(m) else m['state']
         return [
             ("GitLab", self.api.config.gitlab_url),
             ("Project", self.project_path),
             ("MR", f"!{m['iid']}  {title}"),
-            ("State", m['state']),
+            ("State", state_label),
             ("Pipeline", pipeline),
             ("Author", m['author'] or 'unknown'),
             ("Created", format_age(m['created_at'])),
@@ -2577,7 +2587,10 @@ class MergeRequestDetailScreen(ScreenBase):
 
     def _build_right_col(self) -> Text:
         m = self.mr
-        state_t = Text(m['state'], style=f"bold {_mr_state_color(m['state'])}")
+        if _is_mr_approved(m):
+            state_t = Text(' APPROVED ', style='bold #181825 on #a6e3a1')
+        else:
+            state_t = Text(m['state'], style=f"bold {_mr_state_color(m['state'])}")
         pipeline_status = m.get('head_pipeline_status')
         pipeline_id = m.get('head_pipeline_id')
         pipeline_t = Text()

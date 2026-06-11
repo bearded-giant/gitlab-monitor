@@ -328,7 +328,21 @@ def _branch_pair_text(source, target, max_each=20):
     return out
 
 
-def _mr_state_badge(state):
+def _is_mr_approved(m):
+    if not m or m.get('state') != 'opened':
+        return False
+    if m.get('head_pipeline_status') != 'success':
+        return False
+    approved = m.get('approvals_count', 0) or 0
+    required = m.get('approvals_required', 0) or 0
+    if required > 0:
+        return approved >= required
+    return approved > 0
+
+
+def _mr_state_badge(state, m=None):
+    if m is not None and _is_mr_approved(m):
+        return Text(' APPROVED ', style='bold #181825 on #a6e3a1')
     styles = {
         'opened': ('bold #a6e3a1', ' open '),
         'merged': ('bold #89b4fa', ' merged '),
@@ -339,7 +353,9 @@ def _mr_state_badge(state):
     return Text(label, style=style)
 
 
-def _mr_state_color(state):
+def _mr_state_color(state, m=None):
+    if m is not None and _is_mr_approved(m):
+        return '#a6e3a1'
     colors = {
         'opened': '#a6e3a1',
         'merged': '#89b4fa',
