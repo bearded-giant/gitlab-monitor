@@ -415,34 +415,28 @@ class GitLabAPI:
         }
 
     def get_my_merge_requests(self, state='opened', limit=50, days=None):
-        try:
-            params = dict(
-                scope='created_by_me',
-                state=state,
-                per_page=limit,
-                order_by='updated_at',
-                sort='desc',
-            )
-            if days is not None:
-                since = datetime.now(timezone.utc) - timedelta(days=days)
-                params['updated_after'] = since.isoformat().replace('+00:00', 'Z')
-            mrs = self.gl.mergerequests.list(**params)
-            return [self._mr_to_dict(mr) for mr in mrs]
-        except Exception:
-            return []
+        params = dict(
+            scope='created_by_me',
+            state=state,
+            per_page=limit,
+            order_by='updated_at',
+            sort='desc',
+        )
+        if days is not None:
+            since = datetime.now(timezone.utc) - timedelta(days=days)
+            params['updated_after'] = since.isoformat().replace('+00:00', 'Z')
+        mrs = self.gl.mergerequests.list(**params)
+        return [self._mr_to_dict(mr) for mr in mrs]
 
     def get_project_merge_requests(self, project_path, state='merged', limit=50):
-        try:
-            project = self.gl.projects.get(project_path)
-            mrs = project.mergerequests.list(
-                state=state,
-                per_page=limit,
-                order_by='updated_at',
-                sort='desc',
-            )
-            return [self._mr_to_dict(mr, project_path=project_path) for mr in mrs]
-        except Exception:
-            return []
+        project = self.gl.projects.get(project_path)
+        mrs = project.mergerequests.list(
+            state=state,
+            per_page=limit,
+            order_by='updated_at',
+            sort='desc',
+        )
+        return [self._mr_to_dict(mr, project_path=project_path) for mr in mrs]
 
     def get_merge_request(self, project_path, iid):
         try:
