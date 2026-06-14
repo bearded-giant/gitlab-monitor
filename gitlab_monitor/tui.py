@@ -1627,6 +1627,7 @@ class MyMergeRequestsScreen(ScreenBase):
         self.window_days = DEFAULT_MERGED_WINDOW_DAYS
         self._refresh_timer = None
         self._refreshing = False
+        self._fetch_error = None
         self._unresolved_cache = {}
         self._related_cache = {}
         self._row_to_mr = []
@@ -1673,6 +1674,8 @@ class MyMergeRequestsScreen(ScreenBase):
         return _breadcrumb_text(["Merge Requests"])
 
     def _status_text(self):
+        if self._fetch_error:
+            return _status_line([("⚠ fetch failed", f"{self._fetch_error} — retrying")])
         total = len(self.mrs)
         shown = len(self.filtered_mrs)
         text_filter = ""
@@ -1743,7 +1746,14 @@ class MyMergeRequestsScreen(ScreenBase):
 
     async def load_mrs(self) -> None:
         days = self.window_days if self._is_windowed_state() else None
-        self.mrs = await asyncio.to_thread(self.api.get_my_merge_requests, self.state, 50, days)
+        try:
+            self.mrs = await asyncio.to_thread(self.api.get_my_merge_requests, self.state, 50, days)
+        except Exception as e:
+            self._fetch_error = f"{type(e).__name__}"
+            _dbg(f"load_mrs fetch failed: {type(e).__name__}: {e}")
+            self._refresh_status()
+            return
+        self._fetch_error = None
         if self.state == 'opened' and self.mrs:
             await asyncio.gather(
                 self._backfill_head_pipelines(self.mrs),
@@ -2190,6 +2200,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
         self.state = 'merged'
         self._refresh_timer = None
         self._refreshing = False
+        self._fetch_error = None
 
     def _info_pairs(self):
         total = len(self.mrs)
@@ -2223,6 +2234,8 @@ class ProjectMergeRequestsScreen(ScreenBase):
         return _breadcrumb_text([self.project_path or "Project", "Merge Requests"])
 
     def _status_text(self):
+        if self._fetch_error:
+            return _status_line([("⚠ fetch failed", f"{self._fetch_error} — retrying")])
         total = len(self.mrs)
         shown = len(self.filtered_mrs)
         text_filter = ""
@@ -2274,7 +2287,14 @@ class ProjectMergeRequestsScreen(ScreenBase):
         self._refresh_status()
 
     async def load_mrs(self) -> None:
-        self.mrs = await asyncio.to_thread(self.api.get_project_merge_requests, self.project_path, self.state)
+        try:
+            self.mrs = await asyncio.to_thread(self.api.get_project_merge_requests, self.project_path, self.state)
+        except Exception as e:
+            self._fetch_error = f"{type(e).__name__}"
+            _dbg(f"project load_mrs fetch failed: {type(e).__name__}: {e}")
+            self._refresh_status()
+            return
+        self._fetch_error = None
         if self.mrs and self.state in ('opened', 'all'):
             await self._backfill_approvals(self.mrs)
         self._apply_filter()
