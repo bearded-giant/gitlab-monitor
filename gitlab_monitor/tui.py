@@ -3,6 +3,7 @@
 # https://github.com/bearded-giant/gitlab-tools
 # Licensed under Apache License 2.0
 
+import os
 import sys
 import argparse
 import subprocess
@@ -57,6 +58,7 @@ from .formatting import (
     _pipeline_status_with_id,
     _branch_pair_text,
     _mr_state_badge,
+    _auto_merge_badge,
     _mr_state_color,
     _is_mr_approved,
     format_activity_strip,
@@ -246,6 +248,42 @@ class ScreenBase(Screen):
                 result = method()
                 if asyncio.iscoroutine(result):
                     asyncio.ensure_future(result)
+
+    def _toggle_auto_merge(self, m, on_done) -> None:
+        if not m:
+            return
+        if m.get('state') != 'opened':
+            self.notify(f"Cannot set auto-merge — MR is {m.get('state')}", severity="warning", timeout=3)
+            return
+        proj = m.get('project_path') or getattr(self, 'project_path', '') or ''
+        iid = m.get('iid')
+        if not proj or iid is None:
+            self.notify("MR has no project path — cannot set auto-merge", severity="warning", timeout=2)
+            return
+        enable = not bool(m.get('merge_when_pipeline_succeeds'))
+
+        async def _apply():
+            try:
+                await asyncio.to_thread(self.api.set_merge_when_pipeline_succeeds, proj, iid, enable)
+                m['merge_when_pipeline_succeeds'] = enable
+                self.notify(f"Auto-merge {'on' if enable else 'off'} for !{iid}", timeout=2)
+                on_done()
+            except Exception as e:
+                self.notify(f"Auto-merge toggle failed: {e}", severity="error", timeout=4)
+
+        if enable:
+            def _after(confirmed):
+                if confirmed:
+                    asyncio.ensure_future(_apply())
+            self.app.push_screen(
+                ConfirmModal(
+                    f"Enable auto-merge (merge when pipeline succeeds) for !{iid}?",
+                    detail=(m.get('title') or '')[:60],
+                ),
+                _after,
+            )
+        else:
+            asyncio.ensure_future(_apply())
 
 
 # -- api layer ---------------------------------------------------------------
@@ -1614,7 +1652,7 @@ def _pipeline_status_color(status):
 
 class MyMergeRequestsScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window", "A": "toggle_auto_merge"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -1656,8 +1694,8 @@ class MyMergeRequestsScreen(ScreenBase):
             [("tab", "modules"),  ("/", "filter"),              ("enter", "view")],
             [("r", "refresh"),    ("b", "browser"),             ("y", "copy url")],
             [("p", "pipelines"),  ("s", f"state:{self.state}"), ("g", "goto MR")],
-            [("e", "export md"),  ("n", "note"),                window_slot],
-            [("q", "quit")],
+            [("e", "export md"),  ("n", "note"),                ("A", "auto-merge")],
+            [("q", "quit"),       window_slot],
         ]
 
     def compose(self) -> ComposeResult:
@@ -1704,9 +1742,9 @@ class MyMergeRequestsScreen(ScreenBase):
 
     async def on_mount(self) -> None:
         table = self.query_one("#mr-table", DataTable)
-        col_keys = table.add_columns("●", "IID", "Title", "Branch", "MR", "Pipeline", "Threads", "Age")
+        col_keys = table.add_columns("●", "IID", "Title", "Branch", "MR", "Auto", "Pipeline", "Threads", "Age")
         try:
-            self._unresolved_col_key = col_keys[6]
+            self._unresolved_col_key = col_keys[7]
         except Exception:
             self._unresolved_col_key = None
         table.cursor_type = "row"
@@ -1890,7 +1928,7 @@ class MyMergeRequestsScreen(ScreenBase):
         for i, proj_path in enumerate(order):
             repo = (proj_path.rsplit('/', 1)[-1] if proj_path else 'UNKNOWN').upper()
             header = Text(repo, style="bold #89b4fa")
-            table.add_row(blank, header, blank, blank, blank, blank, blank, blank)
+            table.add_row(blank, header, blank, blank, blank, blank, blank, blank, blank)
             self._row_to_mr.append(None)
             for m in groups[proj_path]:
                 iid = Text(f"!{m['iid']}", style="bold #89b4fa")
@@ -1909,13 +1947,14 @@ class MyMergeRequestsScreen(ScreenBase):
                     title_t,
                     branch_t,
                     _mr_state_badge(m['state'], m),
+                    _auto_merge_badge(m),
                     _pipeline_status_with_id(m['head_pipeline_status'], m.get('head_pipeline_id')),
                     related_or_unresolved_t,
                     Text(age, style="dim italic"),
                 )
                 self._row_to_mr.append(m)
             if i < len(order) - 1:
-                table.add_row(blank, blank, blank, blank, blank, blank, blank, blank)
+                table.add_row(blank, blank, blank, blank, blank, blank, blank, blank, blank)
                 self._row_to_mr.append(None)
         if prev is not None and self._row_to_mr:
             target = min(prev, len(self._row_to_mr) - 1)
@@ -2053,6 +2092,11 @@ class MyMergeRequestsScreen(ScreenBase):
         if m is not None and copy_to_clipboard(m['web_url']):
             self.notify(f"Copied MR !{m['iid']} URL", timeout=2)
 
+    async def action_toggle_auto_merge(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        m = self._mr_at_row(table.cursor_row)
+        self._toggle_auto_merge(m, self._update_table)
+
     async def action_note(self) -> None:
         table = self.query_one("#mr-table", DataTable)
         m = self._mr_at_row(table.cursor_row)
@@ -2186,7 +2230,7 @@ class MyMergeRequestsScreen(ScreenBase):
 
 class ProjectMergeRequestsScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "s": "toggle_state"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "s": "toggle_state", "A": "toggle_auto_merge"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
     STATE_CYCLE = ['merged', 'closed', 'opened', 'all']
@@ -2217,7 +2261,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
         return [
             [("/", "filter"),   ("enter", "view"),         ("r", "refresh")],
             [("b", "browser"),  ("y", "copy url"),         ("s", f"state:{self.state}")],
-            [("q", "back")],
+            [("A", "auto-merge"), ("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2264,7 +2308,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
 
     async def on_mount(self) -> None:
         table = self.query_one("#proj-mr-table", DataTable)
-        table.add_columns("IID", "Title", "MR", "Pipeline", "Author", "Age")
+        table.add_columns("IID", "Title", "MR", "Auto", "Pipeline", "Author", "Age")
         table.cursor_type = "row"
         self._user_loading_label = "loading MRs..."
         try:
@@ -2366,6 +2410,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
                 iid,
                 Text(title[:60], style="bold #cdd6f4"),
                 _mr_state_badge(m['state'], m),
+                _auto_merge_badge(m),
                 _pipeline_status_with_id(m['head_pipeline_status'], m.get('head_pipeline_id')),
                 Text(m['author'] or '', style="dim"),
                 Text(format_age(ref_age), style="dim italic"),
@@ -2427,6 +2472,11 @@ class ProjectMergeRequestsScreen(ScreenBase):
             if copy_to_clipboard(m['web_url']):
                 self.notify(f"Copied MR !{m['iid']} URL", timeout=2)
 
+    async def action_toggle_auto_merge(self) -> None:
+        table = self.query_one("#proj-mr-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.filtered_mrs):
+            self._toggle_auto_merge(self.filtered_mrs[table.cursor_row], self._update_table)
+
 
 class MergeRequestDetailScreen(ScreenBase):
 
@@ -2438,6 +2488,7 @@ class MergeRequestDetailScreen(ScreenBase):
         "p": "pipelines",
         "k": "commits",
         "a": "approve",
+        "A": "toggle_auto_merge",
         "x": "close",
         "c": "comment",
         "g": "goto",
@@ -2488,7 +2539,7 @@ class MergeRequestDetailScreen(ScreenBase):
             [("r", "refresh"),    ("b", "browser"),    ("y", "copy url")],
             [("p", "pipelines"),  ("k", "commits"),    ("g", "goto MR")],
             [("a", "approve"),    ("c", "comment"),    ("x", "close")],
-            [("f", resolved_label),("t", auto_label)],
+            [("A", "auto-merge"), ("f", resolved_label),("t", auto_label)],
             [("q", "back")],
         ]
 
@@ -2623,6 +2674,7 @@ class MergeRequestDetailScreen(ScreenBase):
         created_t = Text(f"{m['created_at']}  ({format_age(m['created_at'])})", style="#cdd6f4")
         rows = [
             ("State", state_t),
+            ("Auto-merge", _auto_merge_badge(m)),
             ("Pipeline", pipeline_t),
             ("Created", created_t),
         ]
@@ -2818,6 +2870,9 @@ class MergeRequestDetailScreen(ScreenBase):
 
     async def _open_mr(self, project_path: str, iid: int) -> None:
         self.app.push_screen(MergeRequestDetailScreen(self.api, project_path, iid))
+
+    async def action_toggle_auto_merge(self) -> None:
+        self._toggle_auto_merge(self.mr, lambda: asyncio.ensure_future(self.load_mr()))
 
     async def action_approve(self) -> None:
         if not self.mr:

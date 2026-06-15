@@ -353,6 +353,12 @@ def _mr_state_badge(state, m=None):
     return Text(label, style=style)
 
 
+def _auto_merge_badge(m=None):
+    if m is not None and m.get('merge_when_pipeline_succeeds'):
+        return Text('true', style='bold #f9e2af')
+    return Text('false', style='dim #6c7086')
+
+
 def _mr_state_color(state, m=None):
     if m is not None and _is_mr_approved(m):
         return '#a6e3a1'
