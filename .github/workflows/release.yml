@@ -51,14 +51,14 @@ jobs:
           fi
           grep -q 'GITLAB_URL' smoke.out
 
-      - name: Rename binary
-        run: cp dist/glmon/glmon dist/glmon-aarch64-apple-darwin
+      - name: Package binary
+        run: tar -czf dist/glmon-aarch64-apple-darwin.tar.gz -C dist/glmon .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: glmon-aarch64-apple-darwin
-          path: dist/glmon-aarch64-apple-darwin
+          path: dist/glmon-aarch64-apple-darwin.tar.gz
 
   release:
     needs: build
