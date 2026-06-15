@@ -27,9 +27,9 @@ jobs:
       run: |
         gh release download "$TAG" \
           --repo bearded-giant/gitlab-monitor \
-          --pattern "glmon-aarch64-apple-darwin" \
+          --pattern "glmon-aarch64-apple-darwin.tar.gz" \
           --dir .
-        sha=$(sha256sum "glmon-aarch64-apple-darwin" | cut -d' ' -f1)
+        sha=$(sha256sum "glmon-aarch64-apple-darwin.tar.gz" | cut -d' ' -f1)
         echo "sha_arm_macos=${sha}" >> "$GITHUB_OUTPUT"
 
     - name: Checkout tap repo
@@ -51,12 +51,13 @@ jobs:
           version "$VERSION"
           license "Apache-2.0"
 
-          url "https://github.com/bearded-giant/gitlab-monitor/releases/download/v#{version}/glmon-aarch64-apple-darwin"
+          url "https://github.com/bearded-giant/gitlab-monitor/releases/download/v#{version}/glmon-aarch64-apple-darwin.tar.gz"
           sha256 "$SHA_ARM_MACOS"
 
           def install
-            bin.install "glmon-aarch64-apple-darwin" => "glmon"
-            bin.install_symlink "glmon" => "gitlab-monitor"
+            libexec.install Dir["*"]
+            bin.install_symlink libexec/"glmon"
+            bin.install_symlink libexec/"glmon" => "gitlab-monitor"
           end
 
           test do
