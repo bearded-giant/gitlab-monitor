@@ -75,6 +75,6 @@ gitlab   gitlab.rechargeapps.net:...               ← recharge mirror, no relea
 |---|---|
 | release.yml red | fix on main, `git tag -d v1.5.4 && git push origin :v1.5.4 && ./release.sh 1.5.4` |
 | Tap formula stale | `gh workflow run update-homebrew.yml -R bearded-giant/gitlab-monitor -f tag=v1.5.4` |
-| Asset name changed in release.yml | update pattern in `update-homebrew.yml` (line ~28: `glmon-aarch64-apple-darwin`) |
+| Asset name changed in release.yml | update pattern in `update-homebrew.yml` (line ~28: `glmon-aarch64-apple-darwin.tar.gz`) |
 
 See also: tap-wide `~/dev/homebrew-tap/RELEASING.md`.
