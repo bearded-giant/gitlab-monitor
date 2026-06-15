@@ -412,6 +412,7 @@ class GitLabAPI:
             'head_pipeline_web_url': head_pipeline.get('web_url') if isinstance(head_pipeline, dict) else getattr(head_pipeline, 'web_url', None),
             'has_conflicts': getattr(mr, 'has_conflicts', False),
             'blocking_discussions_resolved': getattr(mr, 'blocking_discussions_resolved', True),
+            'merge_when_pipeline_succeeds': bool(getattr(mr, 'merge_when_pipeline_succeeds', False)),
         }
 
     def get_my_merge_requests(self, state='opened', limit=50, days=None):
@@ -628,6 +629,16 @@ class GitLabAPI:
         mr.state_event = 'close'
         mr.save()
         return True
+
+    def set_merge_when_pipeline_succeeds(self, project_path, iid, enable):
+        project = self.gl.projects.get(project_path)
+        mr = project.mergerequests.get(iid)
+        if enable:
+            # gitlab sets MWPS only when a pipeline is active; otherwise this merges now
+            mr.merge(merge_when_pipeline_succeeds=True)
+        else:
+            mr.cancel_merge_when_pipeline_succeeds()
+        return enable
 
     def create_mr_note(self, project_path, iid, body):
         project = self.gl.projects.get(project_path)
