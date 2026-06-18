@@ -285,6 +285,40 @@ class ScreenBase(Screen):
         else:
             asyncio.ensure_future(_apply())
 
+    def _merge_mr(self, m, on_done) -> None:
+        if not m:
+            return
+        if m.get('state') != 'opened':
+            self.notify(f"Cannot merge — MR is {m.get('state')}", severity="warning", timeout=3)
+            return
+        if not _is_mr_approved(m):
+            self.notify(f"Cannot merge — MR !{m.get('iid')} not approved", severity="warning", timeout=3)
+            return
+        proj = m.get('project_path') or getattr(self, 'project_path', '') or ''
+        iid = m.get('iid')
+        if not proj or iid is None:
+            self.notify("MR has no project path — cannot merge", severity="warning", timeout=2)
+            return
+
+        async def _apply():
+            try:
+                await asyncio.to_thread(self.api.merge_mr, proj, iid, True, True)
+                self.notify(f"Merged !{iid} (squash + delete source)", timeout=3)
+                on_done()
+            except Exception as e:
+                self.notify(f"Merge failed: {e}", severity="error", timeout=5)
+
+        def _after(confirmed):
+            if confirmed:
+                asyncio.ensure_future(_apply())
+        self.app.push_screen(
+            ConfirmModal(
+                f"Merge !{iid} now? (squash commits + delete source branch)",
+                detail=(m.get('title') or '')[:60],
+            ),
+            _after,
+        )
+
 
 # -- api layer ---------------------------------------------------------------
 
@@ -1652,7 +1686,7 @@ def _pipeline_status_color(status):
 
 class MyMergeRequestsScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window", "A": "toggle_auto_merge"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window", "A": "toggle_auto_merge", "M": "merge"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -1695,7 +1729,7 @@ class MyMergeRequestsScreen(ScreenBase):
             [("r", "refresh"),    ("b", "browser"),             ("y", "copy url")],
             [("p", "pipelines"),  ("s", f"state:{self.state}"), ("g", "goto MR")],
             [("e", "export md"),  ("n", "note"),                ("A", "auto-merge")],
-            [("q", "quit"),       window_slot],
+            [("M", "merge"),      ("q", "quit"),                window_slot],
         ]
 
     def compose(self) -> ComposeResult:
@@ -1792,12 +1826,14 @@ class MyMergeRequestsScreen(ScreenBase):
             self._refresh_status()
             return
         self._fetch_error = None
-        if self.state == 'opened' and self.mrs:
-            await asyncio.gather(
-                self._backfill_head_pipelines(self.mrs),
-                self._fetch_unresolved_counts(self.mrs),
-                self._backfill_approvals(self.mrs),
-            )
+        if self.state == 'opened':
+            if self.mrs:
+                await asyncio.gather(
+                    self._backfill_head_pipelines(self.mrs),
+                    self._fetch_unresolved_counts(self.mrs),
+                    self._backfill_approvals(self.mrs),
+                )
+            await self._append_merged_untagged()
         elif self._is_windowed_state() and self.mrs:
             await self._enrich_merged_mrs()
         self._set_unresolved_col_label("Related" if self._is_windowed_state() else "Threads")
@@ -1871,6 +1907,30 @@ class MyMergeRequestsScreen(ScreenBase):
             ), return_exceptions=True)
             for (p, i, _, _), r in zip(related_todo, results):
                 self._related_cache[(p, i)] = r if isinstance(r, list) else []
+
+    async def _append_merged_untagged(self) -> None:
+        try:
+            merged = await asyncio.to_thread(
+                self.api.get_my_merge_requests, 'merged', 50, DEFAULT_MERGED_WINDOW_DAYS
+            )
+        except Exception:
+            return
+        if not merged:
+            return
+        # ponytail: 1 tag-check API call per recently-merged MR — bounded by my merged MRs in the window; no cache (untagged must drop off once a tag lands)
+        checks = await asyncio.gather(*(
+            asyncio.to_thread(self.api.commit_has_tag, m.get('project_path') or '', m.get('merge_commit_sha'))
+            for m in merged
+        ), return_exceptions=True)
+        existing = {(m.get('project_path'), m.get('iid')) for m in self.mrs}
+        add = [
+            m for m, tagged in zip(merged, checks)
+            if tagged is False and (m.get('project_path'), m.get('iid')) not in existing
+        ]
+        if not add:
+            return
+        self.mrs.extend(add)
+        await self._backfill_head_pipelines(add)
 
     async def _safe_refresh(self) -> None:
         if self._refreshing:
@@ -2096,6 +2156,11 @@ class MyMergeRequestsScreen(ScreenBase):
         table = self.query_one("#mr-table", DataTable)
         m = self._mr_at_row(table.cursor_row)
         self._toggle_auto_merge(m, self._update_table)
+
+    async def action_merge(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        m = self._mr_at_row(table.cursor_row)
+        self._merge_mr(m, lambda: asyncio.ensure_future(self.load_mrs()))
 
     async def action_note(self) -> None:
         table = self.query_one("#mr-table", DataTable)
@@ -2489,6 +2554,7 @@ class MergeRequestDetailScreen(ScreenBase):
         "k": "commits",
         "a": "approve",
         "A": "toggle_auto_merge",
+        "M": "merge",
         "x": "close",
         "c": "comment",
         "g": "goto",
@@ -2540,7 +2606,7 @@ class MergeRequestDetailScreen(ScreenBase):
             [("p", "pipelines"),  ("k", "commits"),    ("g", "goto MR")],
             [("a", "approve"),    ("c", "comment"),    ("x", "close")],
             [("A", "auto-merge"), ("f", resolved_label),("t", auto_label)],
-            [("q", "back")],
+            [("M", "merge"),      ("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2873,6 +2939,9 @@ class MergeRequestDetailScreen(ScreenBase):
 
     async def action_toggle_auto_merge(self) -> None:
         self._toggle_auto_merge(self.mr, lambda: asyncio.ensure_future(self.load_mr()))
+
+    async def action_merge(self) -> None:
+        self._merge_mr(self.mr, lambda: asyncio.ensure_future(self.load_mr()))
 
     async def action_approve(self) -> None:
         if not self.mr:

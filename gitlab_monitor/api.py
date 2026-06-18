@@ -413,6 +413,7 @@ class GitLabAPI:
             'has_conflicts': getattr(mr, 'has_conflicts', False),
             'blocking_discussions_resolved': getattr(mr, 'blocking_discussions_resolved', True),
             'merge_when_pipeline_succeeds': bool(getattr(mr, 'merge_when_pipeline_succeeds', False)),
+            'merge_commit_sha': getattr(mr, 'merge_commit_sha', None) or getattr(mr, 'squash_commit_sha', None),
         }
 
     def get_my_merge_requests(self, state='opened', limit=50, days=None):
@@ -639,6 +640,21 @@ class GitLabAPI:
         else:
             mr.cancel_merge_when_pipeline_succeeds()
         return enable
+
+    def merge_mr(self, project_path, iid, squash=True, delete_source_branch=True):
+        project = self.gl.projects.get(project_path)
+        mr = project.mergerequests.get(iid)
+        mr.merge(squash=squash, should_remove_source_branch=delete_source_branch)
+        return True
+
+    def commit_has_tag(self, project_path, sha):
+        if not sha:
+            return False
+        project = self.gl.projects.get(project_path)
+        refs = project.commits.get(sha).refs('tag')
+        if not isinstance(refs, list):
+            return bool(refs)
+        return any((r.get('type') == 'tag') if isinstance(r, dict) else False for r in refs)
 
     def create_mr_note(self, project_path, iid, body):
         project = self.gl.projects.get(project_path)
