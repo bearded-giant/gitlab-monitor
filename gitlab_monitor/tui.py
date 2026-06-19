@@ -23,6 +23,8 @@ from . import __version__
 from .constants import (
     PIPELINE_AGE_CYCLE,
     DEFAULT_PIPELINE_AGE_DAYS,
+    COMMIT_WINDOW_CYCLE,
+    DEFAULT_COMMIT_WINDOW_DAYS,
     PIPELINE_REFRESH_INTERVAL,
     JOB_REFRESH_INTERVAL,
     LOG_META_REFRESH_INTERVAL,
@@ -352,7 +354,7 @@ class ProjectSelectScreen(ScreenBase):
 
     DEBOUNCE_SECONDS = 0.4
 
-    def __init__(self, api: GitLabAPI, favorites, target='pipelines'):
+    def __init__(self, api: GitLabAPI, favorites, target='hub'):
         super().__init__()
         self.api = api
         self.favorites = favorites
@@ -580,9 +582,12 @@ class ProjectSelectScreen(ScreenBase):
             if self.target == 'tags':
                 self.app.push_screen(TagListScreen(self.api, project['path']))
                 return
-            age = getattr(self.app, 'default_age_days', DEFAULT_PIPELINE_AGE_DAYS)
-            initial_filter = getattr(self.app, 'default_branch_filter', '') or ''
-            self.app.push_screen(PipelineListScreen(self.api, age_days=age, initial_filter=initial_filter))
+            if self.target == 'pipelines':
+                age = getattr(self.app, 'default_age_days', DEFAULT_PIPELINE_AGE_DAYS)
+                initial_filter = getattr(self.app, 'default_branch_filter', '') or ''
+                self.app.push_screen(PipelineListScreen(self.api, age_days=age, initial_filter=initial_filter))
+                return
+            self.app.push_screen(ProjectHubScreen(self.api, project['path']))
 
     async def action_quit(self) -> None:
         self.app.exit()
@@ -3928,6 +3933,563 @@ class TagListScreen(ScreenBase):
             await self.load_tags()
         except Exception as e:
             self.notify(f"Tag create failed: {e}", severity="error", timeout=5)
+
+
+class ProjectHubScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "b": "browser", "y": "yank", "m": "open_modules", "tab": "open_modules"}
+
+    HUB_ROWS = [
+        ("commits", "Commits", "default-branch commits (1d/3d/7d)"),
+        ("mrs", "Merge Requests", "open / merged MRs, any author"),
+        ("tags", "Tags", "tags + create/push"),
+        ("pipelines", "Pipelines", "project pipelines"),
+    ]
+
+    def __init__(self, api: GitLabAPI, project_path: str):
+        super().__init__()
+        self.api = api
+        self.project_path = project_path
+        self.default_branch = ''
+        self.last_activity = ''
+        self._summaries = {}
+
+    def _info_pairs(self):
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Project", self.project_path),
+            ("Default", self.default_branch or "—"),
+            ("Active", format_age(self.last_activity) if self.last_activity else "—"),
+        ]
+
+    def _keys(self):
+        return [
+            [("enter", "open"),    ("r", "refresh")],
+            [("b", "browser"),     ("y", "copy url")],
+            [("tab", "modules"),   ("q", "back")],
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield DataTable(id="hub-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text([self.project_path or "Project", "Hub"])
+
+    def _status_text(self):
+        return _status_line([("select", "a section")])
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#hub-table", DataTable)
+        table.add_columns("Section", "Summary")
+        table.cursor_type = "row"
+        self._render_rows()
+        table.focus()
+        self.call_after_refresh(lambda: asyncio.create_task(self._load_meta()))
+
+    def _render_rows(self) -> None:
+        table = self.query_one("#hub-table", DataTable)
+        prev = table.cursor_row
+        table.clear()
+        for key, label, hint in self.HUB_ROWS:
+            summary = self._summaries.get(key)
+            cell = Text(summary, style="#a6e3a1") if summary else Text(hint, style="dim #a6adc8")
+            table.add_row(Text(label, style="bold #cdd6f4"), cell)
+        if prev is not None:
+            table.move_cursor(row=min(prev, len(self.HUB_ROWS) - 1))
+
+    async def _load_meta(self) -> None:
+        try:
+            self.default_branch = await asyncio.to_thread(self.api.get_default_branch, self.project_path)
+        except Exception:
+            self.default_branch = ''
+        try:
+            meta = await asyncio.to_thread(self.api.get_project_meta, self.project_path)
+            self.last_activity = (meta or {}).get('last_activity', '') or ''
+        except Exception:
+            pass
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+        except Exception:
+            pass
+        await self._backfill_summaries()
+
+    async def _backfill_summaries(self) -> None:
+        # ponytail: 4 best-effort counts in one gathered pass; failed cells keep their hint text
+        async def _commits():
+            cs = await asyncio.to_thread(self.api.list_commits, self.project_path, self.default_branch or None, 1, 100)
+            return ('commits', f"{len(cs)} in last 1d")
+
+        async def _mrs():
+            ms = await asyncio.to_thread(self.api.get_project_merge_requests, self.project_path, 'opened', 100)
+            return ('mrs', f"{len(ms)} open")
+
+        async def _tags():
+            ts = await asyncio.to_thread(self.api.list_tags, self.project_path, 1)
+            return ('tags', f"latest {ts[0]['name']}" if ts else "no tags")
+
+        async def _pipes():
+            ps = await asyncio.to_thread(self.api.list_pipelines_for_ref_since, self.project_path, self.default_branch, None, 1)
+            return ('pipelines', ps[0]['status'] if ps else "none")
+
+        results = await asyncio.gather(_commits(), _mrs(), _tags(), _pipes(), return_exceptions=True)
+        for r in results:
+            if isinstance(r, tuple):
+                self._summaries[r[0]] = r[1]
+        self._render_rows()
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        idx = event.cursor_row
+        if idx is None or idx < 0 or idx >= len(self.HUB_ROWS):
+            return
+        key = self.HUB_ROWS[idx][0]
+        self.api.set_project(self.project_path)
+        if key == 'commits':
+            self.app.push_screen(CommitListScreen(self.api, self.project_path))
+        elif key == 'mrs':
+            self.app.push_screen(ProjectMergeRequestsScreen(self.api, self.project_path))
+        elif key == 'tags':
+            self.app.push_screen(TagListScreen(self.api, self.project_path))
+        elif key == 'pipelines':
+            age = getattr(self.app, 'default_age_days', DEFAULT_PIPELINE_AGE_DAYS)
+            self.app.push_screen(PipelineListScreen(self.api, age_days=age))
+
+    def _project_url(self):
+        return f"{self.api.config.gitlab_url.rstrip('/')}/{self.project_path}"
+
+    async def action_back(self) -> None:
+        self.app.pop_screen()
+
+    async def action_refresh(self) -> None:
+        await self._load_meta()
+
+    async def action_open_modules(self) -> None:
+        self.app.open_modules()
+
+    async def action_browser(self) -> None:
+        webbrowser.open(self._project_url())
+
+    async def action_yank(self) -> None:
+        if copy_to_clipboard(self._project_url()):
+            self.notify("Copied project URL", timeout=2)
+
+
+class CommitListScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_window", "p": "pipeline", "c": "clear_filter"}
+
+    def __init__(self, api: GitLabAPI, project_path: str):
+        super().__init__()
+        self.api = api
+        self.project_path = project_path
+        self.window_days = DEFAULT_COMMIT_WINDOW_DAYS
+        self.default_branch = ''
+        self.commits = []
+        self.filtered_commits = []
+        self._fetch_error = None
+
+    def _info_pairs(self):
+        total = len(self.commits)
+        shown = len(self.filtered_commits)
+        count = f"{shown}/{total}" if shown != total else str(total)
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Project", self.project_path),
+            ("Branch", self.default_branch or "—"),
+            ("Window", f"last {self.window_days}d"),
+            ("Commits", count),
+        ]
+
+    def _keys(self):
+        return [
+            [("/", "filter"),                 ("enter", "detail"),  ("r", "refresh")],
+            [("t", f"window:{self.window_days}d"), ("p", "pipeline"), ("c", "clear")],
+            [("b", "browser"),                ("y", "copy url"),    ("q", "back")],
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield Container(
+            Input(placeholder="/  filter commits...", id="commit-filter"),
+            id="filter-bar",
+        )
+        yield DataTable(id="commit-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text([self.project_path or "Project", "Commits"])
+
+    def _status_text(self):
+        if self._fetch_error:
+            return _status_line([("⚠ fetch failed", f"{self._fetch_error} — retry with r")])
+        total = len(self.commits)
+        shown = len(self.filtered_commits)
+        text_filter = ""
+        try:
+            text_filter = self.query_one("#commit-filter", Input).value.strip()
+        except Exception:
+            pass
+        count = f"{shown}/{total} commits" if shown != total else f"{total} commits"
+        parts = [count, ("window", f"{self.window_days}d")]
+        if text_filter:
+            parts.append(("filter", text_filter))
+        return _status_line(parts)
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#commit-table", DataTable)
+        table.add_columns("Author", "Message", "Pipeline")
+        table.cursor_type = "row"
+        self._user_loading_label = "loading commits..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
+        try:
+            await self.load_commits()
+        finally:
+            self._clear_loading()
+        try:
+            self.query_one("#commit-table", DataTable).focus()
+        except Exception:
+            pass
+
+    async def load_commits(self) -> None:
+        if not self.default_branch:
+            try:
+                self.default_branch = await asyncio.to_thread(self.api.get_default_branch, self.project_path)
+            except Exception:
+                self.default_branch = ''
+        try:
+            self.commits = await asyncio.to_thread(
+                self.api.list_commits, self.project_path, self.default_branch or None, self.window_days, 50
+            )
+        except Exception as e:
+            self._fetch_error = f"{type(e).__name__}"
+            _dbg(f"commit load failed: {type(e).__name__}: {e}")
+            self._refresh_status()
+            return
+        self._fetch_error = None
+        await self._backfill_commit_pipelines(self.commits)
+        self._apply_filter()
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+        except Exception:
+            pass
+
+    async def _backfill_commit_pipelines(self, commits) -> None:
+        # ponytail: 1 status call per commit, bounded by the 50-commit fetch cap. cache if it bites.
+        todo = [c for c in commits if c.get('id')]
+        if not todo:
+            return
+        results = await asyncio.gather(*(
+            asyncio.to_thread(self.api.get_commit_pipeline_status, self.project_path, c['id'])
+            for c in todo
+        ), return_exceptions=True)
+        for c, r in zip(todo, results):
+            if isinstance(r, str):
+                c['pipeline_status'] = r
+
+    def _apply_filter(self) -> None:
+        try:
+            q = self.query_one("#commit-filter", Input).value.strip().lower()
+        except Exception:
+            q = ""
+        if not q:
+            self.filtered_commits = list(self.commits)
+        else:
+            self.filtered_commits = [
+                c for c in self.commits
+                if q in (c.get('title') or '').lower()
+                or q in (c.get('message') or '').lower()
+                or q in (c.get('author_name') or '').lower()
+                or q in (c.get('short_id') or '').lower()
+            ]
+        self._update_table()
+        self._refresh_status()
+
+    def _update_table(self) -> None:
+        table = self.query_one("#commit-table", DataTable)
+        prev = table.cursor_row
+        table.clear()
+        for c in self.filtered_commits:
+            author = Text((c.get('author_name') or '')[:18], style="#89b4fa")
+            title = c.get('title') or ''
+            if not title and c.get('message'):
+                title = c['message'].splitlines()[0]
+            msg = Text(title[:70], style="#cdd6f4")
+            pipeline = status_badge(c['pipeline_status']) if c.get('pipeline_status') else Text("—", style="dim")
+            table.add_row(author, msg, pipeline)
+        if prev is not None and self.filtered_commits:
+            table.move_cursor(row=min(prev, len(self.filtered_commits) - 1))
+
+    def _commit_at_row(self, idx):
+        if idx is None or idx < 0 or idx >= len(self.filtered_commits):
+            return None
+        return self.filtered_commits[idx]
+
+    def _commit_url(self, c):
+        return c.get('web_url') or f"{self.api.config.gitlab_url.rstrip('/')}/{self.project_path}/-/commit/{c['id']}"
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "commit-filter":
+            self._apply_filter()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "commit-filter":
+            self._apply_filter()
+            self.query_one("#commit-table", DataTable).focus()
+
+    async def action_search(self) -> None:
+        self.query_one("#commit-filter", Input).focus()
+
+    async def action_clear_filter(self) -> None:
+        try:
+            self.query_one("#commit-filter", Input).value = ""
+        except Exception:
+            pass
+        self._apply_filter()
+
+    async def action_back(self) -> None:
+        self.app.pop_screen()
+
+    async def action_refresh(self) -> None:
+        await self._show_loading("loading commits...")
+        try:
+            await self.load_commits()
+        finally:
+            self._clear_loading()
+
+    async def action_toggle_window(self) -> None:
+        try:
+            idx = COMMIT_WINDOW_CYCLE.index(self.window_days)
+        except ValueError:
+            idx = 0
+        self.window_days = COMMIT_WINDOW_CYCLE[(idx + 1) % len(COMMIT_WINDOW_CYCLE)]
+        await self._show_loading(f"loading commits ({self.window_days}d)...")
+        try:
+            await self.load_commits()
+        finally:
+            self._clear_loading()
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        c = self._commit_at_row(event.cursor_row)
+        if c is None:
+            return
+        self.app.push_screen(CommitDetailScreen(self.api, self.project_path, c['id']))
+
+    async def action_browser(self) -> None:
+        c = self._commit_at_row(self.query_one("#commit-table", DataTable).cursor_row)
+        if c is None:
+            return
+        webbrowser.open(self._commit_url(c))
+
+    async def action_yank(self) -> None:
+        c = self._commit_at_row(self.query_one("#commit-table", DataTable).cursor_row)
+        if c is None:
+            return
+        if copy_to_clipboard(self._commit_url(c)):
+            self.notify(f"Copied commit {c['short_id']} URL", timeout=2)
+
+    async def action_pipeline(self) -> None:
+        c = self._commit_at_row(self.query_one("#commit-table", DataTable).cursor_row)
+        if c is None:
+            return
+        try:
+            pipe = await asyncio.to_thread(self.api.get_commit_pipeline, self.project_path, c['id'])
+        except Exception as e:
+            self.notify(f"Pipeline lookup failed: {e}", severity="error", timeout=4)
+            return
+        if not pipe:
+            self.notify("No pipeline for this commit", severity="warning", timeout=3)
+            return
+        self.api.set_project(self.project_path)
+        self.app.push_screen(JobListScreen(self.api, pipe))
+
+
+class CommitDetailScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "b": "browser", "y": "yank", "p": "pipeline"}
+
+    def __init__(self, api: GitLabAPI, project_path: str, sha: str):
+        super().__init__()
+        self.api = api
+        self.project_path = project_path
+        self.sha = sha or ''
+        self.commit = None
+        self._fetch_error = None
+
+    def _info_pairs(self):
+        c = self.commit or {}
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Project", self.project_path),
+            ("Commit", c.get('short_id') or self.sha[:8]),
+            ("Pipeline", c.get('pipeline_status') or "—"),
+        ]
+
+    def _keys(self):
+        return [
+            [("r", "refresh"),  ("p", "pipeline")],
+            [("b", "browser"),  ("y", "copy url")],
+            [("q", "back")],
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield RichLog(id="commit-log", wrap=True, markup=False, max_lines=MAX_LOG_LINES)
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text([self.project_path or "Project", "Commits", self.sha[:8]])
+
+    def _status_text(self):
+        if self._fetch_error:
+            return _status_line([("⚠ fetch failed", f"{self._fetch_error} — retry with r")])
+        c = self.commit or {}
+        st = c.get('stats') or {}
+        files = len(c.get('files') or [])
+        return _status_line([
+            ("files", str(files)),
+            ("+", str(st.get('additions', 0))),
+            ("-", str(st.get('deletions', 0))),
+        ])
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        self._user_loading_label = "loading commit..."
+        self._refresh_status()
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
+        try:
+            await self.load_commit()
+        finally:
+            self._clear_loading()
+
+    async def load_commit(self) -> None:
+        try:
+            self.commit = await asyncio.to_thread(self.api.get_commit, self.project_path, self.sha)
+        except Exception as e:
+            self._fetch_error = f"{type(e).__name__}"
+            _dbg(f"commit detail failed: {type(e).__name__}: {e}")
+            self._refresh_status()
+            return
+        self._fetch_error = None
+        self._render()
+
+    def _render(self) -> None:
+        c = self.commit or {}
+        try:
+            log = self.query_one("#commit-log", RichLog)
+        except Exception:
+            return
+        log.clear()
+        title = (c.get('title') or '').strip()
+        log.write(Text(title, style="bold #cdd6f4"))
+        meta = Text()
+        meta.append(c.get('author_name', '') or '', style="#89b4fa")
+        if c.get('committed_date'):
+            meta.append(f"  ·  {format_age(c['committed_date'])}", style="dim italic")
+        meta.append(f"  ·  {c.get('short_id', '')}", style="dim #89b4fa")
+        log.write(meta)
+
+        body_lines = (c.get('message') or '').strip().splitlines()
+        if body_lines and body_lines[0].strip() == title:
+            body_lines = body_lines[1:]
+        rest = "\n".join(body_lines).strip()
+        if rest:
+            log.write(Text(""))
+            log.write(Text(rest, style="#a6adc8"))
+
+        st = c.get('stats') or {}
+        files = c.get('files') or []
+        log.write(Text(""))
+        summary = Text()
+        summary.append(f"{len(files)} files changed", style="bold #cdd6f4")
+        summary.append(f"  +{st.get('additions', 0)}", style="#a6e3a1")
+        summary.append(f"  -{st.get('deletions', 0)}", style="#f38ba8")
+        log.write(summary)
+        log.write(Text(""))
+        for f in files:
+            if f.get('new_file'):
+                badge, style = "A", "bold #a6e3a1"
+            elif f.get('deleted_file'):
+                badge, style = "D", "bold #f38ba8"
+            elif f.get('renamed_file'):
+                badge, style = "R", "bold #f9e2af"
+            else:
+                badge, style = "M", "bold #89b4fa"
+            line = Text()
+            line.append(f"  {badge}  ", style=style)
+            line.append(f.get('path') or '', style="#cdd6f4")
+            log.write(line)
+
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+        except Exception:
+            pass
+        self._refresh_status()
+
+    def _commit_url(self):
+        c = self.commit or {}
+        return c.get('web_url') or f"{self.api.config.gitlab_url.rstrip('/')}/{self.project_path}/-/commit/{self.sha}"
+
+    async def action_back(self) -> None:
+        self.app.pop_screen()
+
+    async def action_refresh(self) -> None:
+        await self._show_loading("loading commit...")
+        try:
+            await self.load_commit()
+        finally:
+            self._clear_loading()
+
+    async def action_browser(self) -> None:
+        webbrowser.open(self._commit_url())
+
+    async def action_yank(self) -> None:
+        if copy_to_clipboard(self._commit_url()):
+            self.notify("Copied commit URL", timeout=2)
+
+    async def action_pipeline(self) -> None:
+        try:
+            pipe = await asyncio.to_thread(self.api.get_commit_pipeline, self.project_path, self.sha)
+        except Exception as e:
+            self.notify(f"Pipeline lookup failed: {e}", severity="error", timeout=4)
+            return
+        if not pipe:
+            self.notify("No pipeline for this commit", severity="warning", timeout=3)
+            return
+        self.api.set_project(self.project_path)
+        self.app.push_screen(JobListScreen(self.api, pipe))
 
 
 class ConfirmModal(ModalScreen[bool]):
