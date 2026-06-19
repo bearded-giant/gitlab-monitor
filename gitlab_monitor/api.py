@@ -767,6 +767,21 @@ class GitLabAPI:
             'files': files,
         }
 
+    def list_recent_pipelines(self, project_path, ref=None, since_days=None, limit=20):
+        project = self.gl.projects.get(project_path)
+        ref = ref or getattr(project, 'default_branch', '') or ''
+        params = {'per_page': limit, 'order_by': 'id', 'sort': 'desc'}
+        if ref:
+            params['ref'] = ref
+        if since_days is not None:
+            since = datetime.now(timezone.utc) - timedelta(days=since_days)
+            params['updated_after'] = since.isoformat().replace('+00:00', 'Z')
+        try:
+            pipelines = project.pipelines.list(**params)
+            return [self._pipeline_to_dict(p, project_path=project_path) for p in pipelines]
+        except Exception:
+            return []
+
     def get_commit_pipeline(self, project_path, sha):
         if not sha:
             return None
