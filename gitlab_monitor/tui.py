@@ -446,8 +446,9 @@ class ProjectSelectScreen(ScreenBase):
             pass
         try:
             last = self.api.config.get_last_view() or {}
-            if last.get('type') != 'pipelines':
-                self.api.config.save_last_view('pipelines')
+            default_view = 'pipelines' if self.target == 'pipelines' else 'projects'
+            if last.get('type') not in ('hub', 'tags', default_view):
+                self.api.config.save_last_view(default_view)
         except Exception:
             pass
 
@@ -3763,6 +3764,7 @@ class TagListScreen(ScreenBase):
             pass
         self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
+        self.api.config.save_last_view('tags', project=self.project_path)
 
     async def load_tags(self) -> None:
         try:
@@ -3937,49 +3939,96 @@ class TagListScreen(ScreenBase):
 
 class ProjectHubScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "b": "browser", "y": "yank", "m": "open_modules", "tab": "open_modules"}
+    # tab intentionally unmapped -> native focus cycling between the panel tables
+    KEY_MAP = {
+        "q": "back", "r": "refresh", "b": "browser", "y": "yank",
+        "t": "toggle_window", "m": "open_modules",
+        "right_square_bracket": "next_panel", "left_square_bracket": "prev_panel",
+        "C": "commits_full", "M": "mrs_full", "P": "pipelines_full", "T": "tags_full",
+    }
 
-    HUB_ROWS = [
-        ("commits", "Commits", "default-branch commits (1d/3d/7d)"),
-        ("mrs", "Merge Requests", "open / merged MRs, any author"),
-        ("tags", "Tags", "tags + create/push"),
-        ("pipelines", "Pipelines", "project pipelines"),
-    ]
+    PANEL_IDS = ["hub-commits", "hub-mrs", "hub-pipelines", "hub-tags"]
+
+    PANEL_ROWS = 8
+    TAG_ROWS = 6
 
     def __init__(self, api: GitLabAPI, project_path: str):
         super().__init__()
         self.api = api
         self.project_path = project_path
+        self.window_days = DEFAULT_COMMIT_WINDOW_DAYS
         self.default_branch = ''
         self.last_activity = ''
-        self._summaries = {}
+        self._loaded = False
+        self._commits_all = []
+        self._mrs_all = []
+        self._pipes_all = []
+        self._tags_all = []
+        self._commits_shown = []
+        self._mrs_shown = []
+        self._pipes_shown = []
+        self._tags_shown = []
 
     def _info_pairs(self):
-        return [
+        pairs = [
             ("GitLab", self.api.config.gitlab_url),
             ("Project", self.project_path),
             ("Default", self.default_branch or "—"),
             ("Active", format_age(self.last_activity) if self.last_activity else "—"),
         ]
+        if self._loaded:
+            pairs += [
+                ("Commits", f"{len(self._commits_all)} · {self.window_days}d"),
+                ("MRs", f"{len(self._mrs_all)} open"),
+                ("Tags", f"latest {self._tags_all[0]['name']}" if self._tags_all else "none"),
+                ("Pipeline", self._pipes_all[0]['status'] if self._pipes_all else "none"),
+            ]
+        return pairs
 
     def _keys(self):
         return [
-            [("enter", "open"),    ("r", "refresh")],
-            [("b", "browser"),     ("y", "copy url")],
-            [("tab", "modules"),   ("q", "back")],
+            [("[ ]", "section"), ("enter", "open"),     ("t", f"window:{self.window_days}d")],
+            [("C", "commits"),   ("M", "MRs"),          ("P", "pipelines")],
+            [("T", "tags"),      ("b", "browser"),      ("y", "copy url")],
+            [("r", "refresh"),   ("m", "modules"),      ("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
-        yield DataTable(id="hub-table")
+        yield ScrollableContainer(
+            Horizontal(
+                Container(
+                    Static("Commits", id="hub-commits-title", classes="hub-panel-title"),
+                    DataTable(id="hub-commits"),
+                    classes="hub-panel",
+                ),
+                Container(
+                    Static("Merge Requests", id="hub-mrs-title", classes="hub-panel-title"),
+                    DataTable(id="hub-mrs"),
+                    classes="hub-panel",
+                ),
+                id="hub-top",
+            ),
+            Container(
+                Static("Pipelines", id="hub-pipelines-title", classes="hub-panel-title"),
+                DataTable(id="hub-pipelines"),
+                classes="hub-panel",
+            ),
+            Container(
+                Static("Tags", id="hub-tags-title", classes="hub-panel-title"),
+                DataTable(id="hub-tags"),
+                classes="hub-panel",
+            ),
+            id="hub-body",
+        )
         yield StatusBar(self._status_text(), id="statusbar")
 
     def _breadcrumb(self):
         return _breadcrumb_text([self.project_path or "Project", "Hub"])
 
     def _status_text(self):
-        return _status_line([("select", "a section")])
+        return _status_line([("tab", "panel"), ("enter", "open"), ("t", "window")])
 
     def _refresh_status(self) -> None:
         try:
@@ -3989,98 +4038,282 @@ class ProjectHubScreen(ScreenBase):
             pass
 
     async def on_mount(self) -> None:
-        table = self.query_one("#hub-table", DataTable)
-        table.add_columns("Section", "Summary")
-        table.cursor_type = "row"
-        self._render_rows()
-        table.focus()
-        self.call_after_refresh(lambda: asyncio.create_task(self._load_meta()))
-
-    def _render_rows(self) -> None:
-        table = self.query_one("#hub-table", DataTable)
-        prev = table.cursor_row
-        table.clear()
-        for key, label, hint in self.HUB_ROWS:
-            summary = self._summaries.get(key)
-            cell = Text(summary, style="#a6e3a1") if summary else Text(hint, style="dim #a6adc8")
-            table.add_row(Text(label, style="bold #cdd6f4"), cell)
-        if prev is not None:
-            table.move_cursor(row=min(prev, len(self.HUB_ROWS) - 1))
-
-    async def _load_meta(self) -> None:
+        for tid, cols in (
+            ("#hub-commits", ("Author", "Message", "Pipe")),
+            ("#hub-mrs", ("MR", "Title", "State")),
+            ("#hub-pipelines", ("Status", "Ref", "Age")),
+            ("#hub-tags", ("Tag", "Date", "Commit")),
+        ):
+            t = self.query_one(tid, DataTable)
+            t.add_columns(*cols)
+            t.cursor_type = "row"
+        self._apply_layout()
+        self._user_loading_label = "loading hub..."
         try:
-            self.default_branch = await asyncio.to_thread(self.api.get_default_branch, self.project_path)
-        except Exception:
-            self.default_branch = ''
-        try:
-            meta = await asyncio.to_thread(self.api.get_project_meta, self.project_path)
-            self.last_activity = (meta or {}).get('last_activity', '') or ''
+            self.query_one("#statusbar", StatusBar).set_text(_loading_indicator(self._user_loading_label))
         except Exception:
             pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
+        try:
+            await self._load()
+        finally:
+            self._clear_loading()
+        try:
+            self.query_one("#hub-commits", DataTable).focus()
+        except Exception:
+            pass
+        self.api.config.save_last_view('hub', project=self.project_path)
+
+    def _apply_layout(self) -> None:
+        try:
+            narrow = self.size.width < 100
+            self.query_one("#hub-top").set_class(narrow, "stacked")
+        except Exception:
+            pass
+
+    def on_resize(self, event) -> None:
+        self._apply_layout()
+
+    async def _load(self) -> None:
+        if not self.default_branch:
+            try:
+                self.default_branch = await asyncio.to_thread(self.api.get_default_branch, self.project_path)
+            except Exception:
+                self.default_branch = ''
+        w = self.window_days
+        ref = self.default_branch or None
+        commits, mrs, pipes, tags, meta = await asyncio.gather(
+            asyncio.to_thread(self.api.list_commits, self.project_path, ref, w, 100),
+            asyncio.to_thread(self.api.get_project_merge_requests, self.project_path, 'opened', 100),
+            asyncio.to_thread(self.api.list_recent_pipelines, self.project_path, ref, w, 20),
+            asyncio.to_thread(self.api.list_tags, self.project_path, self.TAG_ROWS),
+            asyncio.to_thread(self.api.get_project_meta, self.project_path),
+            return_exceptions=True,
+        )
+        self._commits_all = commits if isinstance(commits, list) else []
+        self._mrs_all = mrs if isinstance(mrs, list) else []
+        self._pipes_all = pipes if isinstance(pipes, list) else []
+        self._tags_all = tags if isinstance(tags, list) else []
+        if isinstance(meta, dict):
+            self.last_activity = meta.get('last_activity', '') or ''
+        self._commits_shown = self._commits_all[:self.PANEL_ROWS]
+        self._mrs_shown = self._mrs_all[:self.PANEL_ROWS]
+        self._pipes_shown = self._pipes_all[:self.PANEL_ROWS]
+        self._tags_shown = self._tags_all[:self.TAG_ROWS]
+        await self._backfill_commit_pipes(self._commits_shown)
+        self._loaded = True
+        self._populate()
+
+    async def _backfill_commit_pipes(self, commits) -> None:
+        todo = [c for c in commits if c.get('id')]
+        if not todo:
+            return
+        results = await asyncio.gather(*(
+            asyncio.to_thread(self.api.get_commit_pipeline_status, self.project_path, c['id'])
+            for c in todo
+        ), return_exceptions=True)
+        for c, r in zip(todo, results):
+            if isinstance(r, str):
+                c['pipeline_status'] = r
+
+    def _populate(self) -> None:
+        for fill in (self._fill_commits, self._fill_mrs, self._fill_pipes, self._fill_tags):
+            try:
+                fill()
+            except Exception as e:
+                _dbg(f"hub fill failed {fill.__name__}: {type(e).__name__}: {e}")
         try:
             self.query_one("#header", K9sHeader).set_info(self._info_pairs())
         except Exception:
             pass
-        await self._backfill_summaries()
+        self._set_title("#hub-commits-title", f"Commits · {self.window_days}d")
+        self._set_title("#hub-pipelines-title", f"Pipelines · {self.window_days}d")
+        self._refresh_status()
 
-    async def _backfill_summaries(self) -> None:
-        # ponytail: 4 best-effort counts in one gathered pass; failed cells keep their hint text
-        async def _commits():
-            cs = await asyncio.to_thread(self.api.list_commits, self.project_path, self.default_branch or None, 1, 100)
-            return ('commits', f"{len(cs)} in last 1d")
+    def _set_title(self, tid, text) -> None:
+        try:
+            self.query_one(tid, Static).update(Text(text, style="bold #f9e2af"))
+        except Exception:
+            pass
 
-        async def _mrs():
-            ms = await asyncio.to_thread(self.api.get_project_merge_requests, self.project_path, 'opened', 100)
-            return ('mrs', f"{len(ms)} open")
+    def _fill_commits(self) -> None:
+        t = self.query_one("#hub-commits", DataTable)
+        t.clear()
+        for c in self._commits_shown:
+            author = Text((c.get('author_name') or '')[:14], style="#89b4fa")
+            title = c.get('title') or ''
+            if not title and c.get('message'):
+                title = c['message'].splitlines()[0]
+            pipe = status_badge(c['pipeline_status']) if c.get('pipeline_status') else Text("—", style="dim")
+            t.add_row(author, Text(title[:50], style="#cdd6f4"), pipe)
+        if not self._commits_shown:
+            t.add_row(Text("—", style="dim"), Text("no commits in window", style="dim italic"), Text(""))
 
-        async def _tags():
-            ts = await asyncio.to_thread(self.api.list_tags, self.project_path, 1)
-            return ('tags', f"latest {ts[0]['name']}" if ts else "no tags")
+    def _fill_mrs(self) -> None:
+        t = self.query_one("#hub-mrs", DataTable)
+        t.clear()
+        for m in self._mrs_shown:
+            iid = Text(f"!{m.get('iid')}", style="#f9e2af")
+            title = Text((m.get('title') or '')[:48], style="#cdd6f4")
+            t.add_row(iid, title, _mr_state_badge(m.get('state'), m))
+        if not self._mrs_shown:
+            t.add_row(Text("—", style="dim"), Text("no open MRs", style="dim italic"), Text(""))
 
-        async def _pipes():
-            ps = await asyncio.to_thread(self.api.list_pipelines_for_ref_since, self.project_path, self.default_branch, None, 1)
-            return ('pipelines', ps[0]['status'] if ps else "none")
+    def _fill_pipes(self) -> None:
+        t = self.query_one("#hub-pipelines", DataTable)
+        t.clear()
+        for p in self._pipes_shown:
+            status = status_badge(p.get('status')) if p.get('status') else Text("—", style="dim")
+            ref = Text((p.get('ref') or '')[:26], style="#89b4fa")
+            age = Text(format_age(p['updated_at']) if p.get('updated_at') else '—', style="dim italic")
+            t.add_row(status, ref, age)
+        if not self._pipes_shown:
+            t.add_row(Text("—", style="dim"), Text("no pipelines in window", style="dim italic"), Text(""))
 
-        results = await asyncio.gather(_commits(), _mrs(), _tags(), _pipes(), return_exceptions=True)
-        for r in results:
-            if isinstance(r, tuple):
-                self._summaries[r[0]] = r[1]
-        self._render_rows()
+    def _fill_tags(self) -> None:
+        t = self.query_one("#hub-tags", DataTable)
+        t.clear()
+        for tg in self._tags_shown:
+            name = Text(tg.get('name') or '', style="bold #f9e2af")
+            date = Text(format_age(tg['created_at']) if tg.get('created_at') else '—', style="dim italic")
+            commit = Text(tg.get('short_sha') or '—', style="dim #89b4fa")
+            t.add_row(name, date, commit)
+        if not self._tags_shown:
+            t.add_row(Text("—", style="dim"), Text("no tags", style="dim italic"), Text(""))
 
-    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        idx = event.cursor_row
-        if idx is None or idx < 0 or idx >= len(self.HUB_ROWS):
-            return
-        key = self.HUB_ROWS[idx][0]
-        self.api.set_project(self.project_path)
-        if key == 'commits':
-            self.app.push_screen(CommitListScreen(self.api, self.project_path))
-        elif key == 'mrs':
-            self.app.push_screen(ProjectMergeRequestsScreen(self.api, self.project_path))
-        elif key == 'tags':
-            self.app.push_screen(TagListScreen(self.api, self.project_path))
-        elif key == 'pipelines':
-            age = getattr(self.app, 'default_age_days', DEFAULT_PIPELINE_AGE_DAYS)
-            self.app.push_screen(PipelineListScreen(self.api, age_days=age))
+    def _row(self, lst, idx):
+        if idx is None or idx < 0 or idx >= len(lst):
+            return None
+        return lst[idx]
+
+    def _focused(self):
+        for tid, lst in (
+            ("hub-commits", self._commits_shown),
+            ("hub-mrs", self._mrs_shown),
+            ("hub-pipelines", self._pipes_shown),
+            ("hub-tags", self._tags_shown),
+        ):
+            try:
+                tbl = self.query_one(f"#{tid}", DataTable)
+            except Exception:
+                continue
+            if tbl.has_focus:
+                d = self._row(lst, tbl.cursor_row)
+                if d:
+                    return (tid, d)
+        return None
 
     def _project_url(self):
         return f"{self.api.config.gitlab_url.rstrip('/')}/{self.project_path}"
+
+    def _url_for(self, kind, d):
+        base = self.api.config.gitlab_url.rstrip('/')
+        if kind == "hub-commits":
+            return d.get('web_url') or f"{base}/{self.project_path}/-/commit/{d['id']}"
+        if kind == "hub-mrs":
+            return d.get('web_url') or f"{base}/{self.project_path}/-/merge_requests/{d['iid']}"
+        if kind == "hub-pipelines":
+            return d.get('web_url') or f"{base}/{self.project_path}/-/pipelines/{d['id']}"
+        if kind == "hub-tags":
+            return f"{base}/{self.project_path}/-/tags/{d['name']}"
+        return self._project_url()
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        tid = event.data_table.id
+        row = event.cursor_row
+        self.api.set_project(self.project_path)
+        if tid == "hub-commits":
+            c = self._row(self._commits_shown, row)
+            if c:
+                self.app.push_screen(CommitDetailScreen(self.api, self.project_path, c['id']))
+        elif tid == "hub-mrs":
+            m = self._row(self._mrs_shown, row)
+            if m:
+                self.app.push_screen(MergeRequestDetailScreen(self.api, self.project_path, m['iid']))
+        elif tid == "hub-pipelines":
+            p = self._row(self._pipes_shown, row)
+            if p:
+                self.app.push_screen(JobListScreen(self.api, p))
+        elif tid == "hub-tags":
+            tg = self._row(self._tags_shown, row)
+            if tg:
+                self.app.push_screen(PipelineListScreen(self.api, initial_filter=tg['name']))
 
     async def action_back(self) -> None:
         self.app.pop_screen()
 
     async def action_refresh(self) -> None:
-        await self._load_meta()
+        await self._show_loading("loading hub...")
+        try:
+            await self._load()
+        finally:
+            self._clear_loading()
+
+    async def action_toggle_window(self) -> None:
+        try:
+            idx = COMMIT_WINDOW_CYCLE.index(self.window_days)
+        except ValueError:
+            idx = 0
+        self.window_days = COMMIT_WINDOW_CYCLE[(idx + 1) % len(COMMIT_WINDOW_CYCLE)]
+        await self._show_loading(f"loading hub ({self.window_days}d)...")
+        try:
+            await self._load()
+        finally:
+            self._clear_loading()
 
     async def action_open_modules(self) -> None:
         self.app.open_modules()
 
+    def _cycle_panel(self, delta) -> None:
+        ids = self.PANEL_IDS
+        cur = -1
+        for i, tid in enumerate(ids):
+            try:
+                if self.query_one(f"#{tid}", DataTable).has_focus:
+                    cur = i
+                    break
+            except Exception:
+                pass
+        nxt = (cur + delta) % len(ids) if cur >= 0 else (0 if delta > 0 else len(ids) - 1)
+        try:
+            self.query_one(f"#{ids[nxt]}", DataTable).focus()
+        except Exception:
+            pass
+
+    async def action_next_panel(self) -> None:
+        self._cycle_panel(1)
+
+    async def action_prev_panel(self) -> None:
+        self._cycle_panel(-1)
+
     async def action_browser(self) -> None:
-        webbrowser.open(self._project_url())
+        f = self._focused()
+        webbrowser.open(self._url_for(*f) if f else self._project_url())
 
     async def action_yank(self) -> None:
-        if copy_to_clipboard(self._project_url()):
-            self.notify("Copied project URL", timeout=2)
+        f = self._focused()
+        url = self._url_for(*f) if f else self._project_url()
+        if copy_to_clipboard(url):
+            self.notify("Copied URL", timeout=2)
+
+    async def action_commits_full(self) -> None:
+        self.api.set_project(self.project_path)
+        self.app.push_screen(CommitListScreen(self.api, self.project_path))
+
+    async def action_mrs_full(self) -> None:
+        self.api.set_project(self.project_path)
+        self.app.push_screen(ProjectMergeRequestsScreen(self.api, self.project_path))
+
+    async def action_pipelines_full(self) -> None:
+        self.api.set_project(self.project_path)
+        age = getattr(self.app, 'default_age_days', DEFAULT_PIPELINE_AGE_DAYS)
+        self.app.push_screen(PipelineListScreen(self.api, age_days=age))
+
+    async def action_tags_full(self) -> None:
+        self.api.set_project(self.project_path)
+        self.app.push_screen(TagListScreen(self.api, self.project_path))
 
 
 class CommitListScreen(ScreenBase):
@@ -4403,9 +4636,9 @@ class CommitDetailScreen(ScreenBase):
             self._refresh_status()
             return
         self._fetch_error = None
-        self._render()
+        self._populate()
 
-    def _render(self) -> None:
+    def _populate(self) -> None:
         c = self.commit or {}
         try:
             log = self.query_one("#commit-log", RichLog)
@@ -4816,7 +5049,7 @@ class ModuleModal(ModalScreen[str | None]):
     """Module switcher. Returns selected module id or None on cancel."""
 
     MODULES = [
-        (MODULE_PROJECTS,  "1", "Projects",  "favorites + jump to project pipelines"),
+        (MODULE_PROJECTS,  "1", "Project Hub",  "favorites + commits, MRs, tags, pipelines"),
         (MODULE_MRS,       "2", "MRs",       "my merge requests"),
         (MODULE_PIPELINES, "3", "Pipelines", "my pipelines (across favorites)"),
         (MODULE_TAGS,      "4", "Tags",      "project tags + create/push"),
@@ -5039,6 +5272,40 @@ class PipelineMonitor(App):
     DataTable > .datatable--cursor {
         background: #45475a;
         color: #cdd6f4;
+    }
+
+    #hub-body {
+        height: 1fr;
+        background: #1e1e2e;
+    }
+
+    #hub-top {
+        height: auto;
+        layout: horizontal;
+    }
+
+    #hub-top.stacked {
+        layout: vertical;
+    }
+
+    .hub-panel {
+        width: 1fr;
+        height: 12;
+        margin: 0 1 1 1;
+        border: round #313244;
+    }
+
+    .hub-panel-title {
+        height: 1;
+        background: #181825;
+        color: #f9e2af;
+        text-style: bold;
+        padding: 0 1;
+    }
+
+    .hub-panel DataTable {
+        height: 1fr;
+        background: #1e1e2e;
     }
 
     RichLog {
@@ -5432,6 +5699,30 @@ class PipelineMonitor(App):
                     except Exception:
                         self.notify(f"Could not resume project {proj}", severity="warning", timeout=3)
                 self.switch_screen(_default_home())
+            elif view_type == 'hub':
+                proj = last.get('project')
+                if proj:
+                    try:
+                        await asyncio.to_thread(self.api.set_project, proj)
+                        self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
+                        self.push_screen(ProjectHubScreen(self.api, proj))
+                        return
+                    except Exception:
+                        self.notify(f"Could not resume project {proj}", severity="warning", timeout=3)
+                self.switch_screen(_default_home())
+            elif view_type == 'tags':
+                proj = last.get('project')
+                if proj:
+                    try:
+                        await asyncio.to_thread(self.api.set_project, proj)
+                        self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites, target='tags'))
+                        self.push_screen(TagListScreen(self.api, proj))
+                        return
+                    except Exception:
+                        self.notify(f"Could not resume project {proj}", severity="warning", timeout=3)
+                self.switch_screen(_default_home())
+            elif view_type == 'projects':
+                self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
             else:
                 self.switch_screen(_default_home())
         except Exception:
