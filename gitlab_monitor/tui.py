@@ -61,6 +61,7 @@ from .formatting import (
     _auto_merge_badge,
     _mr_state_color,
     _is_mr_approved,
+    next_minor_version,
     format_activity_strip,
 )
 from .api import GitLabAPI, ACTIVITY_TTL
@@ -351,10 +352,11 @@ class ProjectSelectScreen(ScreenBase):
 
     DEBOUNCE_SECONDS = 0.4
 
-    def __init__(self, api: GitLabAPI, favorites):
+    def __init__(self, api: GitLabAPI, favorites, target='pipelines'):
         super().__init__()
         self.api = api
         self.favorites = favorites
+        self.target = target
         self.projects = []
         self.mode = "fav" if favorites.list() else "all"
         self._search_timer = None
@@ -575,6 +577,9 @@ class ProjectSelectScreen(ScreenBase):
         if idx is not None and idx < len(self.projects):
             project = self.projects[idx]
             self.api.set_project(project['path'])
+            if self.target == 'tags':
+                self.app.push_screen(TagListScreen(self.api, project['path']))
+                return
             age = getattr(self.app, 'default_age_days', DEFAULT_PIPELINE_AGE_DAYS)
             initial_filter = getattr(self.app, 'default_branch_filter', '') or ''
             self.app.push_screen(PipelineListScreen(self.api, age_days=age, initial_filter=initial_filter))
@@ -3653,6 +3658,278 @@ class MRCommitListScreen(ScreenBase):
 
 # -- modals ------------------------------------------------------------------
 
+class TagListScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "create_tag"}
+
+    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+
+    def __init__(self, api: GitLabAPI, project_path: str):
+        super().__init__()
+        self.api = api
+        self.project_path = project_path
+        self.tags = []
+        self.filtered_tags = []
+        self.default_branch = ''
+        self._refresh_timer = None
+        self._refreshing = False
+        self._fetch_error = None
+
+    def _info_pairs(self):
+        total = len(self.tags)
+        shown = len(self.filtered_tags)
+        count = f"{shown}/{total}" if shown != total else str(total)
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Project", self.project_path),
+            ("Default", self.default_branch or "—"),
+            ("Tags", count),
+        ]
+
+    def _keys(self):
+        return [
+            [("/", "filter"),  ("enter", "pipeline"),  ("r", "refresh")],
+            [("t", "create+push tag"),  ("b", "browser"),  ("y", "copy url")],
+            [("q", "back")],
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield Container(
+            Input(placeholder="/  filter tags...", id="tag-filter"),
+            id="filter-bar",
+        )
+        yield DataTable(id="tag-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text([self.project_path or "Project", "Tags"])
+
+    def _status_text(self):
+        if self._fetch_error:
+            return _status_line([("⚠ fetch failed", f"{self._fetch_error} — retrying")])
+        total = len(self.tags)
+        shown = len(self.filtered_tags)
+        text_filter = ""
+        try:
+            text_filter = self.query_one("#tag-filter", Input).value.strip()
+        except Exception:
+            pass
+        count = f"{shown}/{total} tags" if shown != total else f"{total} tags"
+        parts = [count]
+        if text_filter:
+            parts.append(("filter", text_filter))
+        return _status_line(parts)
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
+            sb.set_right(_auto_refresh_indicator(
+                self.REFRESH_INTERVAL,
+                active=self._refresh_timer is not None,
+                refreshing=self._refreshing,
+                loading_label=self._user_loading_label,
+            ))
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#tag-table", DataTable)
+        table.add_columns("Tag", "Date", "Commit", "Pipeline", "Description")
+        table.cursor_type = "row"
+        self._user_loading_label = "loading tags..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
+        try:
+            await self.load_tags()
+        finally:
+            self._clear_loading()
+        try:
+            self.query_one("#tag-table", DataTable).focus()
+        except Exception:
+            pass
+        self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
+        self._refresh_status()
+
+    async def load_tags(self) -> None:
+        try:
+            self.tags = await asyncio.to_thread(self.api.list_tags, self.project_path)
+        except Exception as e:
+            self._fetch_error = f"{type(e).__name__}"
+            _dbg(f"tag load failed: {type(e).__name__}: {e}")
+            self._refresh_status()
+            return
+        self._fetch_error = None
+        if not self.default_branch:
+            try:
+                self.default_branch = await asyncio.to_thread(self.api.get_default_branch, self.project_path)
+            except Exception:
+                self.default_branch = ''
+        await self._backfill_tag_pipelines(self.tags)
+        self._apply_filter()
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+        except Exception:
+            pass
+
+    async def _backfill_tag_pipelines(self, tags) -> None:
+        # ponytail: 1 pipeline-status call per tag; bounded by page size (50). cache if it ever bites.
+        todo = [t for t in tags if t.get('target')]
+        if not todo:
+            return
+        results = await asyncio.gather(*(
+            asyncio.to_thread(self.api.get_commit_pipeline_status, self.project_path, t['target'])
+            for t in todo
+        ), return_exceptions=True)
+        for t, r in zip(todo, results):
+            if isinstance(r, str):
+                t['pipeline_status'] = r
+
+    async def _safe_refresh(self) -> None:
+        if self._refreshing:
+            return
+        self._refreshing = True
+        self._refresh_status()
+        try:
+            await self.load_tags()
+        except Exception:
+            pass
+        finally:
+            self._refreshing = False
+            self._refresh_status()
+
+    def on_unmount(self) -> None:
+        if self._refresh_timer:
+            self._refresh_timer.stop()
+
+    def _apply_filter(self) -> None:
+        try:
+            q = self.query_one("#tag-filter", Input).value.strip().lower()
+        except Exception:
+            q = ""
+        if not q:
+            self.filtered_tags = list(self.tags)
+        else:
+            self.filtered_tags = [
+                t for t in self.tags
+                if q in (t['name'] or '').lower()
+                or q in (t['message'] or '').lower()
+                or q in (t['short_sha'] or '').lower()
+            ]
+        self._update_table()
+        self._refresh_status()
+
+    def _update_table(self) -> None:
+        table = self.query_one("#tag-table", DataTable)
+        prev = table.cursor_row
+        table.clear()
+        for t in self.filtered_tags:
+            name = Text(t['name'] or '', style="bold #f9e2af")
+            date = format_age(t['created_at']) if t.get('created_at') else '—'
+            commit = Text(t['short_sha'] or '—', style="dim #89b4fa")
+            pipeline = status_badge(t['pipeline_status']) if t.get('pipeline_status') else Text("—", style="dim")
+            desc = (t['message'] or '').splitlines()[0] if t.get('message') else ''
+            table.add_row(
+                name,
+                Text(date, style="dim italic"),
+                commit,
+                pipeline,
+                Text(desc[:60], style="#a6adc8"),
+            )
+        if prev is not None and self.filtered_tags:
+            table.move_cursor(row=min(prev, len(self.filtered_tags) - 1))
+
+    def _tag_at_row(self, idx):
+        if idx is None or idx < 0 or idx >= len(self.filtered_tags):
+            return None
+        return self.filtered_tags[idx]
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "tag-filter":
+            self._apply_filter()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "tag-filter":
+            self._apply_filter()
+            self.query_one("#tag-table", DataTable).focus()
+
+    async def action_search(self) -> None:
+        self.query_one("#tag-filter", Input).focus()
+
+    async def action_back(self) -> None:
+        self.app.pop_screen()
+
+    async def action_refresh(self) -> None:
+        if self._refreshing:
+            return
+        await self._show_loading("loading tags...")
+        try:
+            await self.load_tags()
+        finally:
+            self._clear_loading()
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        t = self._tag_at_row(event.cursor_row)
+        if t is None:
+            return
+        self.api.set_project(self.project_path)
+        self.app.push_screen(PipelineListScreen(self.api, initial_filter=t['name']))
+
+    async def action_browser(self) -> None:
+        t = self._tag_at_row(self.query_one("#tag-table", DataTable).cursor_row)
+        if t is None:
+            return
+        url = f"{self.api.config.gitlab_url.rstrip('/')}/{self.project_path}/-/tags/{t['name']}"
+        webbrowser.open(url)
+
+    async def action_yank(self) -> None:
+        t = self._tag_at_row(self.query_one("#tag-table", DataTable).cursor_row)
+        if t is None:
+            return
+        url = f"{self.api.config.gitlab_url.rstrip('/')}/{self.project_path}/-/tags/{t['name']}"
+        if copy_to_clipboard(url):
+            self.notify(f"Copied tag {t['name']} URL", timeout=2)
+
+    async def action_create_tag(self) -> None:
+        recent = [t['name'] for t in self.tags[:3] if t.get('name')]
+        latest = recent[0] if recent else ''
+        suggested = next_minor_version(latest)
+        hint = ("recent: " + ", ".join(recent)) if recent else "no existing tags"
+        ref = self.default_branch or 'HEAD'
+
+        def _after(name):
+            if not name:
+                return
+            def _confirm(ok):
+                if ok:
+                    asyncio.ensure_future(self._do_create_tag(name, ref))
+            self.app.push_screen(
+                ConfirmModal(f"Create + push tag {name}?", detail=f"on {ref} · {self.project_path}"),
+                _confirm,
+            )
+
+        self.app.push_screen(
+            PathInputModal(f"New tag · {hint}", placeholder="0.26.0", initial=suggested),
+            _after,
+        )
+
+    async def _do_create_tag(self, name, ref) -> None:
+        try:
+            await asyncio.to_thread(self.api.create_tag, self.project_path, name, ref)
+            self.notify(f"Tag {name} created + pushed on {ref}", timeout=3)
+            await self.load_tags()
+        except Exception as e:
+            self.notify(f"Tag create failed: {e}", severity="error", timeout=5)
+
+
 class ConfirmModal(ModalScreen[bool]):
     """y/N confirmation modal. Default N — only y/Y returns True."""
 
@@ -3970,6 +4247,7 @@ class MRPickerModal(ModalScreen[tuple[str, int] | None]):
 MODULE_PROJECTS = "projects"
 MODULE_MRS = "mrs"
 MODULE_PIPELINES = "pipelines"
+MODULE_TAGS = "tags"
 
 
 class ModuleModal(ModalScreen[str | None]):
@@ -3979,12 +4257,14 @@ class ModuleModal(ModalScreen[str | None]):
         (MODULE_PROJECTS,  "1", "Projects",  "favorites + jump to project pipelines"),
         (MODULE_MRS,       "2", "MRs",       "my merge requests"),
         (MODULE_PIPELINES, "3", "Pipelines", "my pipelines (across favorites)"),
+        (MODULE_TAGS,      "4", "Tags",      "project tags + create/push"),
     ]
 
     BINDINGS = [
         Binding("1", "pick_index('0')", show=False),
         Binding("2", "pick_index('1')", show=False),
         Binding("3", "pick_index('2')", show=False),
+        Binding("4", "pick_index('3')", show=False),
         Binding("k", "cursor_up", show=False),
         Binding("j", "cursor_down", show=False),
         Binding("escape", "cancel", show=False),
@@ -3999,7 +4279,7 @@ class ModuleModal(ModalScreen[str | None]):
         title = Text()
         title.append("Modules", style="bold #cdd6f4")
         footer = Text()
-        footer.append("↑↓/jk move · enter select · 1-3 jump · esc/q/tab close", style="dim #6c7086")
+        footer.append("↑↓/jk move · enter select · 1-4 jump · esc/q/tab close", style="dim #6c7086")
         options = []
         for mod_id, num, name, desc in self.MODULES:
             row = Text()
@@ -4499,6 +4779,8 @@ class PipelineMonitor(App):
                 self.switch_screen(MyMergeRequestsScreen(self.api))
             elif result == MODULE_PIPELINES:
                 self.switch_screen(MyPipelineListScreen(self.api, age_days=self.default_age_days))
+            elif result == MODULE_TAGS:
+                self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites, target='tags'))
 
         self.push_screen(ModuleModal(), _after)
 

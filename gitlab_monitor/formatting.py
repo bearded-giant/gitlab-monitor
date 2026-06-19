@@ -2,6 +2,7 @@
 # https://github.com/bearded-giant/gitlab-tools
 # Licensed under Apache License 2.0
 
+import re
 import subprocess
 from datetime import datetime
 from rich.text import Text
@@ -369,3 +370,16 @@ def _mr_state_color(state, m=None):
         'locked': '#6c7086',
     }
     return colors.get(state, '#cdd6f4')
+
+
+_VER_RE = re.compile(r'^(?P<prefix>[A-Za-z]*)(?P<major>\d+)\.(?P<minor>\d+)(?:\.\d+)?')
+
+
+def next_minor_version(latest):
+    # suggest the next minor (bump minor, zero patch); fall back to latest verbatim if unparseable
+    if not latest:
+        return ''
+    m = _VER_RE.match(latest.strip())
+    if not m:
+        return latest
+    return f"{m.group('prefix')}{int(m.group('major'))}.{int(m.group('minor')) + 1}.0"
