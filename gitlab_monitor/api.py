@@ -696,3 +696,93 @@ class GitLabAPI:
             payload['message'] = message
         project.tags.create(payload)
         return True
+
+    def list_commits(self, project_path, ref=None, since_days=None, limit=50):
+        project = self.gl.projects.get(project_path)
+        ref = ref or getattr(project, 'default_branch', '') or ''
+        params = {'per_page': limit}
+        if ref:
+            params['ref_name'] = ref
+        if since_days is not None:
+            since = datetime.now(timezone.utc) - timedelta(days=since_days)
+            params['since'] = since.isoformat().replace('+00:00', 'Z')
+        commits = project.commits.list(**params)
+        results = []
+        for c in commits:
+            msg = (getattr(c, 'message', '') or '').strip()
+            cid = getattr(c, 'id', '') or ''
+            results.append({
+                'id': cid,
+                'short_id': getattr(c, 'short_id', '') or cid[:8],
+                'title': getattr(c, 'title', '') or (msg.splitlines()[0] if msg else ''),
+                'message': msg,
+                'author_name': getattr(c, 'author_name', '') or '',
+                'authored_date': getattr(c, 'authored_date', '') or getattr(c, 'created_at', '') or '',
+                'web_url': getattr(c, 'web_url', '') or '',
+                'pipeline_status': '',
+            })
+        return results
+
+    def get_commit(self, project_path, sha):
+        project = self.gl.projects.get(project_path)
+        c = project.commits.get(sha)
+        msg = (getattr(c, 'message', '') or '').strip()
+        stats = getattr(c, 'stats', None)
+        stats = stats if isinstance(stats, dict) else {}
+        lp = getattr(c, 'last_pipeline', None)
+        if isinstance(lp, dict):
+            pstatus = lp.get('status', '') or ''
+        elif lp is not None:
+            pstatus = getattr(lp, 'status', '') or ''
+        else:
+            pstatus = ''
+        files = []
+        try:
+            for d in c.diff(all=True):
+                files.append({
+                    'path': d.get('new_path') or d.get('old_path') or '',
+                    'new_file': bool(d.get('new_file')),
+                    'deleted_file': bool(d.get('deleted_file')),
+                    'renamed_file': bool(d.get('renamed_file')),
+                })
+        except Exception:
+            pass
+        cid = getattr(c, 'id', '') or ''
+        return {
+            'id': cid,
+            'short_id': getattr(c, 'short_id', '') or cid[:8],
+            'title': getattr(c, 'title', '') or '',
+            'message': msg,
+            'author_name': getattr(c, 'author_name', '') or '',
+            'author_email': getattr(c, 'author_email', '') or '',
+            'authored_date': getattr(c, 'authored_date', '') or '',
+            'committed_date': getattr(c, 'committed_date', '') or '',
+            'web_url': getattr(c, 'web_url', '') or '',
+            'pipeline_status': pstatus,
+            'stats': {
+                'additions': stats.get('additions', 0),
+                'deletions': stats.get('deletions', 0),
+                'total': stats.get('total', 0),
+            },
+            'files': files,
+        }
+
+    def get_commit_pipeline(self, project_path, sha):
+        if not sha:
+            return None
+        project = self.gl.projects.get(project_path)
+        lp = getattr(project.commits.get(sha), 'last_pipeline', None)
+        if not lp:
+            return None
+        if isinstance(lp, dict):
+            d = lp
+        else:
+            d = {k: getattr(lp, k, None) for k in ('id', 'status', 'ref', 'web_url', 'sha')}
+        return {
+            'id': d.get('id'),
+            'status': d.get('status', 'unknown') or 'unknown',
+            'ref': d.get('ref', '') or '',
+            'sha': (d.get('sha') or sha)[:40],
+            'web_url': d.get('web_url', '') or '',
+            'project_path': project_path,
+        }
