@@ -634,12 +634,17 @@ class GitLabAPI:
     def set_merge_when_pipeline_succeeds(self, project_path, iid, enable):
         project = self.gl.projects.get(project_path)
         mr = project.mergerequests.get(iid)
-        if enable:
-            # gitlab sets MWPS only when a pipeline is active; otherwise this merges now
-            mr.merge(merge_when_pipeline_succeeds=True)
-        else:
+        if not enable:
             mr.cancel_merge_when_pipeline_succeeds()
-        return enable
+            return False
+        # gitlab parks MWPS only while a pipeline is unfinished; on a finished/absent
+        # pipeline mr.merge() falls through to an immediate merge attempt — gate it out
+        hp = getattr(mr, 'head_pipeline', None)
+        status = hp.get('status') if isinstance(hp, dict) else getattr(hp, 'status', None)
+        if not status or status in ('success', 'failed', 'canceled', 'skipped'):
+            raise RuntimeError(f"no running pipeline (status: {status or 'none'}) — auto-merge needs an active pipeline")
+        mr.merge(merge_when_pipeline_succeeds=True)
+        return True
 
     def merge_mr(self, project_path, iid, squash=True, delete_source_branch=True):
         project = self.gl.projects.get(project_path)
