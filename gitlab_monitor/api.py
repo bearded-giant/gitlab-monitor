@@ -660,3 +660,34 @@ class GitLabAPI:
         project = self.gl.projects.get(project_path)
         mr = project.mergerequests.get(iid)
         return mr.notes.create({'body': body})
+
+    def get_default_branch(self, project_path):
+        project = self.gl.projects.get(project_path)
+        return getattr(project, 'default_branch', '') or ''
+
+    def list_tags(self, project_path, limit=50):
+        project = self.gl.projects.get(project_path)
+        tags = project.tags.list(per_page=limit, order_by='updated', sort='desc')
+        results = []
+        for t in tags:
+            commit = getattr(t, 'commit', None) or {}
+            target = getattr(t, 'target', '') or (commit.get('id') if isinstance(commit, dict) else '') or ''
+            created = commit.get('created_at') if isinstance(commit, dict) else ''
+            results.append({
+                'name': getattr(t, 'name', '') or '',
+                'target': target,
+                'short_sha': target[:8],
+                'created_at': created or '',
+                'message': (getattr(t, 'message', '') or '').strip(),
+                'pipeline_status': '',
+            })
+        return results
+
+    def create_tag(self, project_path, name, ref=None, message=''):
+        project = self.gl.projects.get(project_path)
+        ref = ref or getattr(project, 'default_branch', '') or 'HEAD'
+        payload = {'tag_name': name, 'ref': ref}
+        if message:
+            payload['message'] = message
+        project.tags.create(payload)
+        return True
