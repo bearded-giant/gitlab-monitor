@@ -637,14 +637,43 @@ class GitLabAPI:
         if not enable:
             mr.cancel_merge_when_pipeline_succeeds()
             return False
-        # gitlab parks MWPS only while a pipeline is unfinished; on a finished/absent
-        # pipeline mr.merge() falls through to an immediate merge attempt — gate it out
-        hp = getattr(mr, 'head_pipeline', None)
-        status = hp.get('status') if isinstance(hp, dict) else getattr(hp, 'status', None)
-        if not status or status in ('success', 'failed', 'canceled', 'skipped'):
-            raise RuntimeError(f"no running pipeline (status: {status or 'none'}) — auto-merge needs an active pipeline")
-        mr.merge(merge_when_pipeline_succeeds=True)
+        # REST /merge only knows the legacy pipeline strategy and 422s when the blocker is
+        # approvals/threads with no active pipeline. ask GitLab which auto-merge strategy
+        # this MR actually supports (merge_when_checks_pass etc) and set it over GraphQL.
+        info = self._graphql(
+            'query($p:ID!,$i:String!){project(fullPath:$p){mergeRequest(iid:$i){availableAutoMergeStrategies diffHeadSha}}}',
+            {'p': project_path, 'i': str(iid)},
+        )
+        node = ((info.get('project') or {}).get('mergeRequest')) or {}
+        strategies = node.get('availableAutoMergeStrategies') or []
+        if not strategies:
+            raise RuntimeError("no auto-merge available — nothing pending to wait on (press M to merge)")
+        strategy = strategies[0].upper()
+        if not re.fullmatch(r'[A-Z_]+', strategy):
+            raise RuntimeError(f"unexpected auto-merge strategy: {strategies[0]}")
+        res = self._graphql(
+            'mutation($p:ID!,$i:String!,$sha:String!){mergeRequestAccept(input:{'
+            f'projectPath:$p,iid:$i,sha:$sha,strategy:{strategy}'
+            '}){mergeRequest{autoMergeEnabled} errors}}',
+            {'p': project_path, 'i': str(iid), 'sha': node.get('diffHeadSha')},
+        )
+        accept = res.get('mergeRequestAccept') or {}
+        if accept.get('errors'):
+            raise RuntimeError(accept['errors'][0])
         return True
+
+    def _graphql(self, query, variables):
+        headers = {'PRIVATE-TOKEN': self.gl.private_token} if getattr(self.gl, 'private_token', None) else None
+        resp = self.gl.session.post(
+            f"{self.config.gitlab_url.rstrip('/')}/api/graphql",
+            json={'query': query, 'variables': variables},
+            headers=headers,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get('errors'):
+            raise RuntimeError(payload['errors'][0].get('message', 'GraphQL error'))
+        return payload.get('data') or {}
 
     def merge_mr(self, project_path, iid, squash=True, delete_source_branch=True):
         project = self.gl.projects.get(project_path)

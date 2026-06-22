@@ -274,19 +274,7 @@ class ScreenBase(Screen):
             except Exception as e:
                 self.notify(f"Auto-merge toggle failed: {e}", severity="error", timeout=4)
 
-        if enable:
-            def _after(confirmed):
-                if confirmed:
-                    asyncio.ensure_future(_apply())
-            self.app.push_screen(
-                ConfirmModal(
-                    f"Enable auto-merge (merge when pipeline succeeds) for !{iid}?",
-                    detail=(m.get('title') or '')[:60],
-                ),
-                _after,
-            )
-        else:
-            asyncio.ensure_future(_apply())
+        asyncio.ensure_future(_apply())
 
     def _merge_mr(self, m, on_done) -> None:
         if not m:
@@ -374,7 +362,12 @@ class ProjectSelectScreen(ScreenBase):
         yield DataTable(id="project-table")
         yield StatusBar(self._status_text(), id="statusbar")
 
+    MODULE_LABELS = {'tags': 'Tags', 'pipelines': 'Pipelines'}
+
     def _breadcrumb(self):
+        module = self.MODULE_LABELS.get(self.target)
+        if module:
+            return _breadcrumb_text([(module, "bold #f9e2af"), "select a project"])
         return _breadcrumb_text(["Projects"])
 
     def _status_text(self):
@@ -404,11 +397,15 @@ class ProjectSelectScreen(ScreenBase):
 
     def _info_pairs(self):
         mode_label = "Favorites only" if self.mode == "fav" else "All projects"
-        return [
+        pairs = [
             ("GitLab", self.api.config.gitlab_url),
             ("View", mode_label),
             ("Favorites", str(len(self.favorites.list()))),
         ]
+        module = self.MODULE_LABELS.get(self.target)
+        if module:
+            pairs.insert(0, ("Module", module))
+        return pairs
 
     def _keys(self):
         toggle_label = "show all" if self.mode == "fav" else "favorites only"
