@@ -717,6 +717,26 @@ class GitLabAPI:
             })
         return results
 
+    def run_tag_pipeline(self, project_path, ref):
+        project = self.gl.projects.get(project_path)
+        p = project.pipelines.create({'ref': ref})
+        return {'id': p.id, 'status': getattr(p, 'status', None), 'web_url': getattr(p, 'web_url', '')}
+
+    def revert_tag_commit(self, project_path, tag_name, sha, target_branch=None):
+        project = self.gl.projects.get(project_path)
+        target = target_branch or getattr(project, 'default_branch', '') or 'main'
+        branch = f"revert-{tag_name}"
+        project.branches.create({'branch': branch, 'ref': target})
+        project.commits.get(sha).revert(branch=branch)
+        mr = project.mergerequests.create({
+            'source_branch': branch,
+            'target_branch': target,
+            'title': f'Revert "{tag_name}"',
+            'description': f'Reverts tag `{tag_name}` ({sha[:8]}) on `{target}`.',
+            'remove_source_branch': True,
+        })
+        return {'iid': mr.iid, 'web_url': getattr(mr, 'web_url', ''), 'source_branch': branch, 'target_branch': target}
+
     def create_tag(self, project_path, name, ref=None, message=''):
         project = self.gl.projects.get(project_path)
         ref = ref or getattr(project, 'default_branch', '') or 'HEAD'

@@ -3674,7 +3674,7 @@ class MRCommitListScreen(ScreenBase):
 
 class TagListScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "create_tag"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "create_tag", "R": "rollback", "V": "revert_commit"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -3703,8 +3703,8 @@ class TagListScreen(ScreenBase):
     def _keys(self):
         return [
             [("/", "filter"),  ("enter", "pipeline"),  ("r", "refresh")],
-            [("t", "create+push tag"),  ("b", "browser"),  ("y", "copy url")],
-            [("q", "back")],
+            [("t", "create+push tag"),  ("R", "rollback/re-run"),  ("V", "revert+MR")],
+            [("b", "browser"),  ("y", "copy url"),  ("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -3943,6 +3943,66 @@ class TagListScreen(ScreenBase):
             await self.load_tags()
         except Exception as e:
             self.notify(f"Tag create failed: {e}", severity="error", timeout=5)
+
+    async def action_rollback(self) -> None:
+        t = self._tag_at_row(self.query_one("#tag-table", DataTable).cursor_row)
+        if t is None:
+            return
+        name = t['name']
+
+        def _confirm(ok):
+            if ok:
+                asyncio.ensure_future(self._do_run_pipeline(name))
+
+        self.app.push_screen(
+            ConfirmModal(
+                f"Run pipeline for tag {name}?",
+                detail=f"deploys {name} · {t['short_sha'] or '—'} · {self.project_path}",
+            ),
+            _confirm,
+        )
+
+    async def _do_run_pipeline(self, name) -> None:
+        try:
+            p = await asyncio.to_thread(self.api.run_tag_pipeline, self.project_path, name)
+            self.notify(f"Pipeline #{p['id']} started for {name}", timeout=4)
+            await self.load_tags()
+        except Exception as e:
+            self.notify(f"Pipeline start failed: {e}", severity="error", timeout=5)
+
+    async def action_revert_commit(self) -> None:
+        t = self._tag_at_row(self.query_one("#tag-table", DataTable).cursor_row)
+        if t is None:
+            return
+        if not t.get('target'):
+            self.notify("Tag has no target commit — cannot revert", severity="warning", timeout=3)
+            return
+        name = t['name']
+        sha = t['target']
+        target = self.default_branch or 'default branch'
+
+        def _confirm(ok):
+            if ok:
+                asyncio.ensure_future(self._do_revert_commit(name, sha))
+
+        self.app.push_screen(
+            ConfirmModal(
+                f"Revert tag {name}?",
+                detail=f"opens MR reverting {t['short_sha'] or sha[:8]} into {target}",
+            ),
+            _confirm,
+        )
+
+    async def _do_revert_commit(self, name, sha) -> None:
+        try:
+            mr = await asyncio.to_thread(
+                self.api.revert_tag_commit, self.project_path, name, sha, self.default_branch or None
+            )
+            self.notify(f"Revert MR !{mr['iid']} opened → {mr['target_branch']}", timeout=5)
+            if mr.get('web_url'):
+                webbrowser.open(mr['web_url'])
+        except Exception as e:
+            self.notify(f"Revert failed: {e}", severity="error", timeout=6)
 
 
 class ProjectHubScreen(ScreenBase):
