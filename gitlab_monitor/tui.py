@@ -233,6 +233,11 @@ class ScreenBase(Screen):
         return False
 
     def on_key(self, event) -> None:
+        if event.key == "tab":
+            event.prevent_default()
+            event.stop()
+            self.app.open_modules()
+            return
         if self._input_focused():
             if event.key in ("down", "escape"):
                 event.prevent_default()
@@ -240,6 +245,12 @@ class ScreenBase(Screen):
                 for dt in self.query(DataTable):
                     dt.focus()
                     break
+            return
+
+        if event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self.app.exit()
             return
 
         action_name = self.KEY_MAP.get(event.key)
@@ -338,7 +349,7 @@ class LoadingScreen(Screen):
 
 class ProjectSelectScreen(ScreenBase):
 
-    KEY_MAP = {"q": "quit", "r": "refresh", "slash": "search", "s": "star", "a": "toggle_all", "c": "clear_filter", "m": "open_modules", "tab": "open_modules", "g": "goto_mr", "p": "my_pipelines"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "s": "star", "a": "toggle_all", "c": "clear_filter", "m": "open_modules", "tab": "open_modules", "g": "goto_mr", "p": "my_pipelines"}
 
     DEBOUNCE_SECONDS = 0.4
 
@@ -413,7 +424,7 @@ class ProjectSelectScreen(ScreenBase):
             [("tab", "modules"),  ("/", "filter"),     ("enter", "select")],
             [("r", "refresh"),    ("s", "star"),       ("a", toggle_label)],
             [("p", "my pipelines"),("g", "goto MR"),   ("c", "clear")],
-            [("q", "quit")],
+            [("esc", "quit")],
         ]
 
     def _refresh_breadcrumb(self) -> None:
@@ -587,8 +598,8 @@ class ProjectSelectScreen(ScreenBase):
                 return
             self.app.push_screen(ProjectHubScreen(self.api, project['path']))
 
-    async def action_quit(self) -> None:
-        self.app.exit()
+    async def action_back(self) -> None:
+        self.notify("At home — ESC or Ctrl+C to quit", timeout=2)
 
     async def action_open_modules(self) -> None:
         self.app.open_modules()
@@ -1737,7 +1748,7 @@ class MyMergeRequestsScreen(ScreenBase):
             [("r", "refresh"),    ("b", "browser"),             ("y", "copy url")],
             [("p", "pipelines"),  ("s", f"state:{self.state}"), ("g", "goto MR")],
             [("e", "export md"),  ("n", "note"),                ("A", "auto-merge")],
-            [("M", "merge"),      ("q", "quit"),                window_slot],
+            [("M", "merge"),      ("esc", "quit"),              window_slot],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2062,7 +2073,7 @@ class MyMergeRequestsScreen(ScreenBase):
             self.query_one("#mr-table", DataTable).focus()
 
     async def action_back(self) -> None:
-        self.app.exit()
+        self.notify("At home — ESC or Ctrl+C to quit", timeout=2)
 
     async def action_open_modules(self) -> None:
         self.app.open_modules()
@@ -3266,7 +3277,7 @@ class MyPipelineListScreen(ScreenBase):
             [("tab", "modules"), ("/", "filter"),   ("enter", "jobs")],
             [("r", "refresh"),   ("b", "browser"),  ("y", "copy url")],
             [("a", "pick project"), ("t", "age"),   ("c", "clear")],
-            [("q", "back")],
+            [("esc", "quit")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -3449,7 +3460,7 @@ class MyPipelineListScreen(ScreenBase):
         return self._row_to_pipeline[idx]
 
     async def action_back(self) -> None:
-        self.app.exit()
+        self.notify("At home — ESC or Ctrl+C to quit", timeout=2)
 
     async def action_open_modules(self) -> None:
         self.app.open_modules()
@@ -3936,7 +3947,7 @@ class TagListScreen(ScreenBase):
 
 class ProjectHubScreen(ScreenBase):
 
-    # tab intentionally unmapped -> native focus cycling between the panel tables
+    # panels cycled with [ / ] ; tab opens modules (handled globally in ScreenBase)
     KEY_MAP = {
         "q": "back", "r": "refresh", "b": "browser", "y": "yank",
         "t": "toggle_window", "m": "open_modules",
@@ -4311,6 +4322,306 @@ class ProjectHubScreen(ScreenBase):
     async def action_tags_full(self) -> None:
         self.api.set_project(self.project_path)
         self.app.push_screen(TagListScreen(self.api, self.project_path))
+
+
+class MyWorkScreen(ScreenBase):
+
+    # cross-project home: favorite repos + my open MRs grouped by source branch
+    KEY_MAP = {
+        "q": "back", "r": "refresh", "b": "browser", "y": "yank",
+        "m": "open_modules",
+        "right_square_bracket": "next_panel", "left_square_bracket": "prev_panel",
+        "M": "all_mrs", "P": "all_pipelines",
+    }
+
+    PANEL_IDS = ["work-favs", "work-mrs"]
+
+    def __init__(self, api: GitLabAPI):
+        super().__init__()
+        self.api = api
+        self._favs = []
+        self._mrs = []
+        self._mr_rows = []
+        self._loaded = False
+
+    def _info_pairs(self):
+        pairs = [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Scope", "favorites + created_by_me"),
+        ]
+        if self._loaded:
+            repos = len({(m.get('project_path') or '') for m in self._mrs})
+            pairs += [
+                ("Favorites", str(len(self._favs))),
+                ("Open MRs", f"{len(self._mrs)} · {repos} repos"),
+            ]
+        return pairs
+
+    def _keys(self):
+        return [
+            [("[ ]", "section"), ("enter", "open"),  ("r", "refresh")],
+            [("M", "all MRs"),   ("P", "pipelines"), ("m", "modules")],
+            [("b", "browser"),   ("y", "copy url"),  ("esc", "quit")],
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield ScrollableContainer(
+            Container(
+                Static("Favorites", id="work-favs-title", classes="hub-panel-title"),
+                DataTable(id="work-favs"),
+                id="work-favs-panel",
+                classes="hub-panel",
+            ),
+            Container(
+                Static("My Open MRs", id="work-mrs-title", classes="hub-panel-title"),
+                DataTable(id="work-mrs"),
+                id="work-mrs-panel",
+                classes="hub-panel",
+            ),
+            id="work-body",
+        )
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text(["My Work"])
+
+    def _status_text(self):
+        return _status_line([("[ ]", "panel"), ("enter", "open"), ("r", "refresh")])
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        for tid, cols in (
+            ("#work-favs", ("Project", "MRs", "Pipeline", "Active")),
+            ("#work-mrs", ("Project / MR", "Branch", "Title", "Created", "Status")),
+        ):
+            t = self.query_one(tid, DataTable)
+            t.add_columns(*cols)
+            t.cursor_type = "row"
+        self._user_loading_label = "loading my work..."
+        try:
+            self.query_one("#statusbar", StatusBar).set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
+        try:
+            await self._load()
+        finally:
+            self._clear_loading()
+        try:
+            self.query_one("#work-mrs", DataTable).focus()
+        except Exception:
+            pass
+
+    async def _load(self) -> None:
+        favs = self.api.config.favorites.list()
+        try:
+            mrs = await asyncio.to_thread(self.api.get_my_merge_requests, 'opened', 100)
+        except Exception as e:
+            mrs = []
+            self.notify(f"Could not load MRs: {e}", severity="error", timeout=4)
+        self._mrs = mrs if isinstance(mrs, list) else []
+        counts = {}
+        for m in self._mrs:
+            p = m.get('project_path') or ''
+            counts[p] = counts.get(p, 0) + 1
+        self._favs = [
+            {'path': p, 'mr_count': counts.get(p, 0), 'activity': '', 'pipeline_status': ''}
+            for p in favs
+        ]
+        self._build_mr_rows()
+        self._loaded = True
+        self._populate()
+        await self._backfill_favs()
+
+    def _build_mr_rows(self) -> None:
+        groups = {}
+        for m in self._mrs:
+            groups.setdefault(m.get('project_path') or '(unknown)', []).append(m)
+        # busiest repo first, then alphabetical; API order (updated desc) kept within group
+        ordered = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+        rows = []
+        for project, items in ordered:
+            rows.append(('header', project, len(items)))
+            for m in items:
+                rows.append(('mr', m, None))
+        self._mr_rows = rows
+
+    async def _backfill_favs(self) -> None:
+        if not self._favs:
+            return
+
+        async def one(fav):
+            meta, pipes = await asyncio.gather(
+                asyncio.to_thread(self.api.get_project_meta, fav['path']),
+                asyncio.to_thread(self.api.list_recent_pipelines, fav['path'], None, None, 1),
+                return_exceptions=True,
+            )
+            if isinstance(meta, dict):
+                fav['activity'] = meta.get('last_activity', '') or ''
+            if isinstance(pipes, list) and pipes:
+                fav['pipeline_status'] = pipes[0].get('status') or ''
+
+        await asyncio.gather(*(one(f) for f in self._favs), return_exceptions=True)
+        try:
+            self._fill_favs()
+        except Exception as e:
+            _dbg(f"mywork fav backfill fill: {type(e).__name__}: {e}")
+
+    def _populate(self) -> None:
+        for fill in (self._fill_favs, self._fill_mrs):
+            try:
+                fill()
+            except Exception as e:
+                _dbg(f"mywork fill failed {fill.__name__}: {type(e).__name__}: {e}")
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+        except Exception:
+            pass
+        self._refresh_status()
+
+    def _fill_favs(self) -> None:
+        t = self.query_one("#work-favs", DataTable)
+        t.clear()
+        for f in self._favs:
+            proj = Text(f['path'], style="#89b4fa")
+            cnt = Text(str(f['mr_count']) if f['mr_count'] else "—",
+                       style="#f9e2af" if f['mr_count'] else "dim")
+            pipe = status_badge(f['pipeline_status']) if f['pipeline_status'] else Text("…", style="dim")
+            active = Text(format_age(f['activity']) if f['activity'] else "…", style="dim italic")
+            t.add_row(proj, cnt, pipe, active)
+        if not self._favs:
+            t.add_row(Text("no favorites — star repos with 's' in Projects", style="dim italic"),
+                      Text(""), Text(""), Text(""))
+
+    def _fill_mrs(self) -> None:
+        t = self.query_one("#work-mrs", DataTable)
+        t.clear()
+        for entry in self._mr_rows:
+            if entry[0] == 'header':
+                _, project, n = entry
+                label = Text(f"▸ {project}", style="bold #f9e2af")
+                if n > 1:
+                    label.append(f"  ({n} MRs)", style="dim #a6adc8")
+                t.add_row(label, Text(""), Text(""), Text(""), Text(""))
+            else:
+                m = entry[1]
+                iid = Text(f"   !{m.get('iid')}", style="#cdd6f4")
+                branch = Text(m.get('source_branch') or '', style="#89b4fa")
+                title = Text((m.get('title') or '')[:40], style="#cdd6f4")
+                created = Text(format_age(m['created_at']) if m.get('created_at') else '—', style="dim italic")
+                ps = m.get('head_pipeline_status')
+                badge = status_badge(ps) if ps else _mr_state_badge(m.get('state'), m)
+                t.add_row(iid, branch, title, created, badge)
+        if not self._mr_rows:
+            t.add_row(Text("no open MRs", style="dim italic"), Text(""), Text(""), Text(""), Text(""))
+
+    def _row(self, lst, idx):
+        if idx is None or idx < 0 or idx >= len(lst):
+            return None
+        return lst[idx]
+
+    def _focused(self):
+        try:
+            fav_t = self.query_one("#work-favs", DataTable)
+            if fav_t.has_focus:
+                f = self._row(self._favs, fav_t.cursor_row)
+                if f:
+                    return ('fav', f)
+        except Exception:
+            pass
+        try:
+            mr_t = self.query_one("#work-mrs", DataTable)
+            if mr_t.has_focus:
+                e = self._row(self._mr_rows, mr_t.cursor_row)
+                if e and e[0] == 'mr':
+                    return ('mr', e[1])
+        except Exception:
+            pass
+        return None
+
+    def _url_for(self, focused):
+        base = self.api.config.gitlab_url.rstrip('/')
+        kind, d = focused
+        if kind == 'fav':
+            return f"{base}/{d['path']}"
+        return d.get('web_url') or f"{base}/{d['project_path']}/-/merge_requests/{d['iid']}"
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        tid = event.data_table.id
+        row = event.cursor_row
+        if tid == "work-favs":
+            f = self._row(self._favs, row)
+            if f:
+                self.api.set_project(f['path'])
+                self.app.push_screen(ProjectHubScreen(self.api, f['path']))
+        elif tid == "work-mrs":
+            entry = self._row(self._mr_rows, row)
+            if entry and entry[0] == 'mr':
+                m = entry[1]
+                self.api.set_project(m.get('project_path'))
+                self.app.push_screen(MergeRequestDetailScreen(self.api, m['project_path'], m['iid']))
+
+    async def action_back(self) -> None:
+        self.notify("At home — ESC or Ctrl+C to quit", timeout=2)
+
+    async def action_refresh(self) -> None:
+        await self._show_loading("loading my work...")
+        try:
+            await self._load()
+        finally:
+            self._clear_loading()
+
+    async def action_open_modules(self) -> None:
+        self.app.open_modules()
+
+    async def action_all_mrs(self) -> None:
+        self.app.push_screen(MyMergeRequestsScreen(self.api))
+
+    async def action_all_pipelines(self) -> None:
+        age = getattr(self.app, 'default_age_days', DEFAULT_PIPELINE_AGE_DAYS)
+        self.app.push_screen(MyPipelineListScreen(self.api, age_days=age))
+
+    def _cycle_panel(self, delta) -> None:
+        ids = self.PANEL_IDS
+        cur = -1
+        for i, tid in enumerate(ids):
+            try:
+                if self.query_one(f"#{tid}", DataTable).has_focus:
+                    cur = i
+                    break
+            except Exception:
+                pass
+        nxt = (cur + delta) % len(ids) if cur >= 0 else 0
+        try:
+            self.query_one(f"#{ids[nxt]}", DataTable).focus()
+        except Exception:
+            pass
+
+    async def action_next_panel(self) -> None:
+        self._cycle_panel(1)
+
+    async def action_prev_panel(self) -> None:
+        self._cycle_panel(-1)
+
+    async def action_browser(self) -> None:
+        f = self._focused()
+        if f:
+            webbrowser.open(self._url_for(f))
+
+    async def action_yank(self) -> None:
+        f = self._focused()
+        if f and copy_to_clipboard(self._url_for(f)):
+            self.notify("Copied URL", timeout=2)
 
 
 class CommitListScreen(ScreenBase):
@@ -5036,6 +5347,7 @@ class MRPickerModal(ModalScreen[tuple[str, int] | None]):
             self._remove_current_recent()
 
 
+MODULE_MYWORK = "mywork"
 MODULE_PROJECTS = "projects"
 MODULE_MRS = "mrs"
 MODULE_PIPELINES = "pipelines"
@@ -5046,10 +5358,11 @@ class ModuleModal(ModalScreen[str | None]):
     """Module switcher. Returns selected module id or None on cancel."""
 
     MODULES = [
-        (MODULE_PROJECTS,  "1", "Project Hub",  "favorites + commits, MRs, tags, pipelines"),
-        (MODULE_MRS,       "2", "MRs",       "my merge requests"),
-        (MODULE_PIPELINES, "3", "Pipelines", "my pipelines (across favorites)"),
-        (MODULE_TAGS,      "4", "Tags",      "project tags + create/push"),
+        (MODULE_MYWORK,    "1", "My Work",     "favorites + my open MRs by branch"),
+        (MODULE_PROJECTS,  "2", "Project Hub", "favorites + commits, MRs, tags, pipelines"),
+        (MODULE_MRS,       "3", "MRs",       "my merge requests"),
+        (MODULE_PIPELINES, "4", "Pipelines", "my pipelines (across favorites)"),
+        (MODULE_TAGS,      "5", "Tags",      "project tags + create/push"),
     ]
 
     BINDINGS = [
@@ -5057,6 +5370,7 @@ class ModuleModal(ModalScreen[str | None]):
         Binding("2", "pick_index('1')", show=False),
         Binding("3", "pick_index('2')", show=False),
         Binding("4", "pick_index('3')", show=False),
+        Binding("5", "pick_index('4')", show=False),
         Binding("k", "cursor_up", show=False),
         Binding("j", "cursor_down", show=False),
         Binding("escape", "cancel", show=False),
@@ -5071,7 +5385,7 @@ class ModuleModal(ModalScreen[str | None]):
         title = Text()
         title.append("Modules", style="bold #cdd6f4")
         footer = Text()
-        footer.append("↑↓/jk move · enter select · 1-4 jump · esc/q/tab close", style="dim #6c7086")
+        footer.append("↑↓/jk move · enter select · 1-5 jump · esc/q/tab close", style="dim #6c7086")
         options = []
         for mod_id, num, name, desc in self.MODULES:
             row = Text()
@@ -5274,6 +5588,19 @@ class PipelineMonitor(App):
     #hub-body {
         height: 1fr;
         background: #1e1e2e;
+    }
+
+    #work-body {
+        height: 1fr;
+        background: #1e1e2e;
+    }
+
+    #work-favs-panel {
+        height: 16;
+    }
+
+    #work-mrs-panel {
+        height: 1fr;
     }
 
     #hub-top {
@@ -5577,13 +5904,12 @@ class PipelineMonitor(App):
     }
     """
 
-    def __init__(self, config: Config, default_age_days=DEFAULT_PIPELINE_AGE_DAYS, default_branch_filter: str = "", resume: bool = True, explicit_project: bool = False):
+    def __init__(self, config: Config, default_age_days=DEFAULT_PIPELINE_AGE_DAYS, default_branch_filter: str = "", explicit_project: bool = False):
         super().__init__()
         self.config = config
         self.api = GitLabAPI(config)
         self.default_age_days = default_age_days
         self.default_branch_filter = default_branch_filter or ""
-        self.resume = resume
         self.explicit_project = explicit_project
         self._activity_counts = []
         self._activity_timer = None
@@ -5599,7 +5925,9 @@ class PipelineMonitor(App):
         def _after(result):
             if not result:
                 return
-            if result == MODULE_PROJECTS:
+            if result == MODULE_MYWORK:
+                self.switch_screen(MyWorkScreen(self.api))
+            elif result == MODULE_PROJECTS:
                 self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
             elif result == MODULE_MRS:
                 self.switch_screen(MyMergeRequestsScreen(self.api))
@@ -5642,16 +5970,10 @@ class PipelineMonitor(App):
         try:
             await asyncio.to_thread(self.api.connect_project)
         except Exception:
-            self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
-            self.notify(f"Project not found: {self.config.project_path}", severity="error", timeout=5)
-            return
+            # cross-project home (My Work) doesn't need a default project
+            pass
 
-        def _default_home():
-            if self.config.favorites.list():
-                return MyPipelineListScreen(self.api, age_days=self.default_age_days)
-            return ProjectSelectScreen(self.api, self.config.favorites)
-
-        # explicit -p / GITLAB_PROJECT wins over resume
+        # explicit -p / GITLAB_PROJECT opens that project's pipelines directly
         if self.explicit_project and self.api.project:
             self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
             self.push_screen(PipelineListScreen(
@@ -5660,70 +5982,7 @@ class PipelineMonitor(App):
                 initial_filter=self.default_branch_filter,
             ))
             return
-        if not self.resume:
-            self.switch_screen(_default_home())
-            return
-        last = self.config.get_last_view()
-        if not last:
-            if self.api.project:
-                self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
-                self.push_screen(PipelineListScreen(
-                    self.api,
-                    age_days=self.default_age_days,
-                    initial_filter=self.default_branch_filter,
-                ))
-                return
-            self.switch_screen(_default_home())
-            return
-        view_type = last.get('type')
-        try:
-            if view_type == 'my_mrs':
-                self.switch_screen(MyMergeRequestsScreen(self.api))
-            elif view_type == 'my_pipelines':
-                self.switch_screen(MyPipelineListScreen(self.api, age_days=self.default_age_days))
-            elif view_type == 'pipelines':
-                proj = last.get('project')
-                if proj:
-                    try:
-                        await asyncio.to_thread(self.api.set_project, proj)
-                        self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
-                        self.push_screen(PipelineListScreen(
-                            self.api,
-                            age_days=self.default_age_days,
-                            initial_filter=self.default_branch_filter,
-                        ))
-                        return
-                    except Exception:
-                        self.notify(f"Could not resume project {proj}", severity="warning", timeout=3)
-                self.switch_screen(_default_home())
-            elif view_type == 'hub':
-                proj = last.get('project')
-                if proj:
-                    try:
-                        await asyncio.to_thread(self.api.set_project, proj)
-                        self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
-                        self.push_screen(ProjectHubScreen(self.api, proj))
-                        return
-                    except Exception:
-                        self.notify(f"Could not resume project {proj}", severity="warning", timeout=3)
-                self.switch_screen(_default_home())
-            elif view_type == 'tags':
-                proj = last.get('project')
-                if proj:
-                    try:
-                        await asyncio.to_thread(self.api.set_project, proj)
-                        self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites, target='tags'))
-                        self.push_screen(TagListScreen(self.api, proj))
-                        return
-                    except Exception:
-                        self.notify(f"Could not resume project {proj}", severity="warning", timeout=3)
-                self.switch_screen(_default_home())
-            elif view_type == 'projects':
-                self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
-            else:
-                self.switch_screen(_default_home())
-        except Exception:
-            self.switch_screen(_default_home())
+        self.switch_screen(MyWorkScreen(self.api))
 
 
 def _detect_cwd_branch() -> str:
@@ -5748,8 +6007,6 @@ def main():
                         help="Pre-fill pipeline filter with this branch (clearable in the UI)")
     parser.add_argument("-B", "--cwd-branch", action="store_true",
                         help="Pre-fill pipeline filter with current git branch from CWD")
-    parser.add_argument("--no-resume", action="store_true",
-                        help="Skip restoring last view (MR list / pipelines)")
     args = parser.parse_args()
 
     branch_filter = ""
@@ -5779,7 +6036,6 @@ def main():
         config,
         default_age_days=args.days,
         default_branch_filter=branch_filter,
-        resume=not args.no_resume,
         explicit_project=bool(args.project),
     )
     app.run()
