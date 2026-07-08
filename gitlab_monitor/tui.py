@@ -4396,6 +4396,8 @@ class MyWorkScreen(ScreenBase):
 
     PANEL_IDS = ["work-favs", "work-mrs"]
 
+    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+
     def __init__(self, api: GitLabAPI):
         super().__init__()
         self.api = api
@@ -4403,6 +4405,8 @@ class MyWorkScreen(ScreenBase):
         self._mrs = []
         self._mr_rows = []
         self._loaded = False
+        self._refresh_timer = None
+        self._refreshing = False
 
     def _info_pairs(self):
         pairs = [
@@ -4481,6 +4485,36 @@ class MyWorkScreen(ScreenBase):
             self.query_one("#work-mrs", DataTable).focus()
         except Exception:
             pass
+        self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
+
+    async def _safe_refresh(self) -> None:
+        # MR-only reload; keeps favs' backfilled activity/pipeline (manual r does full _load)
+        if self._refreshing:
+            return
+        self._refreshing = True
+        try:
+            mrs = await asyncio.to_thread(self.api.get_my_merge_requests, 'opened', 100)
+        except Exception:
+            self._refreshing = False
+            return
+        self._mrs = mrs if isinstance(mrs, list) else []
+        counts = {}
+        for m in self._mrs:
+            p = m.get('project_path') or ''
+            counts[p] = counts.get(p, 0) + 1
+        for f in self._favs:
+            f['mr_count'] = counts.get(f['path'], 0)
+        self._build_mr_rows()
+        self._populate()
+        self._refreshing = False
+
+    def on_screen_resume(self) -> None:
+        if self._loaded:
+            asyncio.ensure_future(self._safe_refresh())
+
+    def on_unmount(self) -> None:
+        if self._refresh_timer:
+            self._refresh_timer.stop()
 
     async def _load(self) -> None:
         favs = self.api.config.favorites.list()
@@ -4551,6 +4585,7 @@ class MyWorkScreen(ScreenBase):
 
     def _fill_favs(self) -> None:
         t = self.query_one("#work-favs", DataTable)
+        prev = t.cursor_row
         t.clear()
         for f in self._favs:
             proj = Text(f['path'], style="#89b4fa")
@@ -4562,9 +4597,15 @@ class MyWorkScreen(ScreenBase):
         if not self._favs:
             t.add_row(Text("no favorites — star repos with 's' in Projects", style="dim italic"),
                       Text(""), Text(""), Text(""))
+        if prev:
+            try:
+                t.move_cursor(row=min(prev, t.row_count - 1))
+            except Exception:
+                pass
 
     def _fill_mrs(self) -> None:
         t = self.query_one("#work-mrs", DataTable)
+        prev = t.cursor_row
         t.clear()
         for entry in self._mr_rows:
             if entry[0] == 'header':
@@ -4584,6 +4625,11 @@ class MyWorkScreen(ScreenBase):
                 t.add_row(iid, branch, title, created, badge)
         if not self._mr_rows:
             t.add_row(Text("no open MRs", style="dim italic"), Text(""), Text(""), Text(""), Text(""))
+        if prev:
+            try:
+                t.move_cursor(row=min(prev, t.row_count - 1))
+            except Exception:
+                pass
 
     def _row(self, lst, idx):
         if idx is None or idx < 0 or idx >= len(lst):
