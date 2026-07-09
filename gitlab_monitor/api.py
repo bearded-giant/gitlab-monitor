@@ -21,7 +21,7 @@ class GitLabAPI:
 
     def __init__(self, config: Config):
         self.config = config
-        self.gl = gitlab.Gitlab(config.gitlab_url, private_token=config.gitlab_token)
+        self.gl = gitlab.Gitlab(config.gitlab_url, private_token=config.gitlab_token, timeout=15)
         self.project = None
         self.project_name = None
         self._username_cache = None
@@ -668,6 +668,7 @@ class GitLabAPI:
             f"{self.config.gitlab_url.rstrip('/')}/api/graphql",
             json={'query': query, 'variables': variables},
             headers=headers,
+            timeout=30,
         )
         resp.raise_for_status()
         payload = resp.json()
