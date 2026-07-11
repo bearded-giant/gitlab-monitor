@@ -250,7 +250,10 @@ class ScreenBase(Screen):
         if event.key == "escape":
             event.prevent_default()
             event.stop()
-            self.app.exit()
+            self.app.push_screen(
+                ConfirmModal("Quit gitlab-monitor?", default=True),
+                lambda ok: self.app.exit() if ok else None,
+            )
             return
 
         action_name = self.KEY_MAP.get(event.key)
@@ -5140,12 +5143,13 @@ class CommitDetailScreen(ScreenBase):
 
 
 class ConfirmModal(ModalScreen[bool]):
-    """y/N confirmation modal. Default N — only y/Y returns True."""
+    """y/N confirmation modal. enter picks the default (N unless default=True)."""
 
-    def __init__(self, message: str, detail: str = ""):
+    def __init__(self, message: str, detail: str = "", default: bool = False):
         super().__init__()
         self.message = message
         self.detail = detail
+        self.default = default
 
     def compose(self) -> ComposeResult:
         body = Text()
@@ -5154,15 +5158,23 @@ class ConfirmModal(ModalScreen[bool]):
             body.append("\n")
             body.append(self.detail, style="#a6adc8")
         body.append("\n\n")
-        body.append("[y/", style="#a6adc8")
-        body.append("N", style="bold #f9e2af")
+        yes, no = ("Y", "n") if self.default else ("y", "N")
+        body.append("[", style="#a6adc8")
+        body.append(yes, style="bold #f9e2af" if self.default else "#a6adc8")
+        body.append("/", style="#a6adc8")
+        body.append(no, style="#a6adc8" if self.default else "bold #f9e2af")
         body.append("]", style="#a6adc8")
         yield Container(Static(body, id="confirm-text"), id="confirm-box")
 
     def on_key(self, event) -> None:
         event.prevent_default()
         event.stop()
-        self.dismiss(event.key.lower() == "y")
+        if event.key.lower() == "y":
+            self.dismiss(True)
+        elif event.key == "enter":
+            self.dismiss(self.default)
+        else:
+            self.dismiss(False)
 
 
 class TextInputModal(ModalScreen[str | None]):
