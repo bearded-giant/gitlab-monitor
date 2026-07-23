@@ -372,7 +372,7 @@ def _mr_state_color(state, m=None):
     return colors.get(state, '#cdd6f4')
 
 
-_VER_RE = re.compile(r'^(?P<prefix>[A-Za-z]*)(?P<major>\d+)\.(?P<minor>\d+)(?:\.\d+)?')
+_VER_RE = re.compile(r'^(?P<prefix>[A-Za-z]*)(?P<major>\d+)\.(?P<minor>\d+)(?:\.(?P<patch>\d+))?')
 
 
 def next_minor_version(latest):
@@ -383,3 +383,14 @@ def next_minor_version(latest):
     if not m:
         return latest
     return f"{m.group('prefix')}{int(m.group('major'))}.{int(m.group('minor')) + 1}.0"
+
+
+def next_patch_version(latest):
+    # suggest the next patch (bump patch, or .1 when latest has no patch); fall back verbatim if unparseable
+    if not latest:
+        return ''
+    m = _VER_RE.match(latest.strip())
+    if not m:
+        return latest
+    patch = int(m.group('patch')) if m.group('patch') else 0
+    return f"{m.group('prefix')}{int(m.group('major'))}.{int(m.group('minor'))}.{patch + 1}"

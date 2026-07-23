@@ -11,7 +11,7 @@ import webbrowser
 from datetime import datetime
 import asyncio
 from textual.app import App, ComposeResult
-from textual.widgets import DataTable, Static, Input, RichLog, TextArea, Label, Markdown
+from textual.widgets import DataTable, Static, Input, RichLog, TextArea, Label, Markdown, RadioSet, RadioButton
 from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.suggester import SuggestFromList
 from textual.screen import Screen, ModalScreen
@@ -64,6 +64,7 @@ from .formatting import (
     _mr_state_color,
     _is_mr_approved,
     next_minor_version,
+    next_patch_version,
     format_activity_strip,
 )
 from .api import GitLabAPI, ACTIVITY_TTL
@@ -3919,29 +3920,30 @@ class TagListScreen(ScreenBase):
     async def action_create_tag(self) -> None:
         recent = [t['name'] for t in self.tags[:3] if t.get('name')]
         latest = recent[0] if recent else ''
-        suggested = next_minor_version(latest)
-        hint = ("recent: " + ", ".join(recent)) if recent else "no existing tags"
+        patch = next_patch_version(latest)
+        minor = next_minor_version(latest)
         ref = self.default_branch or 'HEAD'
 
-        def _after(name):
-            if not name:
+        def _after(result):
+            if not result:
                 return
+            name, message = result
             def _confirm(ok):
                 if ok:
-                    asyncio.ensure_future(self._do_create_tag(name, ref))
+                    asyncio.ensure_future(self._do_create_tag(name, ref, message))
             self.app.push_screen(
                 ConfirmModal(f"Create + push tag {name}?", detail=f"on {ref} · {self.project_path}"),
                 _confirm,
             )
 
         self.app.push_screen(
-            PathInputModal(f"New tag · {hint}", placeholder="0.26.0", initial=suggested),
+            TagCreateModal(self.project_path, ref, patch, minor, recent=recent),
             _after,
         )
 
-    async def _do_create_tag(self, name, ref) -> None:
+    async def _do_create_tag(self, name, ref, message='') -> None:
         try:
-            await asyncio.to_thread(self.api.create_tag, self.project_path, name, ref)
+            await asyncio.to_thread(self.api.create_tag, self.project_path, name, ref, message)
             self.notify(f"Tag {name} created + pushed on {ref}", timeout=3)
             await self.load_tags()
         except Exception as e:
@@ -5261,6 +5263,104 @@ class PathInputModal(ModalScreen[str | None]):
             self.dismiss(text if text else None)
 
 
+class TagCreateModal(ModalScreen[tuple[str, str] | None]):
+    """Create-tag form. Radio-select next-patch / next-minor / other (free-text), optional
+    message. Keyboard: up/down pick version, tab to fields, ctrl+s create, esc cancel.
+    Returns (name, message) on submit, None on cancel."""
+
+    def __init__(self, project_path, ref, patch, minor, recent=None):
+        super().__init__()
+        self.project_path = project_path
+        self.ref = ref
+        self.patch = patch
+        self.minor = minor
+        self.recent = recent or []
+        # parallel to radio options; version string per slot, None = use the "other" input
+        self._opt_versions = []
+
+    def compose(self) -> ComposeResult:
+        header = Text()
+        header.append(f"New tag · {self.project_path}", style="bold #cdd6f4")
+        header.append(f"\non {self.ref}", style="#a6adc8")
+        if self.recent:
+            header.append("  ·  recent: " + ", ".join(self.recent), style="dim #a6adc8")
+        header.append("\n")
+        header.append("↑/↓ pick · tab fields · ctrl+s create · esc cancel", style="dim #a6adc8")
+
+        labels = []
+        if self.patch:
+            self._opt_versions.append(self.patch)
+            labels.append(f"{self.patch}   patch")
+        if self.minor and self.minor != self.patch:
+            self._opt_versions.append(self.minor)
+            labels.append(f"{self.minor}   minor")
+        self._opt_versions.append(None)
+        labels.append("other")
+        radio = RadioSet(
+            *[RadioButton(lbl, value=(i == 0)) for i, lbl in enumerate(labels)],
+            id="tag-version-set",
+        )
+
+        msg = TextArea("", id="tag-message")
+        msg.show_line_numbers = False
+        yield Container(
+            Static(header, id="tag-create-header"),
+            Label("Tag version", classes="tag-field-label"),
+            radio,
+            Input(value=self.patch or self.minor, placeholder="custom version", id="tag-other"),
+            Label("Message (optional)", classes="tag-field-label"),
+            msg,
+            id="tag-create-box",
+        )
+
+    def on_mount(self) -> None:
+        try:
+            # only "other" exists (no prior tags) -> land in the text field
+            target = "#tag-other" if len(self._opt_versions) == 1 else "#tag-version-set"
+            self.query_one(target).focus()
+        except Exception:
+            pass
+
+    def _selected_version(self) -> str:
+        try:
+            idx = self.query_one("#tag-version-set", RadioSet).pressed_index
+        except Exception:
+            idx = -1
+        if 0 <= idx < len(self._opt_versions):
+            ver = self._opt_versions[idx]
+            if ver is not None:
+                return ver
+        try:
+            return self.query_one("#tag-other", Input).value.strip()
+        except Exception:
+            return ""
+
+    def _submit(self) -> None:
+        name = self._selected_version()
+        if not name:
+            self.app.bell()
+            return
+        try:
+            message = self.query_one("#tag-message", TextArea).text.strip()
+        except Exception:
+            message = ""
+        self.dismiss((name, message))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "tag-other":
+            self._submit()
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self.dismiss(None)
+        elif event.key == "ctrl+s":
+            event.prevent_default()
+            event.stop()
+            self._submit()
+
+
 class MRNoteModal(ModalScreen[tuple[str, str] | None]):
     """Per-MR local note editor.
 
@@ -5907,6 +6007,53 @@ class PipelineMonitor(App):
 
     #path-input {
         width: 100%;
+        background: #1e1e2e;
+        color: #cdd6f4;
+    }
+
+    TagCreateModal {
+        align: center middle;
+        background: #1e1e2e 60%;
+    }
+
+    #tag-create-box {
+        width: 80;
+        height: auto;
+        background: #313244;
+        border: tall #89b4fa;
+        padding: 1 2;
+    }
+
+    #tag-create-header {
+        width: 100%;
+        height: auto;
+        color: #cdd6f4;
+        margin-bottom: 1;
+    }
+
+    .tag-field-label {
+        width: 100%;
+        color: #a6adc8;
+        margin-top: 1;
+    }
+
+    #tag-version-set {
+        width: 100%;
+        height: auto;
+        background: #1e1e2e;
+        border: none;
+    }
+
+    #tag-other {
+        width: 100%;
+        background: #1e1e2e;
+        color: #cdd6f4;
+        margin-top: 1;
+    }
+
+    #tag-message {
+        width: 100%;
+        height: 6;
         background: #1e1e2e;
         color: #cdd6f4;
     }
