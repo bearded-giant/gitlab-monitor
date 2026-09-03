@@ -19,6 +19,7 @@ hiddenimports = collect_submodules('textual') + collect_submodules('rich') + [
     'gitlab_monitor',
     'gitlab_monitor.config',
     'gitlab_monitor.tui',
+    'gitlab_monitor.reviewd',
 ]
 
 datas = collect_data_files('textual') + collect_data_files('rich')

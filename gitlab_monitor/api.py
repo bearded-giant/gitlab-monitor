@@ -25,6 +25,7 @@ class GitLabAPI:
         self.project = None
         self.project_name = None
         self._username_cache = None
+        self._user_id_cache = None
         self._activity_cache = None  # (timestamp, result)
 
     def current_username(self):
@@ -35,6 +36,15 @@ class GitLabAPI:
             except Exception:
                 self._username_cache = ''
         return self._username_cache
+
+    def current_user_id(self):
+        if self._user_id_cache is None:
+            try:
+                self.gl.auth()
+                self._user_id_cache = getattr(self.gl.user, 'id', None)
+            except Exception:
+                self._user_id_cache = None
+        return self._user_id_cache
 
     def connect_project(self):
         if self.config.project_path:
@@ -403,6 +413,8 @@ class GitLabAPI:
             'merged_at': getattr(mr, 'merged_at', None),
             'closed_at': getattr(mr, 'closed_at', None),
             'author': author.get('username') if isinstance(author, dict) else getattr(author, 'username', 'unknown'),
+            'reviewers': [r.get('username') for r in (getattr(mr, 'reviewers', None) or []) if isinstance(r, dict) and r.get('username')],
+            'sha': getattr(mr, 'sha', None),
             'web_url': mr.web_url,
             'user_notes_count': getattr(mr, 'user_notes_count', 0) or 0,
             'upvotes': getattr(mr, 'upvotes', 0) or 0,
@@ -428,6 +440,21 @@ class GitLabAPI:
             since = datetime.now(timezone.utc) - timedelta(days=days)
             params['updated_after'] = since.isoformat().replace('+00:00', 'Z')
         mrs = self.gl.mergerequests.list(**params)
+        return [self._mr_to_dict(mr) for mr in mrs]
+
+    def get_review_requests(self, state='opened', limit=100):
+        uid = self.current_user_id()
+        if uid is None:
+            return []
+        mrs = self.gl.mergerequests.list(
+            reviewer_id=uid,
+            scope='all',
+            get_all=False,
+            state=state,
+            per_page=limit,
+            order_by='updated_at',
+            sort='desc',
+        )
         return [self._mr_to_dict(mr) for mr in mrs]
 
     def get_project_merge_requests(self, project_path, state='merged', limit=50):
@@ -614,6 +641,7 @@ class GitLabAPI:
             return {
                 'approvals_count': len(approved_by),
                 'approvals_required': getattr(approvals, 'approvals_required', 0) or 0,
+                'user_has_approved': bool(getattr(approvals, 'user_has_approved', False)),
             }
         except Exception:
             return None

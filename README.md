@@ -53,6 +53,8 @@ export GITLAB_TOKEN=your_personal_access_token
 ```bash
 export GITLAB_PROJECT=group/project         # skip project picker, go straight to pipelines
 export GITLAB_REFRESH_INTERVAL=30           # seconds between auto-refresh (default: 30)
+export GLMON_REVIEWS_DIR=~/dev/reviews      # where the Reviews module keeps local review files
+export GLMON_REVIEWS_ENABLED=0              # kill switch for the auto-review poller (0/false/off)
 ```
 
 #### Refresh Tuning (per-view, optional)
@@ -75,11 +77,20 @@ Configuration can also be stored in `~/.config/gitlab-monitor/config.json`:
   "gitlab_url": "https://gitlab.example.com",
   "project_path": "group/project",
   "refresh_interval": 30,
-  "max_pipelines": 50
+  "max_pipelines": 50,
+  "reviews": {
+    "enabled": true,
+    "dir": "~/dev/reviews",
+    "model": "opus",
+    "include_drafts": false,
+    "settle_minutes": 10
+  }
 }
 ```
 
-Note: Never store tokens in config files. Always use environment variables for tokens.
+The `reviews` block drives the Reviews module and its poller (see view 13). Every key is optional and falls back to the value shown.
+
+Note: Never put the token in `config.json`. Use the `GITLAB_TOKEN` environment variable, or for non-interactive runs (the Reviews poller under launchd) a `~/.config/gitlab-monitor/token` file with mode 600.
 
 ## Quick Start
 
@@ -107,7 +118,7 @@ By default `glmon` opens **My Work** — your starred repos plus your open MRs g
 ## Features
 
 1. **My Work home** -- cross-project landing screen: your starred repos plus your open MRs grouped by source branch, gathered from every project at once
-2. **Module switcher** -- `m`/`tab` from any home screen to jump between My Work, Project Hub, MRs, Pipelines, and Tags; number keys `1`-`5` jump directly
+2. **Module switcher** -- `m`/`tab` from any home screen to jump between My Work, Project Hub, MRs, Pipelines, Tags, and Reviews; number keys `1`-`6` jump directly
 3. **Project Hub** -- per-project dashboard with live commits, MRs, tags, and pipeline panels side by side; `[`/`]` to cycle, capital letters to open a full view
 4. **Project picker with favorites** -- star projects you care about; favorites load first (fast), toggle to full list on demand
 5. **Pipeline age window** -- default 3 days (big speedup on busy projects); cycle `3d / 7d / 30d / all` with `t`
@@ -121,6 +132,7 @@ By default `glmon` opens **My Work** — your starred repos plus your open MRs g
 13. **Failure extraction** -- automatically extracts and highlights test failures; failed jobs flagged in red
 14. **Browser + clipboard** -- `b` opens the current selection in GitLab, `y` copies its URL or log output
 15. **Job detail info bar** -- live status and duration while viewing job logs
+16. **Assigned reviews** -- every open MR where you are a reviewer, across all projects, with markers for reviewed / stale / approved; an optional launchd poller pre-runs an adversarial AI review into a local markdown file and notifies you when a reviewed MR gets new commits. Nothing is ever posted back to GitLab.
 
 ## Views
 
@@ -227,11 +239,72 @@ The Tags view (module `5`) lists a project's tags with date, target commit, per-
 
 Rolling back a deploy is two steps: put the cursor on the last known-good tag and press `R` to redeploy it, then put the cursor on the bad tag and press `V` to open the revert MR that realigns source. Both prompt before hitting the API. The revert MR is created entirely through the GitLab API (a `revert-<tag>` branch off the default branch, the revert commit pushed to it, and the MR opened) — no local checkout needed; it opens in your browser on success.
 
-### 13. Commit Browser
+### 13. Reviews
+
+Module `6`. Lists every open MR where you are a reviewer, grouped by repository, with two marker columns. `Rv` shows the local review state and `Ok` shows whether you have approved the MR.
+
+| `Rv` | Meaning |
+|------|---------|
+| blank | no local review yet |
+| `●` | reviewed, and the review matches the MR's current head commit (bold until you open it) |
+| `◐` | reviewed, but the author has pushed since; stale |
+| `○` | you approved this before any review existed; the sha is pinned so a later push is still caught |
+
+Keys: `v` opens the review file in a markdown viewer, `R` runs a review for the highlighted MR right now, `T` runs one poller tick right now, `P` toggles the auto-review kill switch, `a` approves (confirm), `enter` opens MR detail, plus the usual `/`, `b`, `y`, `n`, `p`.
+
+#### The poller
+
+`glmon-reviewd` is a one-shot command: it lists your assigned MRs, skips drafts and anything pushed to in the last `settle_minutes`, and for each MR with no review file (or a review file whose sha no longer matches the head) it runs
+
+```
+claude -p "/kai:review-adversarial <mr url>" --model <reviews.model> --output-format json
+```
+
+and writes the result to `<reviews.dir>/<project>/<iid>-<title>.md` with frontmatter (`sha`, `previous_shas`, `cost_usd`, `session_id`, `approved_by_me`, `status`). Re-reviews get a hint line naming the previously reviewed sha so the review leads with what changed. A macOS notification fires per review; the title says `New review`, `UPDATED, re-reviewed`, or `APPROVED MR CHANGED` when an MR you had approved moved under you. The review never posts to GitLab: the skill only posts when handed `--post`, the poller never passes it and refuses a prompt that contains it, and the system prompt forbids GitLab writes.
+
+MRs you have already approved but never reviewed get a zero-cost baseline file (`○`) instead of an initial review, so their sha is tracked without spending anything.
+
+Run it by hand:
+
+```bash
+glmon-reviewd --dry-run          # print the queue with reasons, run nothing
+glmon-reviewd --once             # one tick (the default)
+glmon-reviewd --mr group/project!123   # review one MR now, ignoring the filters
+glmon-reviewd --status
+```
+
+Schedule it with launchd (every 5 minutes, one instance at a time):
+
+```bash
+cp launchd/com.bryan.glmon-reviewd.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.bryan.glmon-reviewd.plist
+launchctl list | grep glmon
+tail -f ~/.cache/glmon/reviewd.err
+```
+
+launchd starts the poller with a bare environment, so `GITLAB_TOKEN` from your shell is not there. Put the token in a file only you can read and the poller picks it up when the env var is absent:
+
+```bash
+printf '%s' "$GITLAB_TOKEN" > ~/.config/gitlab-monitor/token && chmod 600 ~/.config/gitlab-monitor/token
+```
+
+`glab` (used inside the review) keeps its own token in `~/.config/glab-cli/config.yml`, so it needs nothing extra. Edit the path and username in the plist if they differ.
+
+Cost control. Each opus review runs a few minutes and about a dollar and a quarter on a small diff; re-reviews are a little cheaper. There is no daily cap. Two switches:
+
+```bash
+glmon-reviewd --disable          # soft: poller still runs on schedule but exits immediately; R in the TUI still works
+glmon-reviewd --enable
+launchctl unload ~/Library/LaunchAgents/com.bryan.glmon-reviewd.plist   # hard: stop the schedule
+```
+
+`P` in the Reviews view flips the same soft switch, and the header shows `Auto-review ON/OFF`.
+
+### 14. Commit Browser
 
 Browse commits for a project (or a branch), reached from the Project Hub's Commits panel or `k` on an MR. Columns show author, message, and pipeline status; `t` cycles the time window. `enter` opens commit detail — changed files and stats — and `p` jumps to that commit's pipeline.
 
-### 14. Confirmations
+### 15. Confirmations
 
 ![Delete confirm](glmon-assets/MR-delete-confirm.png)
 
@@ -333,6 +406,19 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | `p` / `k` | Open pipelines / commits |
 | `f` | Toggle resolved discussions |
 
+### Reviews
+
+| Key | Action |
+|-----|--------|
+| `/` | Focus filter input |
+| `v` | View the local review (marks it read) |
+| `R` | Run a review for the selected MR now |
+| `T` | Run one poller tick now |
+| `P` | Toggle auto-review on/off (confirm) |
+| `a` | Approve (confirm) |
+| `n` | Create / edit local note |
+| `p` | Pipelines for selected MR |
+
 ### Tags
 
 | Key | Action |
@@ -424,14 +510,20 @@ PipelineMonitor (App)
 
 Screens dispatch keys via a per-screen `KEY_MAP` (case-sensitive) rather than Textual `BINDINGS`. `GitLabAPI` (`api.py`) wraps every python-gitlab call.
 
+`reviewd.py` is the Reviews poller, installed as the `glmon-reviewd` console script. It shares `Config`, `GitLabAPI`, and the `ReviewFiles` index (`config.py`) with the TUI; the two processes talk only through the review files on disk.
+
 ## Files
 
 | Path | Purpose |
 |------|---------|
 | `~/.config/gitlab-monitor/config.json` | Optional non-token config (url, project, refresh_interval) |
+| `~/.config/gitlab-monitor/token` | Optional 0600 token file, read only when `GITLAB_TOKEN` is unset (launchd poller) |
 | `~/.config/gitlab-monitor/favorites.json` | List of starred project paths |
 | `~/.config/gitlab-monitor/mr_notes.json` | Local per-MR notes |
 | `~/.config/gitlab-monitor/last_view.json` | Last view per module, restored on next launch |
+| `~/dev/reviews/` (or `reviews.dir`) | Local AI review files, one markdown file per MR; `_locks/` holds per-MR lockfiles while a review runs |
+| `~/.cache/glmon/reviewd.{out,err}` | launchd poller logs; `reviewd-manual.log` for reviews started from the TUI |
+| `~/Library/LaunchAgents/com.bryan.glmon-reviewd.plist` | Poller schedule (copied from `launchd/` in this repo) |
 
 ## Screenshots
 

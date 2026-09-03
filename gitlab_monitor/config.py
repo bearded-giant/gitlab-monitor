@@ -3,6 +3,7 @@
 # Licensed under Apache License 2.0
 
 import os
+import re
 import json
 from datetime import datetime
 from pathlib import Path
@@ -160,6 +161,123 @@ class MRNotes:
         return False
 
 
+def _slug(text: str, limit: int = 60) -> str:
+    return re.sub(r'[^a-z0-9]+', '-', (text or '').lower()).strip('-')[:limit] or 'untitled'
+
+
+class ReviewFiles:
+    """Local review files under reviews.dir, one markdown file per MR.
+
+    Frontmatter values are written with json.dumps so the file is valid YAML
+    for humans and trivially parseable here without a YAML dependency.
+    """
+
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self._sig = None
+        self._cache: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _key(project_path: str, iid: int) -> str:
+        return f"{project_path}:{iid}"
+
+    @staticmethod
+    def parse(path: Path):
+        text = path.read_text(encoding='utf-8', errors='replace')
+        if not text.startswith('---\n'):
+            return {}, text
+        end = text.find('\n---\n', 4)
+        if end < 0:
+            return {}, text
+        meta: Dict[str, Any] = {}
+        for line in text[4:end].splitlines():
+            if ':' not in line:
+                continue
+            k, v = line.split(':', 1)
+            v = v.strip()
+            try:
+                meta[k.strip()] = json.loads(v)
+            except ValueError:
+                meta[k.strip()] = v
+        return meta, text[end + 5:]
+
+    @staticmethod
+    def render(meta: Dict[str, Any], body: str) -> str:
+        lines = ['---'] + [f"{k}: {json.dumps(v)}" for k, v in meta.items()] + ['---', '']
+        return '\n'.join(lines) + body.rstrip('\n') + '\n'
+
+    def _scan(self):
+        if not self.root.exists():
+            return ()
+        return tuple(sorted(
+            (str(p), p.stat().st_mtime_ns)
+            for p in self.root.rglob('*.md')
+            if not p.name.startswith('.') and '_probe' not in p.parts
+        ))
+
+    def index(self) -> Dict[str, Dict[str, Any]]:
+        sig = self._scan()
+        if sig == self._sig:
+            return self._cache
+        out: Dict[str, Dict[str, Any]] = {}
+        for path_str, _ in sig:
+            path = Path(path_str)
+            try:
+                meta, _body = self.parse(path)
+            except OSError:
+                continue
+            if 'project' not in meta or 'iid' not in meta:
+                continue
+            meta['path'] = str(path)
+            out[self._key(meta['project'], int(meta['iid']))] = meta
+        self._sig, self._cache = sig, out
+        return out
+
+    def get(self, project_path: str, iid: int) -> Optional[Dict[str, Any]]:
+        return self.index().get(self._key(project_path, iid))
+
+    def path_for(self, project_path: str, iid: int, title: str = '') -> Path:
+        existing = self.get(project_path, iid)
+        if existing and existing.get('path'):
+            return Path(existing['path'])
+        return self.root / _slug(project_path, 80) / f"{iid}-{_slug(title)}.md"
+
+    def write(self, project_path: str, iid: int, meta: Dict[str, Any], body: str) -> Path:
+        path = self.path_for(project_path, iid, meta.get('title', ''))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        meta = {'project': project_path, 'iid': int(iid), **{k: v for k, v in meta.items() if k != 'path'}}
+        tmp = path.with_suffix('.md.tmp')
+        tmp.write_text(self.render(meta, body), encoding='utf-8')
+        os.replace(tmp, path)
+        self._sig = None
+        return path
+
+    def update_meta(self, project_path: str, iid: int, **fields) -> bool:
+        entry = self.get(project_path, iid)
+        if not entry:
+            return False
+        path = Path(entry['path'])
+        meta, body = self.parse(path)
+        meta.update(fields)
+        tmp = path.with_suffix('.md.tmp')
+        tmp.write_text(self.render(meta, body), encoding='utf-8')
+        os.replace(tmp, path)
+        self._sig = None
+        return True
+
+    def set_status(self, project_path: str, iid: int, status: str) -> bool:
+        return self.update_meta(project_path, iid, status=status)
+
+
+REVIEWS_DEFAULTS = {
+    'enabled': True,
+    'dir': '~/dev/reviews',
+    'model': 'opus',
+    'include_drafts': False,
+    'settle_minutes': 10,
+}
+
+
 class Config:
     """Handle configuration from environment variables and config files"""
 
@@ -171,6 +289,7 @@ class Config:
         self.favorites = Favorites(self.config_dir)
         self.recent_projects = RecentProjects(self.config_dir)
         self.mr_notes = MRNotes(self.config_dir)
+        self.review_files = ReviewFiles(self.reviews_dir)
 
     def get_last_view(self) -> Optional[Dict[str, Any]]:
         if not self.last_view_file.exists():
@@ -209,6 +328,7 @@ class Config:
             'refresh_interval': 30,
             'max_pipelines': 50,
             'theme': 'dark',
+            'reviews': dict(REVIEWS_DEFAULTS),
         }
         
         # Load from config file if it exists
@@ -216,7 +336,10 @@ class Config:
             try:
                 with open(self.config_file, 'r') as f:
                     file_config = json.load(f)
+                    file_reviews = file_config.pop('reviews', None)
                     config.update(file_config)
+                    if isinstance(file_reviews, dict):
+                        config['reviews'].update(file_reviews)
             except Exception:
                 pass
         
@@ -225,6 +348,14 @@ class Config:
             config['gitlab_url'] = os.environ['GITLAB_URL']
         if os.environ.get('GITLAB_TOKEN'):
             config['gitlab_token'] = os.environ['GITLAB_TOKEN']
+        elif not config.get('gitlab_token'):
+            # launchd gives the poller a bare env, so a 0600 token file is the non-interactive path
+            token_file = self.config_dir / 'token'
+            try:
+                if token_file.exists():
+                    config['gitlab_token'] = token_file.read_text().strip() or None
+            except OSError:
+                pass
         if os.environ.get('GITLAB_PROJECT'):
             config['project_path'] = os.environ['GITLAB_PROJECT']
         if os.environ.get('GITLAB_REFRESH_INTERVAL'):
@@ -232,6 +363,10 @@ class Config:
                 config['refresh_interval'] = int(os.environ['GITLAB_REFRESH_INTERVAL'])
             except ValueError:
                 pass
+        if os.environ.get('GLMON_REVIEWS_DIR'):
+            config['reviews']['dir'] = os.environ['GLMON_REVIEWS_DIR']
+        if os.environ.get('GLMON_REVIEWS_ENABLED'):
+            config['reviews']['enabled'] = os.environ['GLMON_REVIEWS_ENABLED'].lower() not in ('0', 'false', 'no', 'off')
         
         return config
     
@@ -274,6 +409,25 @@ class Config:
 
     def set_export_dir(self, path: str) -> None:
         self.save_config(export_dir=path)
+
+    @property
+    def reviews(self) -> Dict[str, Any]:
+        merged = dict(REVIEWS_DEFAULTS)
+        merged.update(self._config.get('reviews') or {})
+        return merged
+
+    @property
+    def reviews_dir(self) -> Path:
+        return Path(os.path.expanduser(str(self.reviews.get('dir') or REVIEWS_DEFAULTS['dir'])))
+
+    @property
+    def reviews_enabled(self) -> bool:
+        return bool(self.reviews.get('enabled', True))
+
+    def set_reviews_enabled(self, enabled: bool) -> None:
+        reviews = self.reviews
+        reviews['enabled'] = bool(enabled)
+        self.save_config(reviews=reviews)
     
     def validate(self) -> tuple[bool, str]:
         """Validate required configuration (project_path is optional now)"""

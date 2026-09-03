@@ -6,9 +6,11 @@
 import os
 import sys
 import argparse
+import shutil
 import subprocess
 import webbrowser
 from datetime import datetime
+from pathlib import Path
 import asyncio
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Static, Input, RichLog, TextArea, Label, Markdown, RadioSet, RadioButton
@@ -18,7 +20,7 @@ from textual.screen import Screen, ModalScreen
 from textual.binding import Binding
 from rich.text import Text
 
-from .config import Config
+from .config import Config, ReviewFiles
 from . import __version__
 from .constants import (
     PIPELINE_AGE_CYCLE,
@@ -2314,6 +2316,409 @@ class MyMergeRequestsScreen(ScreenBase):
         with open(path, 'w') as f:
             f.write("\n".join(lines))
         return path
+
+
+class ReviewViewScreen(Screen):
+    """Read a local review file (markdown) for one MR."""
+
+    BINDINGS = [
+        Binding("q", "back", show=False),
+        Binding("escape", "back", show=False),
+        Binding("b", "browser", show=False),
+    ]
+
+    def __init__(self, path: str, mr: dict, entry: dict):
+        super().__init__()
+        self.path = path
+        self.mr = mr
+        self.entry = entry
+
+    def compose(self) -> ComposeResult:
+        e = self.entry
+        pairs = [
+            ("MR", f"!{self.mr.get('iid')}"),
+            ("Reviewed", str(e.get('reviewed_at') or '')[:16]),
+            ("Sha", str(e.get('sha') or '')[:8]),
+            ("Cost", f"${e.get('cost_usd', 0)}"),
+            ("Reason", str(e.get('reason') or '')),
+        ]
+        keys = [[("q", "back"), ("b", "browser"), ("j/k", "scroll")]]
+        yield K9sHeader(pairs, keys, id="header")
+        yield Static(_breadcrumb_text([self.mr.get('project_path') or "Project", f"MR !{self.mr.get('iid')}", "review"]), id="breadcrumb", classes="breadcrumb")
+        try:
+            _meta, body = ReviewFiles.parse(Path(self.path))
+        except Exception as ex:
+            body = f"cannot read {self.path}: {ex}"
+        yield ScrollableContainer(Markdown(body, id="review-md"), id="review-scroll")
+        yield StatusBar(_status_line([self.path]), id="statusbar")
+
+    async def action_back(self) -> None:
+        self.app.pop_screen()
+
+    async def action_browser(self) -> None:
+        if self.mr.get('web_url'):
+            webbrowser.open(self.mr['web_url'])
+
+
+def _reviewd_argv(*args) -> list:
+    exe = shutil.which('glmon-reviewd')
+    if exe:
+        return [exe, *args]
+    return [sys.executable, '-m', 'gitlab_monitor.reviewd', *args]
+
+
+def _spawn_reviewd(*args) -> None:
+    log_dir = Path.home() / '.cache' / 'glmon'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log = open(log_dir / 'reviewd-manual.log', 'a')
+    subprocess.Popen(_reviewd_argv(*args), stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+
+
+class MyReviewsScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "m": "open_modules", "tab": "open_modules", "v": "view_review", "R": "review_now", "T": "poll_now", "P": "toggle_auto_review", "a": "approve", "n": "note", "p": "pipelines"}
+
+    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+
+    def __init__(self, api: GitLabAPI):
+        super().__init__()
+        self.api = api
+        self.mrs = []
+        self.filtered_mrs = []
+        self._refresh_timer = None
+        self._refreshing = False
+        self._fetch_error = None
+        self._unresolved_cache = {}
+        self._review_index = {}
+        self._auto_review_enabled = api.config.reviews_enabled
+        self._row_to_mr = []
+
+    def _info_pairs(self):
+        total = len(self.mrs)
+        shown = len(self.filtered_mrs)
+        count = f"{shown}/{total}" if shown != total else str(total)
+        reviewed = sum(1 for m in self.mrs if self._review_state(m) == 'current' and (self._review_entry(m) or {}).get('reason') != 'approved-baseline')
+        stale = sum(1 for m in self.mrs if self._review_state(m) == 'stale')
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("Scope", "reviewer"),
+            ("MRs", count),
+            ("Reviewed", f"{reviewed} ({stale} stale)"),
+            ("Auto-review", "ON" if self._auto_review_enabled else "OFF"),
+        ]
+
+    def _keys(self):
+        return [
+            [("tab", "modules"),       ("/", "filter"),        ("enter", "view MR")],
+            [("r", "refresh"),         ("b", "browser"),       ("y", "copy url")],
+            [("v", "view review"),     ("R", "review now"),    ("T", "poll now")],
+            [("P", f"auto-review:{'on' if self._auto_review_enabled else 'off'}"), ("a", "approve"), ("n", "note")],
+            [("p", "pipelines"),       ("esc", "quit"),        None],
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(_breadcrumb_text(["Reviews"]), id="breadcrumb", classes="breadcrumb")
+        yield Container(
+            Input(placeholder="/  filter MRs...", id="mr-filter"),
+            id="filter-bar",
+        )
+        yield DataTable(id="mr-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _status_text(self):
+        if self._fetch_error:
+            return _status_line([("⚠ fetch failed", f"{self._fetch_error} — retrying")])
+        total = len(self.mrs)
+        shown = len(self.filtered_mrs)
+        text_filter = ""
+        try:
+            text_filter = self.query_one("#mr-filter", Input).value.strip()
+        except Exception:
+            pass
+        count = f"{shown}/{total} MRs" if shown != total else f"{total} MRs"
+        todo = sum(1 for m in self.mrs if self._review_state(m) != 'current' and not m.get('user_has_approved'))
+        parts = [count, ("needs review", str(todo)), ("dir", str(self.api.config.reviews_dir))]
+        if text_filter:
+            parts.append(("filter", text_filter))
+        return _status_line(parts)
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
+            sb.set_right(_auto_refresh_indicator(
+                self.REFRESH_INTERVAL,
+                active=self._refresh_timer is not None,
+                refreshing=self._refreshing,
+                loading_label=self._user_loading_label,
+            ))
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        table.add_columns("Rv", "Ok", "IID", "Title", "Author", "Pipeline", "Threads", "Age")
+        table.cursor_type = "row"
+        self._user_loading_label = "loading reviews..."
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
+        try:
+            await self.load_mrs()
+        finally:
+            self._clear_loading()
+        try:
+            self.query_one("#mr-table", DataTable).focus()
+        except Exception:
+            pass
+        self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
+        self._refresh_status()
+        self.api.config.save_last_view('my_reviews')
+
+    def _reload_review_state(self):
+        # poller runs in another process, so re-read enabled + files from disk each refresh
+        self._auto_review_enabled = Config().reviews_enabled
+        return self.api.config.review_files.index()
+
+    async def load_mrs(self) -> None:
+        try:
+            self.mrs = await asyncio.to_thread(self.api.get_review_requests, 'opened', 100)
+        except Exception as e:
+            self._fetch_error = f"{type(e).__name__}"
+            _dbg(f"load_mrs(reviews) fetch failed: {type(e).__name__}: {e}")
+            self._refresh_status()
+            return
+        self._fetch_error = None
+        try:
+            self._review_index = await asyncio.to_thread(self._reload_review_state)
+        except Exception as e:
+            _dbg(f"review index failed: {type(e).__name__}: {e}")
+        if self.mrs:
+            await asyncio.gather(
+                self._backfill_head_pipelines(self.mrs),
+                self._fetch_unresolved_counts(self.mrs),
+                self._backfill_approvals(self.mrs),
+            )
+        self._apply_filter()
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+            self.query_one("#header", K9sHeader).set_keys(self._keys())
+        except Exception:
+            pass
+
+    _backfill_head_pipelines = MyMergeRequestsScreen._backfill_head_pipelines
+    _fetch_unresolved_counts = MyMergeRequestsScreen._fetch_unresolved_counts
+    _safe_refresh = MyMergeRequestsScreen._safe_refresh
+    on_unmount = MyMergeRequestsScreen.on_unmount
+    on_input_changed = MyMergeRequestsScreen.on_input_changed
+    on_input_submitted = MyMergeRequestsScreen.on_input_submitted
+    action_back = MyMergeRequestsScreen.action_back
+    action_open_modules = MyMergeRequestsScreen.action_open_modules
+    action_pipelines = MyMergeRequestsScreen.action_pipelines
+    action_refresh = MyMergeRequestsScreen.action_refresh
+    action_search = MyMergeRequestsScreen.action_search
+    action_browser = MyMergeRequestsScreen.action_browser
+    action_yank = MyMergeRequestsScreen.action_yank
+    action_note = MyMergeRequestsScreen.action_note
+    _mr_at_row = MyMergeRequestsScreen._mr_at_row
+    on_data_table_row_selected = MyMergeRequestsScreen.on_data_table_row_selected
+
+    async def _backfill_approvals(self, mrs) -> None:
+        todo = [m for m in mrs if m.get('project_path') and m.get('iid') is not None]
+        if not todo:
+            return
+        results = await asyncio.gather(*(
+            asyncio.to_thread(self.api.get_mr_approvals_summary, m['project_path'], m['iid'])
+            for m in todo
+        ), return_exceptions=True)
+        for mr, r in zip(todo, results):
+            if isinstance(r, dict):
+                mr['approvals_count'] = r.get('approvals_count', 0)
+                mr['approvals_required'] = r.get('approvals_required', 0)
+                mr['user_has_approved'] = bool(r.get('user_has_approved'))
+
+    def _review_entry(self, m):
+        return self._review_index.get(f"{m.get('project_path') or ''}:{m.get('iid')}")
+
+    def _review_state(self, m):
+        e = self._review_entry(m)
+        if not e:
+            return 'none'
+        return 'current' if e.get('sha') == m.get('sha') else 'stale'
+
+    def _apply_filter(self) -> None:
+        try:
+            q = self.query_one("#mr-filter", Input).value.strip().lower()
+        except Exception:
+            q = ""
+        if not q:
+            self.filtered_mrs = list(self.mrs)
+        else:
+            self.filtered_mrs = [
+                m for m in self.mrs
+                if q in (m['title'] or '').lower()
+                or q in (m['project_path'] or '').lower()
+                or q in (m['author'] or '').lower()
+                or q in str(m['iid'])
+                or q in (m['source_branch'] or '').lower()
+            ]
+        self._update_table()
+        self._refresh_status()
+
+    def _update_table(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        prev = table.cursor_row
+        table.clear()
+        self._row_to_mr = []
+        groups = {}
+        order = []
+        for m in self.filtered_mrs:
+            key = m['project_path'] or ''
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(m)
+        order.sort(key=lambda p: (p.rsplit('/', 1)[-1] or '').lower())
+        blank = Text("")
+        ncols = 8
+        for i, proj_path in enumerate(order):
+            repo = (proj_path.rsplit('/', 1)[-1] if proj_path else 'UNKNOWN').upper()
+            table.add_row(blank, blank, Text(repo, style="bold #89b4fa"), *([blank] * (ncols - 3)))
+            self._row_to_mr.append(None)
+            for m in groups[proj_path]:
+                title = m['title'] or ''
+                if m['draft']:
+                    title = f"[draft] {title}"
+                entry = self._review_entry(m)
+                state = self._review_state(m)
+                if state == 'current' and (entry or {}).get('reason') == 'approved-baseline':
+                    rv = Text("○", style="dim")
+                elif state == 'current':
+                    rv = Text("●", style="bold #a6e3a1" if (entry or {}).get('status') == 'unread' else "dim #a6e3a1")
+                elif state == 'stale':
+                    rv = Text("◐", style="bold #f9e2af")
+                else:
+                    rv = blank
+                ok = Text("✓", style="bold #a6e3a1") if m.get('user_has_approved') else blank
+                table.add_row(
+                    rv,
+                    ok,
+                    Text(f"!{m['iid']}", style="bold #89b4fa"),
+                    Text(title[:60], style="bold #cdd6f4"),
+                    Text(m.get('author') or '', style="dim"),
+                    _pipeline_status_with_id(m.get('head_pipeline_status'), m.get('head_pipeline_id')),
+                    self._render_unresolved(m),
+                    Text(format_age(m['updated_at'] or m['created_at']), style="dim italic"),
+                )
+                self._row_to_mr.append(m)
+            if i < len(order) - 1:
+                table.add_row(*([blank] * ncols))
+                self._row_to_mr.append(None)
+        if prev is not None and self._row_to_mr:
+            target = min(prev, len(self._row_to_mr) - 1)
+            while target < len(self._row_to_mr) and self._row_to_mr[target] is None:
+                target += 1
+            if target >= len(self._row_to_mr):
+                target = next((i for i, x in enumerate(self._row_to_mr) if x is not None), 0)
+            table.move_cursor(row=target)
+
+    def _render_unresolved(self, m) -> Text:
+        unresolved = self._unresolved_cache.get((m.get('project_path') or '', m.get('iid')))
+        if unresolved is None:
+            return Text("—", style="dim")
+        if unresolved == 0:
+            return Text("0", style="dim #a6e3a1")
+        return Text(str(unresolved), style="bold #f38ba8")
+
+    def _cursor_mr(self):
+        table = self.query_one("#mr-table", DataTable)
+        return self._mr_at_row(table.cursor_row)
+
+    async def action_view_review(self) -> None:
+        m = self._cursor_mr()
+        if m is None:
+            return
+        entry = self._review_entry(m)
+        if not entry:
+            self.notify(f"No review yet for !{m['iid']} — R to run one now", severity="warning", timeout=3)
+            return
+        if entry.get('status') == 'unread':
+            try:
+                self.api.config.review_files.set_status(m['project_path'], m['iid'], 'read')
+            except Exception:
+                pass
+        self.app.push_screen(ReviewViewScreen(entry['path'], m, entry))
+
+    async def action_review_now(self) -> None:
+        m = self._cursor_mr()
+        if m is None:
+            return
+        try:
+            _spawn_reviewd('--mr', f"{m['project_path']}!{m['iid']}")
+        except Exception as e:
+            self.notify(f"Could not start review: {e}", severity="error", timeout=4)
+            return
+        self.notify(f"Review started for !{m['iid']} — lands in a few minutes", timeout=4)
+
+    async def action_poll_now(self) -> None:
+        try:
+            _spawn_reviewd('--once')
+        except Exception as e:
+            self.notify(f"Could not start poller: {e}", severity="error", timeout=4)
+            return
+        self.notify("Poller tick started — log: ~/.cache/glmon/reviewd-manual.log", timeout=4)
+
+    async def action_toggle_auto_review(self) -> None:
+        target = not self._auto_review_enabled
+
+        def _after(confirmed):
+            if not confirmed:
+                return
+            try:
+                Config().set_reviews_enabled(target)
+            except Exception as e:
+                self.notify(f"Could not update config: {e}", severity="error", timeout=4)
+                return
+            self._auto_review_enabled = target
+            self.notify(f"Auto-review {'ON' if target else 'OFF'}", timeout=3)
+            try:
+                self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+                self.query_one("#header", K9sHeader).set_keys(self._keys())
+            except Exception:
+                pass
+
+        self.app.push_screen(
+            ConfirmModal(f"Turn auto-review {'ON' if target else 'OFF'}?",
+                         detail="poller keeps running; OFF skips every tick until re-enabled", default=True),
+            _after,
+        )
+
+    async def action_approve(self) -> None:
+        m = self._cursor_mr()
+        if m is None:
+            return
+        if m.get('state') != 'opened':
+            self.notify(f"Cannot approve — MR is {m.get('state')}", severity="warning", timeout=3)
+            return
+
+        async def _do():
+            try:
+                await asyncio.to_thread(self.api.approve_merge_request, m['project_path'], m['iid'])
+                self.notify(f"Approved MR !{m['iid']}", timeout=2)
+                await self.load_mrs()
+            except Exception as e:
+                self.notify(f"Approve failed: {e}", severity="error", timeout=4)
+
+        self.app.push_screen(
+            ConfirmModal(f"Approve MR !{m['iid']}?", detail=(m.get('title') or '')[:60]),
+            lambda ok: asyncio.ensure_future(_do()) if ok else None,
+        )
 
 
 class ProjectMergeRequestsScreen(ScreenBase):
@@ -5669,6 +6074,7 @@ MODULE_PROJECTS = "projects"
 MODULE_MRS = "mrs"
 MODULE_PIPELINES = "pipelines"
 MODULE_TAGS = "tags"
+MODULE_REVIEWS = "reviews"
 
 
 class ModuleModal(ModalScreen[str | None]):
@@ -5680,6 +6086,7 @@ class ModuleModal(ModalScreen[str | None]):
         (MODULE_MRS,       "3", "MRs",       "my merge requests"),
         (MODULE_PIPELINES, "4", "Pipelines", "my pipelines (across favorites)"),
         (MODULE_TAGS,      "5", "Tags",      "project tags + create/push"),
+        (MODULE_REVIEWS,   "6", "Reviews",   "MRs where I am reviewer + local AI reviews"),
     ]
 
     BINDINGS = [
@@ -5688,6 +6095,7 @@ class ModuleModal(ModalScreen[str | None]):
         Binding("3", "pick_index('2')", show=False),
         Binding("4", "pick_index('3')", show=False),
         Binding("5", "pick_index('4')", show=False),
+        Binding("6", "pick_index('5')", show=False),
         Binding("k", "cursor_up", show=False),
         Binding("j", "cursor_down", show=False),
         Binding("escape", "cancel", show=False),
@@ -6303,6 +6711,8 @@ class PipelineMonitor(App):
                 self.switch_screen(MyPipelineListScreen(self.api, age_days=self.default_age_days))
             elif result == MODULE_TAGS:
                 self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites, target='tags'))
+            elif result == MODULE_REVIEWS:
+                self.switch_screen(MyReviewsScreen(self.api))
 
         self.push_screen(ModuleModal(), _after)
 
