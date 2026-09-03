@@ -4056,6 +4056,9 @@ class ProjectHubScreen(ScreenBase):
                 ("Tags", f"latest {self._tags_all[0]['name']}" if self._tags_all else "none"),
                 ("Pipeline", self._pipes_all[0]['status'] if self._pipes_all else "none"),
             ]
+            deploys = [p for p in self._pipes_all if p.get('is_tag')]
+            if deploys:
+                pairs.append(("Deploy", f"{deploys[0]['ref']} · {deploys[0]['status']}"))
         return pairs
 
     def _keys(self):
@@ -4157,17 +4160,21 @@ class ProjectHubScreen(ScreenBase):
                 self.default_branch = ''
         w = self.window_days
         ref = self.default_branch or None
-        commits, mrs, pipes, tags, meta = await asyncio.gather(
+        commits, mrs, pipes, tag_pipes, tags, meta = await asyncio.gather(
             asyncio.to_thread(self.api.list_commits, self.project_path, ref, w, 100),
             asyncio.to_thread(self.api.get_project_merge_requests, self.project_path, 'opened', 100),
             asyncio.to_thread(self.api.list_recent_pipelines, self.project_path, ref, w, 20),
+            asyncio.to_thread(self.api.list_tag_pipelines, self.project_path, 20),
             asyncio.to_thread(self.api.list_tags, self.project_path, self.TAG_ROWS),
             asyncio.to_thread(self.api.get_project_meta, self.project_path),
             return_exceptions=True,
         )
         self._commits_all = commits if isinstance(commits, list) else []
         self._mrs_all = mrs if isinstance(mrs, list) else []
-        self._pipes_all = pipes if isinstance(pipes, list) else []
+        self._pipes_all = self._merge_tag_pipes(
+            pipes if isinstance(pipes, list) else [],
+            tag_pipes if isinstance(tag_pipes, list) else [],
+        )
         self._tags_all = tags if isinstance(tags, list) else []
         if isinstance(meta, dict):
             self.last_activity = meta.get('last_activity', '') or ''
@@ -4178,6 +4185,17 @@ class ProjectHubScreen(ScreenBase):
         await self._backfill_commit_pipes(self._commits_shown)
         self._loaded = True
         self._populate()
+
+    @staticmethod
+    def _merge_tag_pipes(branch_pipes, tag_pipes):
+        # tag deploys never match the default-branch ref filter, so pin the live ones on top
+        seen = {p.get('id') for p in branch_pipes}
+        live = [
+            dict(p, is_tag=True) for p in tag_pipes
+            if p.get('status') not in TERMINAL_STATUSES and p.get('id') not in seen
+        ]
+        live.sort(key=lambda p: p.get('updated_at') or '', reverse=True)
+        return live + branch_pipes
 
     async def _backfill_commit_pipes(self, commits) -> None:
         todo = [c for c in commits if c.get('id')]
@@ -4202,7 +4220,11 @@ class ProjectHubScreen(ScreenBase):
         except Exception:
             pass
         self._set_title("#hub-commits-title", f"Commits · {self.window_days}d")
-        self._set_title("#hub-pipelines-title", f"Pipelines · {self.window_days}d")
+        n_deploys = sum(1 for p in self._pipes_all if p.get('is_tag'))
+        pipes_title = f"Pipelines · {self.window_days}d"
+        if n_deploys:
+            pipes_title += f" · {n_deploys} tag deploy{'s' if n_deploys > 1 else ''}"
+        self._set_title("#hub-pipelines-title", pipes_title)
         self._refresh_status()
 
     def _set_title(self, tid, text) -> None:
@@ -4239,7 +4261,8 @@ class ProjectHubScreen(ScreenBase):
         t.clear()
         for p in self._pipes_shown:
             status = status_badge(p.get('status')) if p.get('status') else Text("—", style="dim")
-            ref = Text((p.get('ref') or '')[:26], style="#89b4fa")
+            ref_style = "bold #f9e2af" if p.get('is_tag') else "#89b4fa"
+            ref = Text((p.get('ref') or '')[:26], style=ref_style)
             age = Text(format_age(p['updated_at']) if p.get('updated_at') else '—', style="dim italic")
             t.add_row(status, ref, age)
         if not self._pipes_shown:
@@ -4399,7 +4422,7 @@ class MyWorkScreen(ScreenBase):
         "M": "all_mrs", "P": "all_pipelines",
     }
 
-    PANEL_IDS = ["work-favs", "work-mrs"]
+    PANEL_IDS = ["work-favs", "work-deploys", "work-mrs"]
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -4409,6 +4432,7 @@ class MyWorkScreen(ScreenBase):
         self._favs = []
         self._mrs = []
         self._mr_rows = []
+        self._deploys = []
         self._loaded = False
         self._refresh_timer = None
         self._refreshing = False
@@ -4424,6 +4448,9 @@ class MyWorkScreen(ScreenBase):
                 ("Favorites", str(len(self._favs))),
                 ("Open MRs", f"{len(self._mrs)} · {repos} repos"),
             ]
+            live = [d for d in self._deploys if d.get('status') not in TERMINAL_STATUSES]
+            if live:
+                pairs.append(("Deploy", f"{live[0]['ref']} · {live[0]['status']}"))
         return pairs
 
     def _keys(self):
@@ -4441,6 +4468,12 @@ class MyWorkScreen(ScreenBase):
                 Static("Favorites", id="work-favs-title", classes="hub-panel-title"),
                 DataTable(id="work-favs"),
                 id="work-favs-panel",
+                classes="hub-panel",
+            ),
+            Container(
+                Static("My Tag Deploys", id="work-deploys-title", classes="hub-panel-title"),
+                DataTable(id="work-deploys"),
+                id="work-deploys-panel",
                 classes="hub-panel",
             ),
             Container(
@@ -4469,6 +4502,7 @@ class MyWorkScreen(ScreenBase):
     async def on_mount(self) -> None:
         for tid, cols in (
             ("#work-favs", ("Project", "MRs", "Pipeline", "Active")),
+            ("#work-deploys", ("Project", "Tag", "Status", "Age")),
             ("#work-mrs", ("Project / MR", "Branch", "Title", "Created", "Status")),
         ):
             t = self.query_one(tid, DataTable)
@@ -4510,6 +4544,11 @@ class MyWorkScreen(ScreenBase):
         for f in self._favs:
             f['mr_count'] = counts.get(f['path'], 0)
         self._build_mr_rows()
+        if any(d.get('status') not in TERMINAL_STATUSES for d in self._deploys):
+            try:
+                await self._load_deploys()
+            except Exception:
+                pass
         self._populate()
         self._refreshing = False
 
@@ -4575,9 +4614,29 @@ class MyWorkScreen(ScreenBase):
             self._fill_favs()
         except Exception as e:
             _dbg(f"mywork fav backfill fill: {type(e).__name__}: {e}")
+        await self._load_deploys()
+
+    async def _load_deploys(self) -> None:
+        if not self._favs:
+            return
+        user = await asyncio.to_thread(self.api.current_username)
+        results = await asyncio.gather(*(
+            asyncio.to_thread(self.api.list_tag_pipelines, f['path'], 5, user)
+            for f in self._favs
+        ), return_exceptions=True)
+        deploys = [r[0] for r in results if isinstance(r, list) and r]
+        # one row per repo (latest tag i pushed); live deploys pinned above finished ones
+        deploys.sort(key=lambda d: d.get('updated_at') or '', reverse=True)
+        deploys.sort(key=lambda d: d.get('status') in TERMINAL_STATUSES)
+        self._deploys = deploys
+        try:
+            self._fill_deploys()
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+        except Exception as e:
+            _dbg(f"mywork deploy fill: {type(e).__name__}: {e}")
 
     def _populate(self) -> None:
-        for fill in (self._fill_favs, self._fill_mrs):
+        for fill in (self._fill_favs, self._fill_deploys, self._fill_mrs):
             try:
                 fill()
             except Exception as e:
@@ -4601,6 +4660,25 @@ class MyWorkScreen(ScreenBase):
             t.add_row(proj, cnt, pipe, active)
         if not self._favs:
             t.add_row(Text("no favorites — star repos with 's' in Projects", style="dim italic"),
+                      Text(""), Text(""), Text(""))
+        if prev:
+            try:
+                t.move_cursor(row=min(prev, t.row_count - 1))
+            except Exception:
+                pass
+
+    def _fill_deploys(self) -> None:
+        t = self.query_one("#work-deploys", DataTable)
+        prev = t.cursor_row
+        t.clear()
+        for d in self._deploys:
+            proj = Text((d.get('project_path') or '')[:38], style="#89b4fa")
+            tag = Text((d.get('ref') or '')[:24], style="bold #f9e2af")
+            badge = status_badge(d.get('status')) if d.get('status') else Text("—", style="dim")
+            age = Text(format_age(d['updated_at']) if d.get('updated_at') else '—', style="dim italic")
+            t.add_row(proj, tag, badge, age)
+        if not self._deploys:
+            t.add_row(Text("no tag pipelines you triggered", style="dim italic"),
                       Text(""), Text(""), Text(""))
         if prev:
             try:
@@ -4651,6 +4729,14 @@ class MyWorkScreen(ScreenBase):
         except Exception:
             pass
         try:
+            dep_t = self.query_one("#work-deploys", DataTable)
+            if dep_t.has_focus:
+                d = self._row(self._deploys, dep_t.cursor_row)
+                if d:
+                    return ('deploy', d)
+        except Exception:
+            pass
+        try:
             mr_t = self.query_one("#work-mrs", DataTable)
             if mr_t.has_focus:
                 e = self._row(self._mr_rows, mr_t.cursor_row)
@@ -4665,6 +4751,8 @@ class MyWorkScreen(ScreenBase):
         kind, d = focused
         if kind == 'fav':
             return f"{base}/{d['path']}"
+        if kind == 'deploy':
+            return d.get('web_url') or f"{base}/{d['project_path']}/-/pipelines/{d['id']}"
         return d.get('web_url') or f"{base}/{d['project_path']}/-/merge_requests/{d['iid']}"
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -4675,6 +4763,17 @@ class MyWorkScreen(ScreenBase):
             if f:
                 self.api.set_project(f['path'])
                 self.app.push_screen(ProjectHubScreen(self.api, f['path']))
+        elif tid == "work-deploys":
+            d = self._row(self._deploys, row)
+            if d:
+                proj = d.get('project_path') or ''
+                ds_api = GitLabAPI(self.api.config)
+                try:
+                    ds_api.set_project(proj)
+                except Exception:
+                    self.notify(f"Cannot access {proj}", severity="error", timeout=3)
+                    return
+                self.app.push_screen(JobListScreen(ds_api, d))
         elif tid == "work-mrs":
             entry = self._row(self._mr_rows, row)
             if entry and entry[0] == 'mr':
@@ -5815,6 +5914,10 @@ class PipelineMonitor(App):
 
     #work-favs-panel {
         height: 16;
+    }
+
+    #work-deploys-panel {
+        height: 10;
     }
 
     #work-mrs-panel {

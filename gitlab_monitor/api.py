@@ -832,6 +832,18 @@ class GitLabAPI:
         except Exception:
             return []
 
+    def list_tag_pipelines(self, project_path, limit=20, username=None):
+        # no updated_after window: a stalled tag deploy stops updating but still matters
+        try:
+            project = self.gl.projects.get(project_path)
+            params = {'per_page': limit, 'order_by': 'id', 'sort': 'desc', 'scope': 'tags'}
+            if username:
+                params['username'] = username
+            pipelines = project.pipelines.list(**params)
+            return [self._pipeline_to_dict(p, project_path=project_path) for p in pipelines]
+        except Exception:
+            return []
+
     def get_commit_pipeline(self, project_path, sha):
         if not sha:
             return None
