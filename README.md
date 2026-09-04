@@ -213,7 +213,7 @@ Two flavors: **My MRs** (module `3`) is a cross-project view of the MRs you auth
 
 ![MR detail](glmon-assets/MR-detail.png)
 
-Title, description, author, source/target branches, pipeline status, and approval state. Drill into pipelines (`p`) or commits (`k`) from here. Quick actions, each behind a confirm: merge (`M`), toggle auto-merge / merge-when-pipeline-succeeds (`A`), approve (`a`), close (`x`), and comment (`c`). `f` toggles resolved discussions.
+Title, description, author, source/target branches, pipeline status, and approval state. Drill into pipelines (`p`) or commits (`k`) from here. Quick actions, each behind a confirm: merge (`M`), toggle auto-merge / merge-when-pipeline-succeeds (`A`), approve (`a`), close (`x`), and comment (`c`). `f` toggles resolved discussions. When a local review file exists for the MR, a `Review:` line sits between approvals and the description showing current or stale, the review time, unread, and whether it has been posted; `v` opens it in a modal (`q` closes). `R` runs an adversarial review for this MR now, whether or not one exists; the section updates on the next refresh.
 
 ![MR commits](glmon-assets/MR-commits.png)
 
@@ -250,7 +250,7 @@ Module `6`. Lists every open MR where you are a reviewer, grouped by repository,
 | `◐` | reviewed, but the author has pushed since; stale |
 | `○` | you approved this before any review existed; the sha is pinned so a later push is still caught |
 
-Keys: `v` opens the review file in a markdown viewer, `R` runs a review for the highlighted MR right now, `T` runs one poller tick right now, `P` toggles the auto-review kill switch, `a` approves (confirm), `enter` opens MR detail, plus the usual `/`, `b`, `y`, `n`, `p`.
+Keys: `v` opens the review file in a markdown modal (`q` closes, `y` copies the review, `c` posts it as an MR comment after a confirm, `R` re-runs the review), `R` runs a review for the highlighted MR right now, `T` runs one poller tick right now, `P` toggles the auto-review kill switch, `a` approves (confirm), `enter` opens MR detail, plus the usual `/`, `b`, `y`, `n`, `p`.
 
 #### The poller
 
@@ -405,13 +405,17 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | `c` | Comment |
 | `p` / `k` | Open pipelines / commits |
 | `f` | Toggle resolved discussions |
+| `v` | Open the local review file, if one exists |
+| `R` | Run an adversarial review for this MR now (re-reviews if one exists) |
 
 ### Reviews
 
 | Key | Action |
 |-----|--------|
 | `/` | Focus filter input |
-| `v` | View the local review (marks it read) |
+| `v` | View the local review (marks it read); inside the viewer `y` copies it, `c` posts it as an MR comment (confirm), `R` re-runs it |
+
+Copying part of a review: click and drag inside the modal to select, then `y` or `ctrl+c` copies the selection (`y` with nothing selected copies the whole review). `ctrl+c` with nothing selected still quits. This applies to any text in glmon, not only reviews. If you want the terminal's own selection instead (Cmd+C), hold Shift while dragging so the terminal keeps the mouse; WezTerm, iTerm2, and kitty all support that.
 | `R` | Run a review for the selected MR now |
 | `T` | Run one poller tick now |
 | `P` | Toggle auto-review on/off (confirm) |

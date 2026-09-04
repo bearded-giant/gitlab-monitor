@@ -2318,46 +2318,145 @@ class MyMergeRequestsScreen(ScreenBase):
         return path
 
 
-class ReviewViewScreen(Screen):
-    """Read a local review file (markdown) for one MR."""
+def _start_review(screen, project_path: str, iid: int) -> bool:
+    try:
+        _spawn_reviewd('--mr', f"{project_path}!{iid}")
+    except Exception as e:
+        screen.notify(f"Could not start review: {e}", severity="error", timeout=4)
+        return False
+    screen.notify(f"Review started for !{iid} — lands in a few minutes", timeout=4)
+    return True
+
+
+class ReviewModal(ModalScreen[None]):
+    """Read-only local review file for one MR. 70% box, scrolls, q closes."""
 
     BINDINGS = [
         Binding("q", "back", show=False),
         Binding("escape", "back", show=False),
         Binding("b", "browser", show=False),
+        Binding("y", "yank", show=False),
+        Binding("c", "post_comment", show=False),
+        Binding("R", "review_now", show=False),
+        Binding("j", "scroll_down", show=False),
+        Binding("k", "scroll_up", show=False),
     ]
 
-    def __init__(self, path: str, mr: dict, entry: dict):
+    def __init__(self, path: str, mr: dict, entry: dict, api: GitLabAPI = None):
         super().__init__()
         self.path = path
         self.mr = mr
         self.entry = entry
+        self.api = api
+        self.body = ""
+
+    def _head(self) -> Text:
+        e = self.entry
+        t = Text()
+        t.append(f"MR !{self.mr.get('iid')}  ", style="bold #f9e2af")
+        t.append((self.mr.get('title') or e.get('title') or '')[:80], style="bold #cdd6f4")
+        t.append("\n")
+        meta = [
+            f"reviewed {str(e.get('reviewed_at') or '')[:16]}",
+            f"sha {str(e.get('sha') or '')[:8]}",
+            f"${e.get('cost_usd', 0)}",
+            str(e.get('reason') or ''),
+        ]
+        if e.get('posted_at'):
+            meta.append(f"posted {str(e['posted_at'])[:16]}")
+        t.append("  ·  ".join(x for x in meta if x), style="#a6adc8")
+        t.append("\n")
+        for i, (k, label) in enumerate([("q", "close"), ("y", "yank sel/all"), ("c", "post as comment"), ("R", "re-review"), ("b", "browser"), ("j/k", "scroll")]):
+            if i:
+                t.append("  ·  ", style="#6c7086")
+            t.append(f"{k} ", style="bold #f9e2af")
+            t.append(label, style="#6c7086")
+        return t
 
     def compose(self) -> ComposeResult:
-        e = self.entry
-        pairs = [
-            ("MR", f"!{self.mr.get('iid')}"),
-            ("Reviewed", str(e.get('reviewed_at') or '')[:16]),
-            ("Sha", str(e.get('sha') or '')[:8]),
-            ("Cost", f"${e.get('cost_usd', 0)}"),
-            ("Reason", str(e.get('reason') or '')),
-        ]
-        keys = [[("q", "back"), ("b", "browser"), ("j/k", "scroll")]]
-        yield K9sHeader(pairs, keys, id="header")
-        yield Static(_breadcrumb_text([self.mr.get('project_path') or "Project", f"MR !{self.mr.get('iid')}", "review"]), id="breadcrumb", classes="breadcrumb")
         try:
-            _meta, body = ReviewFiles.parse(Path(self.path))
+            _meta, self.body = ReviewFiles.parse(Path(self.path))
         except Exception as ex:
-            body = f"cannot read {self.path}: {ex}"
-        yield ScrollableContainer(Markdown(body, id="review-md"), id="review-scroll")
-        yield StatusBar(_status_line([self.path]), id="statusbar")
+            self.body = f"cannot read {self.path}: {ex}"
+        yield Container(
+            Static(self._head(), id="review-head"),
+            ScrollableContainer(Markdown(self.body, id="review-md"), id="review-scroll"),
+            Static(Text(self.path, style="dim #6c7086"), id="review-foot"),
+            id="review-box",
+        )
+
+    def on_mount(self) -> None:
+        try:
+            self.query_one("#review-scroll", ScrollableContainer).focus()
+        except Exception:
+            pass
+
+    async def action_scroll_down(self) -> None:
+        self.query_one("#review-scroll", ScrollableContainer).scroll_down()
+
+    async def action_scroll_up(self) -> None:
+        self.query_one("#review-scroll", ScrollableContainer).scroll_up()
+
+    async def action_review_now(self) -> None:
+        if _start_review(self, self.mr.get('project_path'), self.mr.get('iid')):
+            self.dismiss(None)
+
+    def _comment_body(self) -> str:
+        # ponytail: file body opens with "# title" + MR url; both are noise inside a comment on that same MR
+        lines = self.body.strip().splitlines()
+        if lines and lines[0].startswith('# '):
+            lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines = lines[1:]
+        if lines and lines[0].strip() == (self.mr.get('web_url') or ''):
+            lines = lines[1:]
+        return "\n".join(lines).strip()
 
     async def action_back(self) -> None:
-        self.app.pop_screen()
+        self.dismiss(None)
 
     async def action_browser(self) -> None:
         if self.mr.get('web_url'):
             webbrowser.open(self.mr['web_url'])
+
+    async def action_yank(self) -> None:
+        selected = self.get_selected_text()
+        if selected:
+            self.app.copy_to_clipboard(selected)
+            self.clear_selection()
+            return
+        if self.body and copy_to_clipboard(self.body):
+            self.notify(f"Copied review for !{self.mr.get('iid')}", timeout=2)
+
+    async def action_post_comment(self) -> None:
+        if not self.api or not self.body:
+            return
+        body = self._comment_body()
+        if not body:
+            return
+
+        def _after(ok):
+            if ok:
+                asyncio.ensure_future(self._do_post(body))
+
+        posted = self.entry.get('posted_at')
+        detail = f"already posted {str(posted)[:16]}" if posted else f"{len(body)} chars"
+        self.app.push_screen(ConfirmModal(f"Post review as comment on !{self.mr.get('iid')}?", detail), _after)
+
+    async def _do_post(self, body: str) -> None:
+        project_path, iid = self.mr.get('project_path'), self.mr.get('iid')
+        try:
+            await asyncio.to_thread(self.api.create_mr_note, project_path, iid, body)
+        except Exception as e:
+            self.notify(f"Post failed: {e}", severity="error", timeout=4)
+            return
+        posted_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        self.entry['posted_at'] = posted_at
+        try:
+            self.api.config.review_files.update_meta(project_path, iid, posted_at=posted_at)
+        except Exception:
+            pass
+        self.notify("Review posted as comment", timeout=2)
 
 
 def _reviewd_argv(*args) -> list:
@@ -2653,18 +2752,13 @@ class MyReviewsScreen(ScreenBase):
                 self.api.config.review_files.set_status(m['project_path'], m['iid'], 'read')
             except Exception:
                 pass
-        self.app.push_screen(ReviewViewScreen(entry['path'], m, entry))
+        self.app.push_screen(ReviewModal(entry['path'], m, entry, api=self.api))
 
     async def action_review_now(self) -> None:
         m = self._cursor_mr()
         if m is None:
             return
-        try:
-            _spawn_reviewd('--mr', f"{m['project_path']}!{m['iid']}")
-        except Exception as e:
-            self.notify(f"Could not start review: {e}", severity="error", timeout=4)
-            return
-        self.notify(f"Review started for !{m['iid']} — lands in a few minutes", timeout=4)
+        _start_review(self, m['project_path'], m['iid'])
 
     async def action_poll_now(self) -> None:
         try:
@@ -2988,6 +3082,8 @@ class MergeRequestDetailScreen(ScreenBase):
         "g": "goto",
         "f": "toggle_resolved",
         "t": "toggle_auto",
+        "v": "review",
+        "R": "review_now",
     }
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
@@ -3034,7 +3130,8 @@ class MergeRequestDetailScreen(ScreenBase):
             [("p", "pipelines"),  ("k", "commits"),    ("g", "goto MR")],
             [("a", "approve"),    ("c", "comment"),    ("x", "close")],
             [("A", "auto-merge"), ("f", resolved_label),("t", auto_label)],
-            [("M", "merge"),      ("q", "back")],
+            [("M", "merge"),      ("v", "review"),     ("R", "review now")],
+            [("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -3047,6 +3144,7 @@ class MergeRequestDetailScreen(ScreenBase):
                 id="mr-cols",
             ),
             Static("", id="mr-approvals"),
+            Static("", id="mr-review"),
             Static("", id="mr-desc-heading", classes="mr-section"),
             Markdown("", id="mr-desc"),
             Static("", id="mr-disc-heading", classes="mr-section"),
@@ -3227,6 +3325,31 @@ class MergeRequestDetailScreen(ScreenBase):
                 out.append(f"[{name}]", style="dim #a6adc8")
         return out
 
+    def _review_entry(self):
+        try:
+            return self.api.config.review_files.get(self.project_path, self.iid)
+        except Exception:
+            return None
+
+    def _build_review(self) -> Text:
+        e = self._review_entry()
+        out = Text()
+        if not e:
+            return out
+        out.append("Review: ", style="bold #f9e2af")
+        if e.get('sha') and e['sha'] != self.mr.get('sha'):
+            out.append("stale", style="bold #fab387")
+            out.append(f" (reviewed at {str(e['sha'])[:8]}, head is {str(self.mr.get('sha') or '')[:8]})", style="dim #a6adc8")
+        else:
+            out.append("current", style="bold #a6e3a1")
+        out.append(f"   {str(e.get('reviewed_at') or '')[:16]}", style="#cdd6f4")
+        if e.get('status') == 'unread':
+            out.append("   unread", style="bold #89b4fa")
+        if e.get('posted_at'):
+            out.append(f"   posted {str(e['posted_at'])[:16]}", style="#a6e3a1")
+        out.append("   v to open", style="dim #a6adc8")
+        return out
+
     def _build_discussions(self) -> Text:
         visible = self.discussions if self.show_resolved else [
             d for d in self.discussions if d.get('unresolved') or not d.get('resolvable')
@@ -3284,6 +3407,7 @@ class MergeRequestDetailScreen(ScreenBase):
                 self.query_one("#mr-col-left", Static).update(Text("MR not found", style="bold #f38ba8"))
                 self.query_one("#mr-col-right", Static).update("")
                 self.query_one("#mr-approvals", Static).update("")
+                self.query_one("#mr-review", Static).update("")
                 self.query_one("#mr-desc-heading", Static).update("")
                 self.query_one("#mr-desc", Markdown).update("")
                 self.query_one("#mr-disc-heading", Static).update("")
@@ -3295,6 +3419,10 @@ class MergeRequestDetailScreen(ScreenBase):
             self.query_one("#mr-col-left", Static).update(self._build_left_col())
             self.query_one("#mr-col-right", Static).update(self._build_right_col())
             self.query_one("#mr-approvals", Static).update(self._build_approvals())
+            review = self._build_review()
+            review_widget = self.query_one("#mr-review", Static)
+            review_widget.display = bool(review)
+            review_widget.update(review)
             self.query_one("#mr-desc-heading", Static).update(Text(" DESCRIPTION ", style="bold white on #89b4fa"))
             desc = (self.mr.get('description') or '').strip()
             self.query_one("#mr-desc", Markdown).update(desc if desc else "*(no description)*")
@@ -3327,6 +3455,24 @@ class MergeRequestDetailScreen(ScreenBase):
         if not self.mr:
             return
         self.app.push_screen(MRPipelineListScreen(self.api, self.project_path, self.mr))
+
+    async def action_review(self) -> None:
+        if not self.mr:
+            return
+        entry = self._review_entry()
+        if not entry:
+            self.notify(f"No local review for !{self.iid}", severity="warning", timeout=3)
+            return
+        if entry.get('status') == 'unread':
+            try:
+                self.api.config.review_files.set_status(self.project_path, self.iid, 'read')
+            except Exception:
+                pass
+        self.app.push_screen(ReviewModal(entry['path'], self.mr, entry, api=self.api))
+
+    async def action_review_now(self) -> None:
+        if self.mr:
+            _start_review(self, self.project_path, self.iid)
 
     async def action_commits(self) -> None:
         if not self.mr:
@@ -6178,7 +6324,7 @@ class PipelineMonitor(App):
     TITLE = "glmon"
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
+        Binding("ctrl+c", "copy_or_quit", "Quit", show=False, priority=True),
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
         Binding("question_mark", "about", "About", show=False, priority=True),
     ]
@@ -6277,6 +6423,43 @@ class PipelineMonitor(App):
     AboutModal {
         align: center middle;
         background: #1e1e2e 70%;
+    }
+
+    ReviewModal {
+        align: center middle;
+        background: #1e1e2e 70%;
+    }
+
+    #review-box {
+        width: 70%;
+        height: 70%;
+        background: #313244;
+        border: tall #89b4fa;
+        padding: 0 1;
+    }
+
+    #review-head {
+        width: 100%;
+        height: auto;
+        color: #cdd6f4;
+        margin-bottom: 1;
+    }
+
+    #review-scroll {
+        width: 100%;
+        height: 1fr;
+        background: #1e1e2e;
+    }
+
+    #review-md {
+        width: 100%;
+        height: auto;
+    }
+
+    #review-foot {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
     }
 
     #about-box {
@@ -6636,7 +6819,7 @@ class PipelineMonitor(App):
         padding: 0 2 0 0;
     }
 
-    #mr-approvals {
+    #mr-approvals, #mr-review {
         width: 100%;
         height: auto;
         background: #181825;
@@ -6692,6 +6875,24 @@ class PipelineMonitor(App):
 
     def action_quit(self) -> None:
         self.exit()
+
+    def action_copy_or_quit(self) -> None:
+        # ponytail: textual binds ctrl+c to copy-selection; keep quit for the no-selection case
+        try:
+            selected = self.screen.get_selected_text()
+        except Exception:
+            selected = None
+        if selected:
+            self.copy_to_clipboard(selected)
+            self.screen.clear_selection()
+            return
+        self.exit()
+
+    def copy_to_clipboard(self, text: str) -> None:
+        if copy_to_clipboard(text):
+            self.notify(f"Copied {len(text)} chars", timeout=2)
+            return
+        super().copy_to_clipboard(text)
 
     def open_modules(self) -> None:
         for s in self.screen_stack:
