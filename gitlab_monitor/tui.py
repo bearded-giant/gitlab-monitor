@@ -1669,6 +1669,23 @@ class FailedJobsScreen(ScreenBase):
             "Failed jobs",
         ])
 
+    async def on_mount(self) -> None:
+        self.call_after_refresh(lambda: asyncio.create_task(self._load_failures()))
+
+    async def _load_failures(self) -> None:
+        log = self.query_one("#failures-log", RichLog)
+        for job in self.failed_jobs:
+            log.write(Text(f"{job['name']} (stage: {job['stage']}, id: {job['id']})", style="bold #f38ba8"))
+            try:
+                failures = await asyncio.to_thread(self.api.get_job_failures, job['id'])
+            except Exception as e:
+                log.write(Text(f"  could not load failures: {type(e).__name__}", style="dim"))
+                failures = []
+            for f in failures[:10]:
+                log.write(Text(f"  {f}", style="#f38ba8"))
+            if not failures:
+                log.write(Text("  No failures detected", style="dim"))
+            log.write("")
 
     async def action_back(self) -> None:
         self.app.pop_screen()
@@ -6227,7 +6244,7 @@ class ModuleModal(ModalScreen[str | None]):
     """Module switcher. Returns selected module id or None on cancel."""
 
     MODULES = [
-        (MODULE_MYWORK,    "1", "My Work",     "favorites + my open MRs by branch"),
+        (MODULE_MYWORK,    "1", "My Work",     "favorites, tag deploys, my open MRs"),
         (MODULE_PROJECTS,  "2", "Project Hub", "favorites + commits, MRs, tags, pipelines"),
         (MODULE_MRS,       "3", "MRs",       "my merge requests"),
         (MODULE_PIPELINES, "4", "Pipelines", "my pipelines (across favorites)"),
@@ -6952,7 +6969,7 @@ class PipelineMonitor(App):
             # cross-project home (My Work) doesn't need a default project
             pass
 
-        # explicit -p / GITLAB_PROJECT opens that project's pipelines directly
+        # only -p opens that project's pipelines directly; GITLAB_PROJECT alone still lands on My Work
         if self.explicit_project and self.api.project:
             self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
             self.push_screen(PipelineListScreen(
@@ -7006,9 +7023,9 @@ def main():
         print("\nRequired environment variables:")
         print("  export GITLAB_URL=https://gitlab.example.com")
         print("  export GITLAB_TOKEN=your_personal_access_token")
-        print("\nOptional (skips project picker):")
-        print("  export GITLAB_PROJECT=group/project")
-        print("  --project group/project")
+        print("\nOptional:")
+        print("  export GITLAB_PROJECT=group/project   # default project")
+        print("  --project group/project               # skip My Work, open its pipelines")
         sys.exit(1)
 
     app = PipelineMonitor(

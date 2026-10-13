@@ -51,8 +51,7 @@ export GITLAB_TOKEN=your_personal_access_token
 
 ### Optional Environment Variables
 ```bash
-export GITLAB_PROJECT=group/project         # skip project picker, go straight to pipelines
-export GITLAB_REFRESH_INTERVAL=30           # seconds between auto-refresh (default: 30)
+export GITLAB_PROJECT=group/project         # default project (still lands on My Work; -p skips it)
 export GLMON_REVIEWS_DIR=~/dev/reviews      # where the Reviews module keeps local review files
 export GLMON_REVIEWS_ENABLED=0              # kill switch for the auto-review poller (0/false/off)
 ```
@@ -64,11 +63,11 @@ Override default refresh cadences for each view. Useful when GitLab traces are l
 export GLMON_PIPELINE_REFRESH_INTERVAL=10   # pipeline list refresh (default: 10s)
 export GLMON_JOB_REFRESH_INTERVAL=10        # job list refresh (default: 10s)
 export GLMON_LOG_REFRESH_INTERVAL=5         # log view: status/duration meta tick (default: 5s)
-export GLMON_TRACE_REFRESH_INTERVAL=20      # log view: trace fetch cadence (default: 20s)
+export GLMON_TRACE_REFRESH_INTERVAL=2       # log view: trace fetch cadence (default: 2s)
 export GLMON_FETCH_TIMEOUT=30               # per-fetch timeout in log view (default: 30s)
 ```
 
-The log view splits refresh into a fast meta tick (job status + duration via small JSON GET) and a slower trace tick (full job log download). This keeps duration current at low cost while avoiding overlapping multi-MB trace fetches that would lock the auto-refresh.
+The log view splits refresh into a meta tick (job status + duration via a small JSON GET) and a trace tick that asks GitLab only for the log bytes it hasn't seen yet (an HTTP Range request). Both stay cheap, so the trace tick can run every couple of seconds without piling up multi-MB downloads.
 
 ### Config File (Optional)
 Configuration can also be stored in `~/.config/gitlab-monitor/config.json`:
@@ -76,8 +75,6 @@ Configuration can also be stored in `~/.config/gitlab-monitor/config.json`:
 {
   "gitlab_url": "https://gitlab.example.com",
   "project_path": "group/project",
-  "refresh_interval": 30,
-  "max_pipelines": 50,
   "reviews": {
     "enabled": true,
     "dir": "~/dev/reviews",
@@ -104,7 +101,7 @@ glmon -p group/project --days 30     # combined
 glmon -p group/project -B            # pre-filter pipelines to the CWD git branch
 ```
 
-By default `glmon` opens **My Work** — your starred repos plus your open MRs grouped by source branch, pulled across every project. Press `m` (or `tab`) anywhere to open the module switcher and jump to the Project Hub, MRs, Pipelines, or Tags. Set `GITLAB_PROJECT` or pass `-p` to skip the home entirely and drop straight into a project's pipeline list.
+By default `glmon` opens **My Work** — your starred repos, the tag deploys you pushed, and your open MRs grouped by repository, pulled across every project. Press `m` (or `tab`) anywhere to open the module switcher and jump to the Project Hub, MRs, Pipelines, Tags, or Reviews. Pass `-p` to skip the home entirely and drop straight into a project's pipeline list. `GITLAB_PROJECT` only sets a default project; it doesn't skip the home.
 
 ### CLI Arguments
 
@@ -117,18 +114,18 @@ By default `glmon` opens **My Work** — your starred repos plus your open MRs g
 
 ## Features
 
-1. **My Work home** -- cross-project landing screen: your starred repos plus your open MRs grouped by source branch, gathered from every project at once
+1. **My Work home** -- cross-project landing screen: your starred repos, your latest tag deploy per repo, and your open MRs grouped by repository, gathered from every project at once
 2. **Module switcher** -- `m`/`tab` from any home screen to jump between My Work, Project Hub, MRs, Pipelines, Tags, and Reviews; number keys `1`-`6` jump directly
 3. **Project Hub** -- per-project dashboard with live commits, MRs, tags, and pipeline panels side by side; `[`/`]` to cycle, capital letters to open a full view
 4. **Project picker with favorites** -- star projects you care about; favorites load first (fast), toggle to full list on demand
 5. **Pipeline age window** -- default 3 days (big speedup on busy projects); cycle `3d / 7d / 30d / all` with `t`
 6. **Real-time auto-refresh** -- pipeline and job lists refresh every 10 seconds, job detail every 5 seconds
-7. **Multi-level drill-down** -- Projects -> Pipelines -> Jobs -> Logs, with per-step breakdown
+7. **Multi-level drill-down** -- Projects -> Pipelines -> Jobs -> Logs, including child/downstream pipelines
 8. **Merge request triage** -- cross-project and per-project MR lists, full detail view, approval state, per-MR local notes, markdown export
 9. **MR quick actions** -- merge, toggle auto-merge (merge-when-pipeline-succeeds), approve, close, and comment straight from the detail view
 10. **Tag management** -- list tags with per-tag pipeline status; create + push a tag (`t`), roll a deploy back by re-running an older tag's pipeline (`R`), or open a revert MR for a tag's commit (`V`)
-11. **Commit browser** -- browse commits per project/branch, drill into commit detail and its pipeline
-12. **Filtering** -- K9s-style filter bar for branch/user, plus quick status toggles (failed / success / running)
+11. **Commit browser** -- browse a project's default-branch commits, drill into commit detail and its pipeline
+12. **Filtering** -- K9s-style filter bar for branch/user, a status cycle (running / pending), and a failed-only toggle
 13. **Failure extraction** -- automatically extracts and highlights test failures; failed jobs flagged in red
 14. **Browser + clipboard** -- `b` opens the current selection in GitLab, `y` copies its URL or log output
 15. **Job detail info bar** -- live status and duration while viewing job logs
@@ -138,25 +135,26 @@ By default `glmon` opens **My Work** — your starred repos plus your open MRs g
 
 ### 1. My Work (home)
 
-The default landing screen. Two panels: your **Favorites** (starred repos) and **My Open MRs** — every MR you authored, across all projects, grouped by source branch. Cycle panels with `[`/`]`, `enter` to open the highlighted repo (into its Project Hub) or MR (into detail). `M` jumps to the full MRs list, `P` to your pipelines. This is module `1`; it always opens here (no last-view restore). `esc` or `Ctrl+c` quits the app; `q` is back-only and a no-op on the home.
+The default landing screen. Three panels: your **Favorites** (starred repos), **My Tag Deploys** (the latest tag pipeline you pushed in each favorite, running ones pinned on top), and **My Open MRs** — every MR you authored, across all projects, grouped by repository. Cycle panels with `[`/`]`, `enter` to open the highlighted repo (into its Project Hub) or MR (into detail). `M` jumps to the full MRs list, `P` to your pipelines. This is module `1`; it always opens here (no last-view restore). `esc` or `Ctrl+c` quits the app; `q` is back-only and a no-op on the home.
 
 ### 2. Module Switcher
 
 ![Module switcher](glmon-assets/Module-selector.png)
 
-Press `m` or `tab` from any home screen to switch modules. Five of them:
+Press `m` or `tab` from any home screen to switch modules. Six of them:
 
 | # | Module | What |
 |---|--------|------|
-| 1 | My Work | favorites + my open MRs by branch |
-| 2 | Project Hub | a project's commits, MRs, tags, pipelines |
+| 1 | My Work | favorites, tag deploys, my open MRs |
+| 2 | Project Hub | pick a project, then its commits, MRs, tags, pipelines |
 | 3 | MRs | my merge requests |
 | 4 | Pipelines | my pipelines across favorites |
-| 5 | Tags | a project's tags + create/push/rollback |
+| 5 | Tags | pick a project, then its tags + create/push/rollback |
+| 6 | Reviews | MRs where I'm a reviewer + local AI reviews |
 
-Navigate with `↑↓` or `j/k`, `enter` to confirm. Number keys `1`-`5` jump directly. `esc`/`q`/`tab` closes.
+Navigate with `↑↓` or `j/k`, `enter` to confirm. Number keys `1`-`6` jump directly. `esc`/`q`/`tab` closes.
 
-### 3. Project Picker (when no project set)
+### 3. Project Picker (Project Hub and Tags modules)
 
 ![Project picker](glmon-assets/Project-list.png)
 
@@ -180,7 +178,7 @@ K9s-style filter bar — press `/` to filter by branch or user:
 
 ![Filter bar](glmon-assets/K9s-filtering.png)
 
-Quick status toggles narrow the list to a single status (failed / success / running) without typing a filter:
+`s` cycles a status filter (all / running / pending) and `f` toggles failed-only, so you can narrow the list without typing a filter:
 
 ![Status quick toggle](glmon-assets/Quick-status-toggle.png)
 
@@ -188,7 +186,7 @@ Quick status toggles narrow the list to a single status (failed / success / runn
 
 ![Job list](glmon-assets/Pipeline-job.png)
 
-Shows all jobs in a pipeline grouped by stage (build, test, deploy, cleanup) with color-coded status and duration.
+Shows all jobs in a pipeline grouped by stage (build, test, deploy, cleanup) with color-coded status and duration. Child/downstream pipelines show up as bridge rows; `enter` on one drills into that pipeline, even across projects.
 
 ### 7. Job Detail View
 
@@ -196,24 +194,20 @@ Shows all jobs in a pipeline grouped by stage (build, test, deploy, cleanup) wit
 
 Shows job logs with a live status/duration info bar, failure summary at top (for failed jobs), full trace, and error line highlighting. Log output streams incrementally as the job runs.
 
-Drill further into per-step breakdown (pipeline → job → steps):
-
-![Job steps](glmon-assets/Project-pipelines-job-steps.png)
-
 ### 8. Failed Jobs Summary View
-Quick view of all failed jobs in a pipeline with extracted failure messages.
+Press `f` in the job list for a quick view of the pipeline's failed jobs with their extracted failure messages (first 10 per job). `y` copies the lot. Failures inside child pipelines aren't listed here; drill into the bridge row instead.
 
 ### 9. Merge Requests
 
 ![My MRs grouped by project](glmon-assets/MR-assigned-open-project-grouped.png)
 
-Two flavors: **My MRs** (module `3`) is a cross-project view of the MRs you authored, grouped by repository; **Project MRs** (reached with `M` from a project's pipeline list) scopes to one project. Both support `/` filter, `s` to cycle state (opened / merged / closed / all), and `b`/`y` for browser/copy. Per-MR local notes show a yellow `●` glyph; `e` exports the list to markdown. From My MRs you can also toggle auto-merge (`A`) or merge (`M`) without opening the MR.
+Two flavors: **My MRs** (module `3`) is a cross-project view of the MRs you authored, grouped by repository; **Project MRs** (reached with `M` from a project's pipeline list) scopes to one project. Both support `/` filter, `s` to cycle state (opened / merged / closed / all), `A` to toggle auto-merge, and `b`/`y` for browser/copy. My MRs adds more: `w` cycles the merged/closed window (1d / 7d / 10d), per-MR local notes show a yellow `●` glyph, `e` exports the list to markdown, and `M` merges without opening the MR.
 
 ### 10. Merge Request Detail
 
 ![MR detail](glmon-assets/MR-detail.png)
 
-Title, description, author, source/target branches, pipeline status, and approval state. Drill into pipelines (`p`) or commits (`k`) from here. Quick actions, each behind a confirm: merge (`M`), toggle auto-merge / merge-when-pipeline-succeeds (`A`), approve (`a`), close (`x`), and comment (`c`). `f` toggles resolved discussions. When a local review file exists for the MR, a `Review:` line sits between approvals and the description showing current or stale, the review time, unread, and whether it has been posted; `v` opens it in a modal (`q` closes). `R` runs an adversarial review for this MR now, whether or not one exists; the section updates on the next refresh.
+Title, description, author, source/target branches, pipeline status, and approval state. Drill into pipelines (`p`) or commits (`k`) from here. Quick actions: merge (`M`), approve (`a`), and close (`x`) each ask for a confirm first; toggle auto-merge / merge-when-pipeline-succeeds (`A`) applies right away; comment (`c`) opens a multi-line box (`ctrl+s` posts, `esc` cancels). `f` toggles resolved discussions, `t` toggles the 10-second auto-refresh, and `g` jumps to another MR by number. When a local review file exists for the MR, a `Review:` line sits between approvals and the description showing current or stale, the review time, unread, and whether it has been posted; `v` opens it in a modal (`q` closes). `R` runs an adversarial review for this MR now, whether or not one exists; the section updates on the next refresh.
 
 ![MR commits](glmon-assets/MR-commits.png)
 
@@ -302,7 +296,7 @@ launchctl unload ~/Library/LaunchAgents/com.bryan.glmon-reviewd.plist   # hard: 
 
 ### 14. Commit Browser
 
-Browse commits for a project (or a branch), reached from the Project Hub's Commits panel or `k` on an MR. Columns show author, message, and pipeline status; `t` cycles the time window. `enter` opens commit detail — changed files and stats — and `p` jumps to that commit's pipeline.
+Browse commits on a project's default branch, reached from the Project Hub's Commits panel (`C`). Columns show author, message, and pipeline status; `t` cycles the time window. `enter` opens commit detail — changed files and stats — and `p` jumps to that commit's pipeline. `k` on an MR opens a separate list of that MR's own commits, where `enter` opens the commit in your browser.
 
 ### 15. Confirmations
 
@@ -331,7 +325,7 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 
 | Key | Action |
 |-----|--------|
-| `[` / `]` | Cycle panel (Favorites / My Open MRs) |
+| `[` / `]` | Cycle panel (Favorites / My Tag Deploys / My Open MRs) |
 | `Enter` | Open highlighted repo (hub) or MR (detail) |
 | `M` | Full MRs list |
 | `P` | My pipelines |
@@ -352,6 +346,9 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | `/` | Focus search input |
 | `s` | Star / unstar current project |
 | `a` | Toggle view: Favorites only <-> All projects |
+| `c` | Clear filter |
+| `g` | Go to MR by project + number |
+| `p` | My pipelines |
 | `Down` / `Escape` | Move from search to project list |
 
 ### Pipeline List View
@@ -360,8 +357,8 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 |-----|--------|
 | `/` | Focus filter input |
 | `t` | Cycle age window: 3d -> 7d -> 30d -> all |
-| `s` | Cycle status filter (failed / success / running) |
-| `f` | Show failed jobs summary for selected pipeline |
+| `s` | Cycle status filter: all -> running -> pending |
+| `f` | Toggle failed-only filter |
 | `x` | Cancel selected pipeline |
 | `c` | Clear filter |
 | `M` | This project's MRs |
@@ -372,7 +369,7 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | Key | Action |
 |-----|--------|
 | `/` | Focus filter input |
-| `s` | Cycle status filter |
+| `s` | Cycle status filter: all -> failed -> running -> pending |
 | `f` | Show failed jobs summary |
 
 ### Job Detail View
@@ -381,18 +378,28 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 |-----|--------|
 | `f` | Show failures only (hide full trace) |
 
+### My Pipelines
+
+| Key | Action |
+|-----|--------|
+| `/` | Focus filter input |
+| `t` | Cycle age window: 3d -> 7d -> 30d -> all |
+| `c` | Clear filter |
+| `a` | Pick a project (opens its Project Hub) |
+
 ### Merge Request List
 
 | Key | Action |
 |-----|--------|
 | `/` | Focus filter input |
 | `s` | Cycle state: opened / merged / closed / all |
-| `g` | Go to MR by number |
+| `A` | Toggle auto-merge |
+| `g` | Go to MR by number (My MRs) |
+| `w` | Cycle merged/closed window: 1d -> 7d -> 10d (My MRs) |
 | `n` | Create / edit local note (My MRs) |
 | `e` | Export list to markdown (My MRs) |
-| `A` | Toggle auto-merge |
-| `M` | Merge |
-| `p` | Pipelines for selected MR |
+| `M` | Merge (My MRs) |
+| `p` | Pipelines for selected MR (My MRs) |
 
 ### Merge Request Detail
 
@@ -400,11 +407,13 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 |-----|--------|
 | `M` | Merge (confirm) |
 | `A` | Toggle auto-merge / merge-when-pipeline-succeeds |
-| `a` | Approve |
-| `x` | Close |
-| `c` | Comment |
+| `a` | Approve (confirm) |
+| `x` | Close (confirm) |
+| `c` | Comment (`ctrl+s` posts) |
 | `p` / `k` | Open pipelines / commits |
 | `f` | Toggle resolved discussions |
+| `t` | Toggle auto-refresh |
+| `g` | Go to another MR by number |
 | `v` | Open the local review file, if one exists |
 | `R` | Run an adversarial review for this MR now (re-reviews if one exists) |
 
@@ -414,14 +423,14 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 |-----|--------|
 | `/` | Focus filter input |
 | `v` | View the local review (marks it read); inside the viewer `y` copies it, `c` posts it as an MR comment (confirm), `R` re-runs it |
-
-Copying part of a review: click and drag inside the modal to select, then `y` or `ctrl+c` copies the selection (`y` with nothing selected copies the whole review). `ctrl+c` with nothing selected still quits. This applies to any text in glmon, not only reviews. If you want the terminal's own selection instead (Cmd+C), hold Shift while dragging so the terminal keeps the mouse; WezTerm, iTerm2, and kitty all support that.
 | `R` | Run a review for the selected MR now |
 | `T` | Run one poller tick now |
 | `P` | Toggle auto-review on/off (confirm) |
 | `a` | Approve (confirm) |
 | `n` | Create / edit local note |
 | `p` | Pipelines for selected MR |
+
+Copying part of a review: click and drag inside the modal to select, then `y` or `ctrl+c` copies the selection (`y` with nothing selected copies the whole review). `ctrl+c` with nothing selected still quits. This applies to any text in glmon, not only reviews. If you want the terminal's own selection instead (Cmd+C), hold Shift while dragging so the terminal keeps the mouse; WezTerm, iTerm2, and kitty all support that.
 
 ### Tags
 
@@ -445,24 +454,24 @@ Copying part of a review: click and drag inside the modal to select, then `y` or
 ## Usage Examples
 
 ### Basic Workflow
-1. Launch with `glmon`
-2. Search or scroll to find your project, press Enter
-3. Navigate pipelines with arrow keys
+1. Launch with `glmon` (lands on My Work)
+2. Press `m` then `2` for the Project Hub picker, search or scroll to your project, press Enter
+3. Press `P` to open the project's pipelines and navigate with arrow keys
 4. Press Enter to view jobs in a pipeline
 5. Press Enter on a job to view its logs
 6. Press `q` to go back up a level
 
 ### Building a Favorites List
-1. Launch `glmon`, press `a` to load all projects
+1. Launch `glmon`, press `m` then `2` to open the project picker, then `a` to load all projects
 2. Navigate to a project you care about, press `s` to star it
 3. Repeat for other projects
-4. Next launch: starred projects load instantly in the default Favorites view
+4. Next launch: starred projects show up on My Work and load instantly in the picker's default Favorites view
 
 ### Jump Straight to a Project
 ```bash
 glmon -p my-group/my-project
 ```
-Skips the picker entirely. Useful for shell aliases or keyboard launchers.
+Skips My Work and the picker, landing on that project's pipelines. Useful for shell aliases or keyboard launchers.
 
 ### Loading Older Pipelines
 Default view is last 3 days. Press `t` in the pipeline list to expand to 7d, 30d, or all. Or launch with `--days 30` to set a different default.
@@ -471,7 +480,7 @@ Default view is last 3 days. Press `t` in the pipeline list to expand to 7d, 30d
 1. Navigate to a pipeline with failed status (red)
 2. Press Enter to see jobs
 3. Failed jobs are highlighted in red
-4. Press `f` to see only failed jobs
+4. Press `f` for the failed jobs summary, or `s` to filter the list to failed jobs
 5. Press Enter on a failed job to see extracted failures
 
 ### Opening in Browser
@@ -495,7 +504,7 @@ At any level, press `b` to open the current selection in your browser for full G
 ```
 PipelineMonitor (App)
     ├── LoadingScreen (splash while connecting)
-    ├── MyWorkScreen (home — favorites + my open MRs)
+    ├── MyWorkScreen (home — favorites, tag deploys, my open MRs)
     │   ├── ProjectHubScreen (commits / MRs / tags / pipelines panels)
     │   └── MergeRequestDetailScreen
     ├── ProjectSelectScreen (project picker)
@@ -503,7 +512,7 @@ PipelineMonitor (App)
     │       └── JobListScreen (auto-refresh 10s)
     │           ├── JobDetailScreen (auto-refresh 5s) — info bar + trace/failures
     │           └── FailedJobsScreen
-    ├── MyMergeRequestsScreen / ProjectMergeRequestsScreen
+    ├── MyMergeRequestsScreen / ProjectMergeRequestsScreen / MyReviewsScreen
     │   └── MergeRequestDetailScreen — merge / approve / close / comment
     │       ├── MRPipelineListScreen
     │       └── MRCommitListScreen
@@ -520,11 +529,11 @@ Screens dispatch keys via a per-screen `KEY_MAP` (case-sensitive) rather than Te
 
 | Path | Purpose |
 |------|---------|
-| `~/.config/gitlab-monitor/config.json` | Optional non-token config (url, project, refresh_interval) |
+| `~/.config/gitlab-monitor/config.json` | Optional non-token config (url, project, reviews) |
 | `~/.config/gitlab-monitor/token` | Optional 0600 token file, read only when `GITLAB_TOKEN` is unset (launchd poller) |
 | `~/.config/gitlab-monitor/favorites.json` | List of starred project paths |
 | `~/.config/gitlab-monitor/mr_notes.json` | Local per-MR notes |
-| `~/.config/gitlab-monitor/last_view.json` | Last view per module, restored on next launch |
+| `~/.config/gitlab-monitor/last_view.json` | Last view per module; written as you navigate, but not restored (glmon always opens on My Work) |
 | `~/dev/reviews/` (or `reviews.dir`) | Local AI review files, one markdown file per MR; `_locks/` holds per-MR lockfiles while a review runs |
 | `~/.cache/glmon/reviewd.{out,err}` | launchd poller logs; `reviewd-manual.log` for reviews started from the TUI |
 | `~/Library/LaunchAgents/com.bryan.glmon-reviewd.plist` | Poller schedule (copied from `launchd/` in this repo) |
