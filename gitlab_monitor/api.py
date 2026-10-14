@@ -414,6 +414,7 @@ class GitLabAPI:
             'closed_at': getattr(mr, 'closed_at', None),
             'author': author.get('username') if isinstance(author, dict) else getattr(author, 'username', 'unknown'),
             'reviewers': [r.get('username') for r in (getattr(mr, 'reviewers', None) or []) if isinstance(r, dict) and r.get('username')],
+            'assignees': [a.get('username') for a in (getattr(mr, 'assignees', None) or []) if isinstance(a, dict) and a.get('username')],
             'sha': getattr(mr, 'sha', None),
             'web_url': mr.web_url,
             'user_notes_count': getattr(mr, 'user_notes_count', 0) or 0,
@@ -604,6 +605,7 @@ class GitLabAPI:
                 if not notes:
                     continue
                 first = notes[0]
+                pos = first.get('position') or {}
                 results.append({
                     'id': dd.get('id'),
                     'unresolved': self._discussion_unresolved(dd),
@@ -623,6 +625,8 @@ class GitLabAPI:
                     'first_author': (first.get('author') or {}).get('username', 'unknown'),
                     'first_created_at': first.get('created_at', ''),
                     'system': bool(first.get('system')),
+                    'path': pos.get('new_path') or pos.get('old_path') or '',
+                    'line': pos.get('new_line') or pos.get('old_line'),
                 })
             return results
         except Exception:
@@ -656,6 +660,26 @@ class GitLabAPI:
         project = self.gl.projects.get(project_path)
         mr = project.mergerequests.get(iid)
         mr.state_event = 'close'
+        mr.save()
+        return True
+
+    def list_project_users(self, project_path, force=False):
+        store = self.config.project_users
+        users = None if force else store.get(project_path)
+        if users is None:
+            project = self.gl.projects.get(project_path)
+            users = sorted(
+                ({'id': u.id, 'username': u.username, 'name': getattr(u, 'name', '') or ''}
+                 for u in project.users.list(get_all=True, per_page=100)),
+                key=lambda u: u['username'].lower(),
+            )
+            store.set(project_path, users)
+        return users
+
+    def set_mr_assignee(self, project_path, iid, user_id):
+        project = self.gl.projects.get(project_path)
+        mr = project.mergerequests.get(iid)
+        mr.assignee_ids = [user_id]
         mr.save()
         return True
 

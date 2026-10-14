@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 import asyncio
 from textual.app import App, ComposeResult
-from textual.widgets import DataTable, Static, Input, RichLog, TextArea, Label, Markdown, RadioSet, RadioButton
+from textual.widgets import DataTable, Static, Input, RichLog, TextArea, Label, Markdown, RadioSet, RadioButton, Collapsible
 from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.suggester import SuggestFromList
 from textual.screen import Screen, ModalScreen
@@ -68,6 +68,8 @@ from .formatting import (
     next_minor_version,
     next_patch_version,
     format_activity_strip,
+    markdown_segments,
+    diff_text,
 )
 from .api import GitLabAPI, ACTIVITY_TTL
 
@@ -292,6 +294,30 @@ class ScreenBase(Screen):
                 self.notify(f"Auto-merge toggle failed: {e}", severity="error", timeout=4)
 
         asyncio.ensure_future(_apply())
+
+    def _assign_mr(self, m, on_done) -> None:
+        if not m:
+            return
+        proj = m.get('project_path') or getattr(self, 'project_path', '') or ''
+        iid = m.get('iid')
+        if not proj or iid is None:
+            self.notify("MR has no project path — cannot assign", severity="warning", timeout=2)
+            return
+
+        async def _apply(user):
+            try:
+                await asyncio.to_thread(self.api.set_mr_assignee, proj, iid, user['id'])
+                m['assignees'] = [user['username']]
+                self.notify(f"Assigned MR !{iid} to {user['username']}", timeout=2)
+                on_done()
+            except Exception as e:
+                self.notify(f"Assign failed: {e}", severity="error", timeout=4)
+
+        def _after(user):
+            if user:
+                asyncio.ensure_future(_apply(user))
+
+        self.app.push_screen(UserPickerModal(self.api, proj, m.get('assignees')), _after)
 
     def _merge_mr(self, m, on_done) -> None:
         if not m:
@@ -1728,7 +1754,7 @@ def _pipeline_status_color(status):
 
 class MyMergeRequestsScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window", "A": "toggle_auto_merge", "M": "merge"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window", "A": "toggle_auto_merge", "M": "merge", "u": "assign"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -1771,7 +1797,8 @@ class MyMergeRequestsScreen(ScreenBase):
             [("r", "refresh"),    ("b", "browser"),             ("y", "copy url")],
             [("p", "pipelines"),  ("s", f"state:{self.state}"), ("g", "goto MR")],
             [("e", "export md"),  ("n", "note"),                ("A", "auto-merge")],
-            [("M", "merge"),      ("esc", "quit"),              window_slot],
+            [("M", "merge"),      ("u", "assign"),              window_slot],
+            [("esc", "quit")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2203,6 +2230,10 @@ class MyMergeRequestsScreen(ScreenBase):
         table = self.query_one("#mr-table", DataTable)
         m = self._mr_at_row(table.cursor_row)
         self._merge_mr(m, lambda: asyncio.ensure_future(self.load_mrs()))
+
+    async def action_assign(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        self._assign_mr(self._mr_at_row(table.cursor_row), self._update_table)
 
     async def action_note(self) -> None:
         table = self.query_one("#mr-table", DataTable)
@@ -2834,7 +2865,7 @@ class MyReviewsScreen(ScreenBase):
 
 class ProjectMergeRequestsScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "s": "toggle_state", "A": "toggle_auto_merge"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "s": "toggle_state", "A": "toggle_auto_merge", "u": "assign"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
     STATE_CYCLE = ['merged', 'closed', 'opened', 'all']
@@ -2865,7 +2896,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
         return [
             [("/", "filter"),   ("enter", "view"),         ("r", "refresh")],
             [("b", "browser"),  ("y", "copy url"),         ("s", f"state:{self.state}")],
-            [("A", "auto-merge"), ("q", "back")],
+            [("A", "auto-merge"), ("u", "assign"),       ("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -3081,6 +3112,23 @@ class ProjectMergeRequestsScreen(ScreenBase):
         if table.cursor_row is not None and table.cursor_row < len(self.filtered_mrs):
             self._toggle_auto_merge(self.filtered_mrs[table.cursor_row], self._update_table)
 
+    async def action_assign(self) -> None:
+        table = self.query_one("#proj-mr-table", DataTable)
+        if table.cursor_row is not None and table.cursor_row < len(self.filtered_mrs):
+            self._assign_mr(self.filtered_mrs[table.cursor_row], self._update_table)
+
+
+def _note_widgets(segments):
+    out = []
+    for seg in segments:
+        if seg[0] == 'md':
+            out.append(Markdown(seg[1], classes="mr-note-md"))
+        elif seg[0] == 'diff':
+            out.append(Static(diff_text(seg[1]), classes="mr-note-diff"))
+        else:
+            out.append(Collapsible(*_note_widgets(seg[2]), title=Text(seg[1]), classes="mr-note-details"))
+    return out
+
 
 class MergeRequestDetailScreen(ScreenBase):
 
@@ -3101,6 +3149,8 @@ class MergeRequestDetailScreen(ScreenBase):
         "t": "toggle_auto",
         "v": "review",
         "R": "review_now",
+        "u": "assign",
+        "e": "toggle_details",
     }
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
@@ -3116,6 +3166,7 @@ class MergeRequestDetailScreen(ScreenBase):
         self.show_resolved = False
         self._refresh_timer = None
         self._refreshing = False
+        self._disc_sig = None
 
     def _info_pairs(self):
         if not self.mr:
@@ -3148,7 +3199,7 @@ class MergeRequestDetailScreen(ScreenBase):
             [("a", "approve"),    ("c", "comment"),    ("x", "close")],
             [("A", "auto-merge"), ("f", resolved_label),("t", auto_label)],
             [("M", "merge"),      ("v", "review"),     ("R", "review now")],
-            [("q", "back")],
+            [("u", "assign"),     ("e", "details"),    ("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -3165,7 +3216,7 @@ class MergeRequestDetailScreen(ScreenBase):
             Static("", id="mr-desc-heading", classes="mr-section"),
             Markdown("", id="mr-desc"),
             Static("", id="mr-disc-heading", classes="mr-section"),
-            Static("", id="mr-disc"),
+            Container(id="mr-disc"),
             id="mr-body-scroll",
         )
         yield StatusBar(self._status_text(), id="statusbar")
@@ -3239,6 +3290,7 @@ class MergeRequestDetailScreen(ScreenBase):
         except Exception:
             pass
         self._render_body()
+        await self._render_discussions()
         self._refresh_status()
 
     async def _safe_refresh(self) -> None:
@@ -3260,6 +3312,7 @@ class MergeRequestDetailScreen(ScreenBase):
             ("ID", Text(f"!{m['iid']}  (id {m['id']})", style="#cdd6f4")),
             ("Title", Text(m['title'] or '', style="bold #cdd6f4")),
             ("Author", Text(m['author'] or 'unknown', style="#cdd6f4")),
+            ("Assignee", Text(", ".join(m.get('assignees') or []) or "—", style="#cdd6f4")),
             ("Source", Text(m['source_branch'], style="cyan")),
             ("Target", Text(m['target_branch'], style="cyan")),
         ]
@@ -3367,54 +3420,72 @@ class MergeRequestDetailScreen(ScreenBase):
         out.append("   v to open", style="dim #a6adc8")
         return out
 
-    def _build_discussions(self) -> Text:
+    def _visible_discussions(self):
         visible = self.discussions if self.show_resolved else [
             d for d in self.discussions if d.get('unresolved') or not d.get('resolvable')
         ]
-        non_system = [d for d in visible if not d.get('system')]
+        return [d for d in visible if not d.get('system')]
+
+    @staticmethod
+    def _note_header(d, note, first) -> Text:
         out = Text()
-        if not non_system:
-            out.append("(no discussions)", style="dim italic #6c7086")
-            return out
-        for i, d in enumerate(non_system):
-            if i > 0:
-                out.append("\n\n")
+        if first:
             marker_style = "bold #f38ba8" if d.get('unresolved') else (
                 "bold #a6e3a1" if d.get('resolvable') else "bold #89b4fa"
             )
             marker_label = "●" if d.get('unresolved') else ("✓" if d.get('resolvable') else "·")
             out.append(f"{marker_label} ", style=marker_style)
-            out.append(d.get('first_author') or 'unknown', style="bold #cdd6f4")
+        else:
+            out.append("  ↳ ", style="dim #6c7086")
+        out.append(note.get('author') or 'unknown', style="bold #cdd6f4")
+        out.append("  ")
+        out.append(format_age(note.get('created_at') or ''), style="dim italic #a6adc8")
+        if first and d.get('resolvable'):
             out.append("  ")
-            out.append(format_age(d.get('first_created_at') or ''), style="dim italic #a6adc8")
-            if d.get('resolvable'):
-                out.append("  ")
-                out.append(
-                    "unresolved" if d.get('unresolved') else "resolved",
-                    style="bold #f38ba8" if d.get('unresolved') else "dim #a6e3a1",
-                )
-            for note in d.get('notes', []):
-                if note.get('system'):
-                    continue
-                body = (note.get('body') or '').strip()
-                if not body:
-                    continue
-                out.append("\n")
-                for j, line in enumerate(body.split('\n')):
-                    if j > 0:
-                        out.append("\n")
-                    out.append(f"    {line}", style="#cdd6f4")
+            out.append(
+                "unresolved" if d.get('unresolved') else "resolved",
+                style="bold #f38ba8" if d.get('unresolved') else "dim #a6e3a1",
+            )
+        if first and d.get('path'):
+            loc = f"{d['path']}:{d['line']}" if d.get('line') else d['path']
+            out.append("  ")
+            out.append(loc, style="#89dceb")
         return out
 
+    async def _render_discussions(self) -> None:
+        visible = self._visible_discussions() if self.mr else []
+        sig = (bool(self.mr), self.show_resolved, tuple(
+            (d.get('id'), d.get('unresolved'), tuple((n.get('id'), n.get('body')) for n in d.get('notes', [])))
+            for d in visible
+        ))
+        if sig == self._disc_sig:
+            return
+        self._disc_sig = sig
+        try:
+            box = self.query_one("#mr-disc", Container)
+        except Exception:
+            return
+        widgets = []
+        if self.mr and not visible:
+            widgets.append(Static(Text("(no discussions)", style="dim italic #6c7086")))
+        for d in visible:
+            items = []
+            for note in (n for n in d.get('notes', []) if not n.get('system')):
+                items.append(Static(self._note_header(d, note, not items), classes="mr-note-head"))
+                body = (note.get('body') or '').strip()
+                if body:
+                    items.extend(_note_widgets(markdown_segments(body)))
+            widgets.append(Container(*items, classes="mr-disc-item"))
+        await box.remove_children()
+        if widgets:
+            await box.mount_all(widgets)
+
     def _disc_heading_text(self) -> Text:
-        visible = self.discussions if self.show_resolved else [
-            d for d in self.discussions if d.get('unresolved') or not d.get('resolvable')
-        ]
-        non_system = [d for d in visible if not d.get('system')]
+        non_system = self._visible_discussions()
         unresolved = sum(1 for d in self.discussions if d.get('unresolved'))
         total = len(self.discussions)
         t = Text()
-        t.append(" DISCUSSIONS ", style="bold white on #89b4fa")
+        t.append(" DISCUSSIONS ", style="bold #1e1e2e on #89b4fa")
         t.append(f"  ({len(non_system)} shown · {unresolved} unresolved · {total} total)", style="dim #a6adc8")
         return t
 
@@ -3428,7 +3499,6 @@ class MergeRequestDetailScreen(ScreenBase):
                 self.query_one("#mr-desc-heading", Static).update("")
                 self.query_one("#mr-desc", Markdown).update("")
                 self.query_one("#mr-disc-heading", Static).update("")
-                self.query_one("#mr-disc", Static).update("")
             except Exception:
                 pass
             return
@@ -3440,11 +3510,10 @@ class MergeRequestDetailScreen(ScreenBase):
             review_widget = self.query_one("#mr-review", Static)
             review_widget.display = bool(review)
             review_widget.update(review)
-            self.query_one("#mr-desc-heading", Static).update(Text(" DESCRIPTION ", style="bold white on #89b4fa"))
+            self.query_one("#mr-desc-heading", Static).update(Text(" DESCRIPTION ", style="bold #1e1e2e on #89b4fa"))
             desc = (self.mr.get('description') or '').strip()
             self.query_one("#mr-desc", Markdown).update(desc if desc else "*(no description)*")
             self.query_one("#mr-disc-heading", Static).update(self._disc_heading_text())
-            self.query_one("#mr-disc", Static).update(self._build_discussions())
         except Exception:
             pass
 
@@ -3503,6 +3572,16 @@ class MergeRequestDetailScreen(ScreenBase):
         except Exception:
             pass
         self._render_body()
+        await self._render_discussions()
+
+    async def action_toggle_details(self) -> None:
+        boxes = list(self.query(".mr-note-details"))
+        if not boxes:
+            self.notify("No collapsed sections", timeout=2)
+            return
+        expand = any(b.collapsed for b in boxes)
+        for b in boxes:
+            b.collapsed = not expand
 
     async def action_toggle_auto(self) -> None:
         if self._refresh_timer is not None:
@@ -3558,6 +3637,9 @@ class MergeRequestDetailScreen(ScreenBase):
             await self.load_mr()
         except Exception as e:
             self.notify(f"Approve failed: {e}", severity="error", timeout=4)
+
+    async def action_assign(self) -> None:
+        self._assign_mr(self.mr, lambda: asyncio.ensure_future(self.load_mr()))
 
     async def action_close(self) -> None:
         if not self.mr:
@@ -4588,7 +4670,7 @@ class ProjectHubScreen(ScreenBase):
         "C": "commits_full", "M": "mrs_full", "P": "pipelines_full", "T": "tags_full",
     }
 
-    PANEL_IDS = ["hub-commits", "hub-mrs", "hub-pipelines", "hub-tags"]
+    PANEL_IDS = ["hub-mrs", "hub-pipelines", "hub-commits", "hub-tags"]
 
     PANEL_ROWS = 8
     TAG_ROWS = 6
@@ -4641,28 +4723,30 @@ class ProjectHubScreen(ScreenBase):
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
         yield ScrollableContainer(
-            Horizontal(
-                Container(
-                    Static("Commits", id="hub-commits-title", classes="hub-panel-title"),
-                    DataTable(id="hub-commits"),
-                    classes="hub-panel",
-                ),
-                Container(
-                    Static("Merge Requests", id="hub-mrs-title", classes="hub-panel-title"),
-                    DataTable(id="hub-mrs"),
-                    classes="hub-panel",
-                ),
-                id="hub-top",
+            Container(
+                Static("Merge Requests", id="hub-mrs-title", classes="hub-panel-title"),
+                DataTable(id="hub-mrs"),
+                classes="hub-panel",
             ),
             Container(
                 Static("Pipelines", id="hub-pipelines-title", classes="hub-panel-title"),
                 DataTable(id="hub-pipelines"),
                 classes="hub-panel",
             ),
-            Container(
-                Static("Tags", id="hub-tags-title", classes="hub-panel-title"),
-                DataTable(id="hub-tags"),
-                classes="hub-panel",
+            Horizontal(
+                Container(
+                    Static("Commits", id="hub-commits-title", classes="hub-panel-title"),
+                    DataTable(id="hub-commits"),
+                    id="hub-commits-panel",
+                    classes="hub-panel",
+                ),
+                Container(
+                    Static("Tags", id="hub-tags-title", classes="hub-panel-title"),
+                    DataTable(id="hub-tags"),
+                    id="hub-tags-panel",
+                    classes="hub-panel",
+                ),
+                id="hub-bottom",
             ),
             id="hub-body",
         )
@@ -4705,7 +4789,7 @@ class ProjectHubScreen(ScreenBase):
         finally:
             self._clear_loading()
         try:
-            self.query_one("#hub-commits", DataTable).focus()
+            self.query_one("#hub-mrs", DataTable).focus()
         except Exception:
             pass
         self.api.config.save_last_view('hub', project=self.project_path)
@@ -4713,7 +4797,7 @@ class ProjectHubScreen(ScreenBase):
     def _apply_layout(self) -> None:
         try:
             narrow = self.size.width < 100
-            self.query_one("#hub-top").set_class(narrow, "stacked")
+            self.query_one("#hub-bottom").set_class(narrow, "stacked")
         except Exception:
             pass
 
@@ -4990,7 +5074,7 @@ class MyWorkScreen(ScreenBase):
         "M": "all_mrs", "P": "all_pipelines",
     }
 
-    PANEL_IDS = ["work-favs", "work-deploys", "work-mrs"]
+    PANEL_IDS = ["work-favs", "work-mrs", "work-deploys"]
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -5039,15 +5123,15 @@ class MyWorkScreen(ScreenBase):
                 classes="hub-panel",
             ),
             Container(
-                Static("My Tag Deploys", id="work-deploys-title", classes="hub-panel-title"),
-                DataTable(id="work-deploys"),
-                id="work-deploys-panel",
-                classes="hub-panel",
-            ),
-            Container(
                 Static("My Open MRs", id="work-mrs-title", classes="hub-panel-title"),
                 DataTable(id="work-mrs"),
                 id="work-mrs-panel",
+                classes="hub-panel",
+            ),
+            Container(
+                Static("My Tag Deploys", id="work-deploys-title", classes="hub-panel-title"),
+                DataTable(id="work-deploys"),
+                id="work-deploys-panel",
                 classes="hub-panel",
             ),
             id="work-body",
@@ -6232,6 +6316,129 @@ class MRPickerModal(ModalScreen[tuple[str, int] | None]):
             self._remove_current_recent()
 
 
+class UserPickerModal(ModalScreen[dict | None]):
+
+    MAX_SHOWN = 100
+
+    def __init__(self, api: GitLabAPI, project_path: str, current=None):
+        super().__init__()
+        self.api = api
+        self.project_path = project_path
+        self.current = set(current or [])
+        self.users = []
+        self.shown = []
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets import OptionList
+
+        header = Text()
+        header.append(f"Assign MR · {self.project_path}", style="bold #cdd6f4")
+        header.append("\n")
+        header.append("type to filter · ↑↓ move · enter assign · ctrl+r reload users · esc cancel",
+                      style="dim #a6adc8")
+        yield Container(
+            Static(header, id="user-picker-header"),
+            Input(placeholder="username or name", id="user-picker-filter"),
+            OptionList(id="user-picker-list"),
+            Static("", id="user-picker-status"),
+            id="user-picker-box",
+        )
+
+    def on_mount(self) -> None:
+        try:
+            self.query_one("#user-picker-filter", Input).focus()
+        except Exception:
+            pass
+        asyncio.ensure_future(self._load(force=False))
+
+    def _list(self):
+        from textual.widgets import OptionList
+        return self.query_one("#user-picker-list", OptionList)
+
+    def _set_status(self, msg) -> None:
+        try:
+            self.query_one("#user-picker-status", Static).update(
+                msg if isinstance(msg, Text) else Text(msg, style="dim #a6adc8")
+            )
+        except Exception:
+            pass
+
+    async def _load(self, force: bool) -> None:
+        self._set_status("loading users...")
+        try:
+            self.users = await asyncio.to_thread(self.api.list_project_users, self.project_path, force)
+        except Exception as e:
+            self._set_status(Text(f"user lookup failed: {e}", style="bold #f38ba8"))
+            return
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        from textual.widgets.option_list import Option
+
+        try:
+            q = self.query_one("#user-picker-filter", Input).value.strip().lower()
+            ol = self._list()
+        except Exception:
+            return
+        matches = [u for u in self.users if q in u['username'].lower() or q in u['name'].lower()]
+        self.shown = matches[:self.MAX_SHOWN]
+        options = []
+        for u in self.shown:
+            row = Text()
+            row.append("✓ " if u['username'] in self.current else "  ", style="bold #a6e3a1")
+            row.append(u['username'], style="bold #cdd6f4")
+            if u['name'] and u['name'] != u['username']:
+                row.append(f"  {u['name']}", style="#a6adc8")
+            options.append(Option(row))
+        ol.set_options(options)
+        if options:
+            ol.highlighted = 0
+        status = f"{len(matches)} of {len(self.users)} users"
+        hidden = len(matches) - len(self.shown)
+        if hidden:
+            status += f" · {hidden} more, keep typing"
+        self._set_status(status)
+
+    def _pick(self, idx) -> None:
+        if idx is not None and 0 <= idx < len(self.shown):
+            self.dismiss(self.shown[idx])
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "user-picker-filter":
+            self._apply_filter()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "user-picker-filter":
+            try:
+                self._pick(self._list().highlighted)
+            except Exception:
+                pass
+
+    def on_option_list_option_selected(self, event) -> None:
+        self._pick(event.option_index)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self.dismiss(None)
+        elif event.key in ("up", "down"):
+            event.prevent_default()
+            event.stop()
+            try:
+                ol = self._list()
+                if event.key == "up":
+                    ol.action_cursor_up()
+                else:
+                    ol.action_cursor_down()
+            except Exception:
+                pass
+        elif event.key == "ctrl+r":
+            event.prevent_default()
+            event.stop()
+            asyncio.ensure_future(self._load(force=True))
+
+
 MODULE_MYWORK = "mywork"
 MODULE_PROJECTS = "projects"
 MODULE_MRS = "mrs"
@@ -6244,8 +6451,8 @@ class ModuleModal(ModalScreen[str | None]):
     """Module switcher. Returns selected module id or None on cancel."""
 
     MODULES = [
-        (MODULE_MYWORK,    "1", "My Work",     "favorites, tag deploys, my open MRs"),
-        (MODULE_PROJECTS,  "2", "Project Hub", "favorites + commits, MRs, tags, pipelines"),
+        (MODULE_MYWORK,    "1", "My Work",     "favorites, my open MRs, tag deploys"),
+        (MODULE_PROJECTS,  "2", "Project Hub", "favorites + MRs, pipelines, commits, tags"),
         (MODULE_MRS,       "3", "MRs",       "my merge requests"),
         (MODULE_PIPELINES, "4", "Pipelines", "my pipelines (across favorites)"),
         (MODULE_TAGS,      "5", "Tags",      "project tags + create/push"),
@@ -6532,13 +6739,25 @@ class PipelineMonitor(App):
         height: 1fr;
     }
 
-    #hub-top {
+    #hub-bottom {
         height: auto;
         layout: horizontal;
     }
 
-    #hub-top.stacked {
+    #hub-commits-panel {
+        width: 7fr;
+    }
+
+    #hub-tags-panel {
+        width: 3fr;
+    }
+
+    #hub-bottom.stacked {
         layout: vertical;
+    }
+
+    #hub-bottom.stacked > .hub-panel {
+        width: 1fr;
     }
 
     .hub-panel {
@@ -6774,6 +6993,50 @@ class PipelineMonitor(App):
         background: #1e1e2e 60%;
     }
 
+    UserPickerModal {
+        align: center middle;
+        background: #1e1e2e 60%;
+    }
+
+    #user-picker-box {
+        width: 80;
+        height: 30;
+        background: #313244;
+        border: tall #89b4fa;
+        padding: 1 2;
+    }
+
+    #user-picker-header {
+        width: 100%;
+        height: auto;
+        color: #cdd6f4;
+        margin-bottom: 1;
+    }
+
+    #user-picker-filter {
+        width: 100%;
+        background: #1e1e2e;
+        color: #cdd6f4;
+    }
+
+    #user-picker-list {
+        width: 100%;
+        height: 1fr;
+        background: #313244;
+        color: #cdd6f4;
+    }
+
+    #user-picker-list > .option-list--option-highlighted {
+        background: #45475a;
+        color: #f9e2af;
+    }
+
+    #user-picker-status {
+        width: 100%;
+        height: 1;
+        color: #6c7086;
+    }
+
     #picker-box {
         width: 70;
         height: auto;
@@ -6877,6 +7140,52 @@ class PipelineMonitor(App):
         background: #1e1e2e;
         color: #cdd6f4;
         padding: 1 0;
+    }
+
+    .mr-disc-item {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    .mr-note-head {
+        height: auto;
+        margin-top: 1;
+    }
+
+    .mr-note-md {
+        height: auto;
+        margin-left: 2;
+        background: #1e1e2e;
+        color: #cdd6f4;
+    }
+
+    .mr-note-md MarkdownH1, .mr-note-md MarkdownH2, .mr-note-md MarkdownH3 {
+        background: #1e1e2e;
+        color: #89b4fa;
+    }
+
+    .mr-note-md MarkdownFence {
+        background: #181825;
+    }
+
+    .mr-note-diff {
+        height: auto;
+        margin: 0 2 1 4;
+        padding: 1 2;
+        background: #181825;
+    }
+
+    .mr-note-details {
+        height: auto;
+        margin: 0 0 1 4;
+        padding: 0;
+        border-top: none;
+        background: #1e1e2e;
+    }
+
+    .mr-note-details CollapsibleTitle {
+        color: #f9e2af;
+        background: #1e1e2e;
     }
     """
 

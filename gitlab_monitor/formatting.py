@@ -394,3 +394,125 @@ def next_patch_version(latest):
         return latest
     patch = int(m.group('patch')) if m.group('patch') else 0
     return f"{m.group('prefix')}{int(m.group('major'))}.{int(m.group('minor'))}.{patch + 1}"
+
+
+_FENCE_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})([^\n]*)\n(.*?)^ {0,3}\1[`~]*[ \t]*$', re.M | re.S)
+_DETAILS_RE = re.compile(r'<details\b[^>]*>\s*(?:<summary\b[^>]*>(.*?)</summary>)?|</details\s*>', re.I | re.S)
+_STRIP_TAGS_RE = re.compile(r'</?(?:p|div|span|sub|sup|small|center|kbd|ins|u)\b[^>]*>', re.I)
+
+
+def _keep_fence(m, store):
+    info, code = m.group(2).strip(), m.group(3)
+    if info.startswith('suggestion'):
+        # gitlab suggestion blocks carry only the replacement lines
+        store.append(('diff', ''.join(f"+{line}\n" for line in code.rstrip('\n').split('\n'))))
+    elif info in ('diff', 'patch'):
+        store.append(('diff', code))
+    else:
+        store.append(m.group(0))
+    return f"\x00{len(store) - 1}\x00"
+
+
+def _keep(m, store):
+    store.append(m.group(0))
+    return f"\x00{len(store) - 1}\x00"
+
+
+def _restore(text, store):
+    def put(m):
+        v = store[int(m.group(1))]
+        return v if isinstance(v, str) else v[1]
+    return re.sub(r'\x00(\d+)\x00', put, text)
+
+
+def _html_link(m):
+    href, inner = m.group(1).strip(), m.group(2).strip()
+    if not inner:
+        return ''
+    return inner if href in ('', '#') else f"[{inner}]({href}) "
+
+
+def _html_to_md(text):
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.S)
+    text = re.sub(r'<img\b[^>]*?\balt="([^"]*)"[^>]*>', lambda m: f"`{m.group(1)}`" if m.group(1) else '', text, flags=re.I)
+    text = re.sub(r'<img\b[^>]*>', '', text, flags=re.I)
+    text = re.sub(r'<a\b[^>]*?\bhref="([^"]*)"[^>]*>(.*?)</a>', _html_link, text, flags=re.I | re.S)
+    text = re.sub(r'<h([1-6])\b[^>]*>(.*?)</h\1>',
+                  lambda m: f"\n\n{'#' * int(m.group(1))} {' '.join(m.group(2).split())}\n\n", text, flags=re.I | re.S)
+    text = re.sub(r'<br\s*/?>', '  \n', text, flags=re.I)
+    text = re.sub(r'<hr\s*/?>', '\n\n---\n\n', text, flags=re.I)
+    text = re.sub(r'</?(?:b|strong)>', '**', text, flags=re.I)
+    text = re.sub(r'</?(?:i|em)>', '*', text, flags=re.I)
+    text = re.sub(r'</?code>', '`', text, flags=re.I)
+    text = _STRIP_TAGS_RE.sub('', text)
+    return re.sub(r'\n{3,}', '\n\n', text)
+
+
+def _plain_title(text, store):
+    return ' '.join(_restore(_html_to_md(text), store).replace('#', ' ').replace('*', '').replace('`', '').split())
+
+
+def _append_md(out, text):
+    text = text.strip()
+    if text:
+        out.append(('md', text))
+
+
+def diff_text(code):
+    out = Text()
+    for i, line in enumerate(code.rstrip('\n').split('\n')):
+        if i:
+            out.append("\n")
+        if line.startswith(('+++', '---')):
+            style = "bold #cdd6f4"
+        elif line.startswith('+'):
+            style = "#a6e3a1"
+        elif line.startswith('-'):
+            style = "#f38ba8"
+        elif line.startswith('@@'):
+            style = "#89dceb"
+        else:
+            style = "#a6adc8"
+        out.append(line, style=style)
+    return out
+
+
+def _finish_segments(nodes, store):
+    out = []
+    for node in nodes:
+        if node[0] == 'md':
+            text = _html_to_md(node[1])
+            pos = 0
+            for m in re.finditer(r'\x00(\d+)\x00', text):
+                v = store[int(m.group(1))]
+                if isinstance(v, tuple):
+                    _append_md(out, _restore(text[pos:m.start()], store))
+                    out.append(v)
+                    pos = m.end()
+            _append_md(out, _restore(text[pos:], store))
+        else:
+            children = _finish_segments(node[2], store)
+            if children:
+                out.append(('details', _plain_title(node[1], store) or 'Details', children))
+    return out
+
+
+def markdown_segments(body):
+    store = []
+    text = _FENCE_RE.sub(lambda m: _keep_fence(m, store), body or '')
+    text = re.sub(r'`[^`\n]+`', lambda m: _keep(m, store), text)
+    root = []
+    stack = [root]
+    pos = 0
+    for m in _DETAILS_RE.finditer(text):
+        stack[-1].append(('md', text[pos:m.start()]))
+        pos = m.end()
+        if m.group(0).startswith('</'):
+            if len(stack) > 1:
+                stack.pop()
+            continue
+        node = ('details', m.group(1) or '', [])
+        stack[-1].append(node)
+        stack.append(node[2])
+    stack[-1].append(('md', text[pos:]))
+    return _finish_segments(root, store)

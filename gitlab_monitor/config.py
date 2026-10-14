@@ -5,6 +5,7 @@
 import os
 import re
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -161,6 +162,47 @@ class MRNotes:
         return False
 
 
+class ProjectUsers:
+
+    TTL = 86400
+
+    def __init__(self, config_dir: Path):
+        self.path = config_dir / "project_users.json"
+        self._items: Dict[str, Dict[str, Any]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            with open(self.path, 'r') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    self._items = {
+                        k: v for k, v in data.items()
+                        if isinstance(v, dict) and isinstance(v.get('users'), list)
+                    }
+        except Exception:
+            self._items = {}
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix('.json.tmp')
+        with open(tmp, 'w') as f:
+            json.dump(self._items, f)
+        os.replace(tmp, self.path)
+
+    def get(self, project_path: str) -> Optional[List[Dict[str, Any]]]:
+        entry = self._items.get(project_path)
+        if not entry or time.time() - entry.get('fetched_at', 0) > self.TTL:
+            return None
+        return entry['users']
+
+    def set(self, project_path: str, users: List[Dict[str, Any]]) -> None:
+        self._items[project_path] = {'fetched_at': time.time(), 'users': users}
+        self._save()
+
+
 def _slug(text: str, limit: int = 60) -> str:
     return re.sub(r'[^a-z0-9]+', '-', (text or '').lower()).strip('-')[:limit] or 'untitled'
 
@@ -289,6 +331,7 @@ class Config:
         self.favorites = Favorites(self.config_dir)
         self.recent_projects = RecentProjects(self.config_dir)
         self.mr_notes = MRNotes(self.config_dir)
+        self.project_users = ProjectUsers(self.config_dir)
         self.review_files = ReviewFiles(self.reviews_dir)
 
     def get_last_view(self) -> Optional[Dict[str, Any]]:
