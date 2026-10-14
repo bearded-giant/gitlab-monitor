@@ -1,4 +1,4 @@
-.PHONY: help install install-dev reinstall uninstall dev build clean version
+.PHONY: help install install-dev uninstall dev test clean version
 
 PKG := gitlab-monitor
 
@@ -7,10 +7,9 @@ help:
 	@echo ""
 	@echo "  make install      pipx install . --force                       (release version from pyproject.toml)"
 	@echo "  make install-dev  pipx install with .dev0+<sha>[.dirty] suffix (baked dev build)"
-	@echo "  make reinstall    pipx uninstall + install --force"
 	@echo "  make dev          pipx install -e . --force                    (editable, auto-reflects source)"
 	@echo "  make uninstall    pipx uninstall $(PKG)"
-	@echo "  make build        python -m build (sdist + wheel)"
+	@echo "  make test         run the pytest suite via uv (pytest not a project dep)"
 	@echo "  make version      print the dev version that install-dev would use"
 	@echo "  make clean        remove build artifacts"
 
@@ -40,18 +39,15 @@ install-dev:
 	  mv pyproject.toml.bak pyproject.toml; \
 	  exit $$rc
 
-reinstall:
-	-pipx uninstall $(PKG)
-	pipx install . --force
-
 dev:
 	pipx install -e . --force
 
 uninstall:
 	pipx uninstall $(PKG)
 
-build:
-	python -m build
+test:
+	uv sync
+	uv run --with pytest pytest -q test_*.py
 
 clean:
 	rm -rf build dist *.egg-info

@@ -23,6 +23,7 @@ make install        # release version from pyproject.toml
 make install-dev    # bakes a dev build, version becomes 1.5.15.dev0+<7sha>[.dirty]
 make dev            # editable install (-e), source changes auto-apply
 make version        # print the dev version that install-dev would use
+make test           # run the test suite (uv pulls pytest in on the fly)
 ```
 
 `make install-dev` rewrites the version in `pyproject.toml` temporarily so the installed package carries a sha-tagged dev version. `glmon --version` confirms which build is running. The LoadingScreen splash also shows the version.
