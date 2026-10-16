@@ -61,8 +61,8 @@ export GLMON_REVIEWS_ENABLED=0              # kill switch for the auto-review po
 Override default refresh cadences for each view. Useful when GitLab traces are large and the log view auto-refresh appears stalled — bump `GLMON_FETCH_TIMEOUT` and/or `GLMON_TRACE_REFRESH_INTERVAL` so the trace GET completes before the next tick.
 
 ```bash
-export GLMON_PIPELINE_REFRESH_INTERVAL=10   # pipeline list refresh (default: 10s)
-export GLMON_JOB_REFRESH_INTERVAL=10        # job list refresh (default: 10s)
+export GLMON_PIPELINE_REFRESH_INTERVAL=120  # list + MR screens refresh (default: 120s)
+export GLMON_JOB_REFRESH_INTERVAL=120       # job list refresh (default: 120s)
 export GLMON_LOG_REFRESH_INTERVAL=5         # log view: status/duration meta tick (default: 5s)
 export GLMON_TRACE_REFRESH_INTERVAL=2       # log view: trace fetch cadence (default: 2s)
 export GLMON_FETCH_TIMEOUT=30               # per-fetch timeout in log view (default: 30s)
@@ -123,7 +123,7 @@ By default `glmon` opens **My Work** — your starred repos, your open MRs group
 3. **Project Hub** -- per-project dashboard with MRs and pipelines on top, commits and tags below; `[`/`]` to cycle, capital letters to open a full view
 4. **Project picker with favorites** -- star projects you care about; favorites load first (fast), toggle to full list on demand
 5. **Pipeline age window** -- default 3 days (big speedup on busy projects); cycle `3d / 7d / 30d / all` with `t`
-6. **Real-time auto-refresh** -- pipeline and job lists refresh every 10 seconds, job detail every 5 seconds; only the visible screen polls, and polling pauses after 15 idle minutes
+6. **Real-time auto-refresh** -- lists and MR screens refresh every 2 minutes (`r` refreshes now), a running job's log every few seconds; only the visible screen polls, and polling pauses after 15 idle minutes
 7. **Multi-level drill-down** -- Projects -> Pipelines -> Jobs -> Logs, including child/downstream pipelines
 8. **Merge request triage** -- cross-project and per-project MR lists, full detail view, approval state, per-MR local notes, markdown export
 9. **MR quick actions** -- merge, toggle auto-merge (merge-when-pipeline-succeeds), approve, close, assign, and comment straight from the detail view
@@ -211,7 +211,7 @@ Two flavors: **My MRs** (module `3`) is a cross-project view of the MRs you auth
 
 ![MR detail](glmon-assets/MR-detail.png)
 
-Title, description, author, source/target branches, pipeline status, and approval state. Drill into pipelines (`p`) or commits (`k`) from here. Quick actions: merge (`M`), approve (`a`), and close (`x`) each ask for a confirm first; assign (`u`) opens a filterable list of the project's users, cached locally for a day (`ctrl+r` in the list reloads it); toggle auto-merge / merge-when-pipeline-succeeds (`A`) applies right away; comment (`c`) opens a multi-line box (`ctrl+s` posts, `esc` cancels). Discussions render as markdown: headings, lists, links, code blocks, and `diff`/`suggestion` blocks in red and green. HTML from bots like Greptile is converted, and inline comments show their `file:line`. `<details>` sections start collapsed the way GitLab shows them; `e` expands or collapses them all. `f` toggles resolved discussions, `t` toggles the 10-second auto-refresh, and `g` jumps to another MR by number. When a local review file exists for the MR, a `Review:` line sits between approvals and the description showing current or stale, the review time, unread, and whether it has been posted; `v` opens it in a modal (`q` closes). `R` runs an adversarial review for this MR now, whether or not one exists; the section updates on the next refresh.
+Title, description, author, source/target branches, pipeline status, and approval state. Drill into pipelines (`p`) or commits (`k`) from here. Quick actions: merge (`M`), approve (`a`), and close (`x`) each ask for a confirm first; assign (`u`) opens a filterable list of the project's users, cached locally for a day (`ctrl+r` in the list reloads it); toggle auto-merge / merge-when-pipeline-succeeds (`A`) applies right away; comment (`c`) opens a multi-line box (`ctrl+s` posts, `esc` cancels). Discussions render as markdown: headings, lists, links, code blocks, and `diff`/`suggestion` blocks in red and green. HTML from bots like Greptile is converted, and inline comments show their `file:line`. `<details>` sections start collapsed the way GitLab shows them; `e` expands or collapses them all. `f` toggles resolved discussions, `t` toggles the 2-minute auto-refresh, and `g` jumps to another MR by number. When a local review file exists for the MR, a `Review:` line sits between approvals and the description showing current or stale, the review time, unread, and whether it has been posted; `v` opens it in a modal (`q` closes). `R` runs an adversarial review for this MR now, whether or not one exists; the section updates on the next refresh.
 
 ![MR commits](glmon-assets/MR-commits.png)
 
@@ -515,8 +515,8 @@ PipelineMonitor (App)
     │   ├── ProjectHubScreen (MRs / pipelines / commits / tags panels)
     │   └── MergeRequestDetailScreen
     ├── ProjectSelectScreen (project picker)
-    │   └── PipelineListScreen (auto-refresh 10s)
-    │       └── JobListScreen (auto-refresh 10s)
+    │   └── PipelineListScreen (auto-refresh 2m)
+    │       └── JobListScreen (auto-refresh 2m)
     │           ├── JobDetailScreen (auto-refresh 5s) — info bar + trace/failures
     │           └── FailedJobsScreen
     ├── MyMergeRequestsScreen / ProjectMergeRequestsScreen / MyReviewsScreen
