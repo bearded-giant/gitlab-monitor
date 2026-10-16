@@ -240,6 +240,13 @@ class ScreenBase(Screen):
         for t in list(self._timers):
             t.resume()
 
+    # refresh timers start after the first load, which can finish after the user has moved on
+    def set_interval(self, *args, **kwargs):
+        timer = super().set_interval(*args, **kwargs)
+        if not self.is_active:
+            timer.pause()
+        return timer
+
     def _input_focused(self) -> bool:
         try:
             for inp in self.query(Input):

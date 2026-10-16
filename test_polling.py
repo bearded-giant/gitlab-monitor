@@ -112,6 +112,30 @@ def test_buried_screen_stops_polling():
     assert resumed > buried
 
 
+def test_timer_started_while_buried_stays_paused():
+    class _LateTicker(_Ticker):
+        def on_mount(self):
+            pass
+
+    async def run():
+        app = App()
+        async with app.run_test() as pilot:
+            ticker = _LateTicker()
+            await app.push_screen(ticker)
+            await app.push_screen(Screen())
+            ticker.set_interval(0.02, ticker._tick)
+            await _settle(pilot)
+            buried = ticker.ticks
+
+            app.pop_screen()
+            await _settle(pilot)
+            return buried, ticker.ticks
+
+    buried, resumed = asyncio.run(run())
+    assert buried == 0
+    assert resumed > 0
+
+
 def test_idle_pauses_polling_until_input(monkeypatch):
     async def noop_mount(self):
         pass
