@@ -143,7 +143,7 @@ class GitLabAPI:
         if since_iso:
             params['updated_after'] = since_iso
         try:
-            project = self.gl.projects.get(project_path)
+            project = self.gl.projects.get(project_path, lazy=True)
             pipelines = project.pipelines.list(**params)
             return [self._pipeline_to_dict(p, project_path=project_path) for p in pipelines]
         except Exception:
@@ -157,7 +157,7 @@ class GitLabAPI:
             since = datetime.now(timezone.utc) - timedelta(days=days)
             params['updated_after'] = since.isoformat().replace('+00:00', 'Z')
         try:
-            project = self.gl.projects.get(project_path)
+            project = self.gl.projects.get(project_path, lazy=True)
             pipelines = project.pipelines.list(**params)
             return [self._pipeline_to_dict(p, project_path=project_path) for p in pipelines]
         except Exception:
@@ -459,7 +459,7 @@ class GitLabAPI:
         return [self._mr_to_dict(mr) for mr in mrs]
 
     def get_project_merge_requests(self, project_path, state='merged', limit=50):
-        project = self.gl.projects.get(project_path)
+        project = self.gl.projects.get(project_path, lazy=True)
         mrs = project.mergerequests.list(
             state=state,
             per_page=limit,
@@ -470,7 +470,7 @@ class GitLabAPI:
 
     def get_merge_request(self, project_path, iid):
         try:
-            project = self.gl.projects.get(project_path)
+            project = self.gl.projects.get(project_path, lazy=True)
             mr = project.mergerequests.get(iid)
             data = self._mr_to_dict(mr, project_path=project_path)
             # diff stats
@@ -505,7 +505,7 @@ class GitLabAPI:
 
     def get_mr_approval_state(self, project_path, iid):
         try:
-            project = self.gl.projects.get(project_path)
+            project = self.gl.projects.get(project_path, lazy=True)
             mr = project.mergerequests.get(iid)
             state = mr.approval_state.get()
             rules_raw = getattr(state, 'rules', None) or []
@@ -531,7 +531,7 @@ class GitLabAPI:
 
     def get_mr_pipelines(self, project_path, iid):
         try:
-            project = self.gl.projects.get(project_path)
+            project = self.gl.projects.get(project_path, lazy=True)
             mr = project.mergerequests.get(iid)
             pipelines = mr.pipelines.list(all=False, per_page=50)
             results = []
@@ -558,7 +558,7 @@ class GitLabAPI:
 
     def get_mr_commits(self, project_path, iid):
         try:
-            project = self.gl.projects.get(project_path)
+            project = self.gl.projects.get(project_path, lazy=True)
             mr = project.mergerequests.get(iid)
             commits = mr.commits()
             results = []
@@ -582,7 +582,7 @@ class GitLabAPI:
         if not sha:
             return ''
         try:
-            project = self.gl.projects.get(project_path)
+            project = self.gl.projects.get(project_path, lazy=True)
             commit = project.commits.get(sha)
             lp = getattr(commit, 'last_pipeline', None)
             if isinstance(lp, dict):
@@ -595,7 +595,7 @@ class GitLabAPI:
 
     def get_mr_discussions(self, project_path, iid):
         try:
-            project = self.gl.projects.get(project_path)
+            project = self.gl.projects.get(project_path, lazy=True)
             mr = project.mergerequests.get(iid)
             discussions = mr.discussions.list(all=True)
             results = []
@@ -638,7 +638,7 @@ class GitLabAPI:
 
     def get_mr_approvals_summary(self, project_path, iid):
         try:
-            project = self.gl.projects.get(project_path)
+            project = self.gl.projects.get(project_path, lazy=True)
             mr = project.mergerequests.get(iid)
             approvals = mr.approvals.get()
             approved_by = getattr(approvals, 'approved_by', None) or []
@@ -651,13 +651,13 @@ class GitLabAPI:
             return None
 
     def approve_merge_request(self, project_path, iid):
-        project = self.gl.projects.get(project_path)
+        project = self.gl.projects.get(project_path, lazy=True)
         mr = project.mergerequests.get(iid)
         mr.approve()
         return True
 
     def close_merge_request(self, project_path, iid):
-        project = self.gl.projects.get(project_path)
+        project = self.gl.projects.get(project_path, lazy=True)
         mr = project.mergerequests.get(iid)
         mr.state_event = 'close'
         mr.save()
@@ -667,7 +667,7 @@ class GitLabAPI:
         store = self.config.project_users
         users = None if force else store.get(project_path)
         if users is None:
-            project = self.gl.projects.get(project_path)
+            project = self.gl.projects.get(project_path, lazy=True)
             users = sorted(
                 ({'id': u.id, 'username': u.username, 'name': getattr(u, 'name', '') or ''}
                  for u in project.users.list(get_all=True, per_page=100)),
@@ -677,14 +677,14 @@ class GitLabAPI:
         return users
 
     def set_mr_assignee(self, project_path, iid, user_id):
-        project = self.gl.projects.get(project_path)
+        project = self.gl.projects.get(project_path, lazy=True)
         mr = project.mergerequests.get(iid)
         mr.assignee_ids = [user_id]
         mr.save()
         return True
 
     def set_merge_when_pipeline_succeeds(self, project_path, iid, enable):
-        project = self.gl.projects.get(project_path)
+        project = self.gl.projects.get(project_path, lazy=True)
         mr = project.mergerequests.get(iid)
         if not enable:
             mr.cancel_merge_when_pipeline_succeeds()
@@ -729,7 +729,7 @@ class GitLabAPI:
         return payload.get('data') or {}
 
     def merge_mr(self, project_path, iid, squash=True, delete_source_branch=True):
-        project = self.gl.projects.get(project_path)
+        project = self.gl.projects.get(project_path, lazy=True)
         mr = project.mergerequests.get(iid)
         mr.merge(squash=squash, should_remove_source_branch=delete_source_branch)
         return True
@@ -737,14 +737,14 @@ class GitLabAPI:
     def commit_has_tag(self, project_path, sha):
         if not sha:
             return False
-        project = self.gl.projects.get(project_path)
-        refs = project.commits.get(sha).refs('tag')
+        project = self.gl.projects.get(project_path, lazy=True)
+        refs = project.commits.get(sha, lazy=True).refs('tag')
         if not isinstance(refs, list):
             return bool(refs)
         return any((r.get('type') == 'tag') if isinstance(r, dict) else False for r in refs)
 
     def create_mr_note(self, project_path, iid, body):
-        project = self.gl.projects.get(project_path)
+        project = self.gl.projects.get(project_path, lazy=True)
         mr = project.mergerequests.get(iid)
         return mr.notes.create({'body': body})
 
@@ -753,7 +753,7 @@ class GitLabAPI:
         return getattr(project, 'default_branch', '') or ''
 
     def list_tags(self, project_path, limit=50):
-        project = self.gl.projects.get(project_path)
+        project = self.gl.projects.get(project_path, lazy=True)
         tags = project.tags.list(per_page=limit, order_by='updated', sort='desc')
         results = []
         for t in tags:
@@ -771,7 +771,7 @@ class GitLabAPI:
         return results
 
     def run_tag_pipeline(self, project_path, ref):
-        project = self.gl.projects.get(project_path)
+        project = self.gl.projects.get(project_path, lazy=True)
         p = project.pipelines.create({'ref': ref})
         return {'id': p.id, 'status': getattr(p, 'status', None), 'web_url': getattr(p, 'web_url', '')}
 
@@ -780,7 +780,7 @@ class GitLabAPI:
         target = target_branch or getattr(project, 'default_branch', '') or 'main'
         branch = f"revert-{tag_name}"
         project.branches.create({'branch': branch, 'ref': target})
-        project.commits.get(sha).revert(branch=branch)
+        project.commits.get(sha, lazy=True).revert(branch=branch)
         mr = project.mergerequests.create({
             'source_branch': branch,
             'target_branch': target,
@@ -826,7 +826,7 @@ class GitLabAPI:
         return results
 
     def get_commit(self, project_path, sha):
-        project = self.gl.projects.get(project_path)
+        project = self.gl.projects.get(project_path, lazy=True)
         c = project.commits.get(sha)
         msg = (getattr(c, 'message', '') or '').strip()
         stats = getattr(c, 'stats', None)
@@ -887,7 +887,7 @@ class GitLabAPI:
     def list_tag_pipelines(self, project_path, limit=20, username=None):
         # no updated_after window: a stalled tag deploy stops updating but still matters
         try:
-            project = self.gl.projects.get(project_path)
+            project = self.gl.projects.get(project_path, lazy=True)
             params = {'per_page': limit, 'order_by': 'id', 'sort': 'desc', 'scope': 'tags'}
             if username:
                 params['username'] = username
@@ -899,7 +899,7 @@ class GitLabAPI:
     def get_commit_pipeline(self, project_path, sha):
         if not sha:
             return None
-        project = self.gl.projects.get(project_path)
+        project = self.gl.projects.get(project_path, lazy=True)
         lp = getattr(project.commits.get(sha), 'last_pipeline', None)
         if not lp:
             return None
