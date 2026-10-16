@@ -49,12 +49,12 @@ def test_build_queue_reasons_and_skips():
 
 def test_prompt_and_argv_never_post():
     p = build_prompt('https://gl/g/p/-/merge_requests/9', 'oldsha')
-    assert p.splitlines() == ['/kai:review-adversarial https://gl/g/p/-/merge_requests/9',
+    assert p.splitlines() == ['/grill https://gl/g/p/-/merge_requests/9',
                               'Previously reviewed at oldsha. Call out what changed since.']
     argv = claude_argv(p, 'opus')
     assert '--post' not in ' '.join(argv) and '--append-system-prompt' in argv and '--output-format' in argv
     try:
-        claude_argv('/kai:review-adversarial https://x --post', 'opus')
+        claude_argv('/grill https://x --post', 'opus')
     except ValueError:
         pass
     else:

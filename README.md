@@ -252,10 +252,10 @@ Keys: `v` opens the review file in a markdown modal (`q` closes, `y` copies the 
 `glmon-reviewd` is a one-shot command: it lists your assigned MRs, skips drafts and anything pushed to in the last `settle_minutes`, and for each MR with no review file (or a review file whose sha no longer matches the head) it runs
 
 ```
-claude -p "/kai:review-adversarial <mr url>" --model <reviews.model> --output-format json
+claude -p "/grill <mr url>" --model <reviews.model> --output-format json
 ```
 
-and writes the result to `<reviews.dir>/<project>/<iid>-<title>.md` with frontmatter (`sha`, `previous_shas`, `cost_usd`, `session_id`, `approved_by_me`, `status`). Re-reviews get a hint line naming the previously reviewed sha so the review leads with what changed. A macOS notification fires per review; the title says `New review`, `UPDATED, re-reviewed`, or `APPROVED MR CHANGED` when an MR you had approved moved under you. The review never posts to GitLab: the skill only posts when handed `--post`, the poller never passes it and refuses a prompt that contains it, and the system prompt forbids GitLab writes.
+and writes the result to `<reviews.dir>/<project>/<iid>-<title>.md` with frontmatter (`sha`, `previous_shas`, `cost_usd`, `session_id`, `approved_by_me`, `status`). Re-reviews get a hint line naming the previously reviewed sha so the review leads with what changed. A macOS notification fires per review; the title says `New review`, `UPDATED, re-reviewed`, or `APPROVED MR CHANGED` when an MR you had approved moved under you. The prompt runs the `grill` skill's read-only MR mode, which seeds from Greptile's threads on the MR and checks the description's claims against the code. The review never posts to GitLab: MR mode never writes, the poller refuses any prompt containing `--post`, and the system prompt forbids GitLab writes.
 
 MRs you have already approved but never reviewed get a zero-cost baseline file (`○`) instead of an initial review, so their sha is tracked without spending anything.
 

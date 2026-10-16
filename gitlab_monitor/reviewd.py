@@ -51,7 +51,7 @@ def build_queue(mrs, index, now, include_drafts=False, settle_minutes=10):
 
 
 def build_prompt(web_url, prev_sha=None):
-    prompt = f"/kai:review-adversarial {web_url}"
+    prompt = f"/grill {web_url}"
     if prev_sha:
         prompt += f"\nPreviously reviewed at {prev_sha}. Call out what changed since."
     return prompt
