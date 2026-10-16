@@ -60,6 +60,34 @@ async def _settle(pilot, n=10):
         await pilot.pause(0.03)
 
 
+def test_tag_auto_refresh_skips_settled_pipelines():
+    async def run():
+        api = _TagApi()
+        app = App()
+        async with app.run_test() as pilot:
+            screen = TagListScreen(api, "group/project")
+            await app.push_screen(screen)
+            await _settle(pilot)
+            initial = sorted(api.status_calls)
+
+            api.status_calls.clear()
+            await screen.load_tags(full=False)
+            auto = sorted(api.status_calls)
+            shown = {t["target"]: t["pipeline_status"] for t in screen.tags}
+
+            api.status_calls.clear()
+            await screen.load_tags()
+            manual = sorted(api.status_calls)
+        return initial, auto, shown, manual
+
+    initial, auto, shown, manual = asyncio.run(run())
+    assert initial == ["sha1", "sha2", "sha3"]
+    # success is settled; running and manual can still change
+    assert auto == ["sha2", "sha3"]
+    assert shown == {"sha1": "success", "sha2": "running", "sha3": "manual"}
+    assert manual == ["sha1", "sha2", "sha3"]
+
+
 def test_commit_status_lookup_is_one_request():
     from gitlab_monitor.api import GitLabAPI
 

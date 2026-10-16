@@ -4428,7 +4428,12 @@ class TagListScreen(ScreenBase):
         self._refresh_status()
         self.api.config.save_last_view('tags', project=self.project_path)
 
-    async def load_tags(self) -> None:
+    async def load_tags(self, full: bool = True) -> None:
+        # 'manual' stays live: it can be played from the web UI between ticks
+        known = {} if full else {
+            t['target']: t['pipeline_status'] for t in self.tags
+            if t.get('target') and t.get('pipeline_status') in TERMINAL_STATUSES - {'manual'}
+        }
         try:
             self.tags = await asyncio.to_thread(self.api.list_tags, self.project_path)
         except Exception as e:
@@ -4442,16 +4447,19 @@ class TagListScreen(ScreenBase):
                 self.default_branch = await asyncio.to_thread(self.api.get_default_branch, self.project_path)
             except Exception:
                 self.default_branch = ''
-        await self._backfill_tag_pipelines(self.tags)
+        await self._backfill_tag_pipelines(self.tags, known)
         self._apply_filter()
         try:
             self.query_one("#header", K9sHeader).set_info(self._info_pairs())
         except Exception:
             pass
 
-    async def _backfill_tag_pipelines(self, tags) -> None:
-        # ponytail: 1 pipeline-status call per tag; bounded by page size (50). cache if it ever bites.
-        todo = [t for t in tags if t.get('target')]
+    async def _backfill_tag_pipelines(self, tags, known=None) -> None:
+        known = known or {}
+        for t in tags:
+            if t.get('target') in known:
+                t['pipeline_status'] = known[t['target']]
+        todo = [t for t in tags if t.get('target') and t['target'] not in known]
         if not todo:
             return
         results = await asyncio.gather(*(
@@ -4468,7 +4476,7 @@ class TagListScreen(ScreenBase):
         self._refreshing = True
         self._refresh_status()
         try:
-            await self.load_tags()
+            await self.load_tags(full=False)
         except Exception:
             pass
         finally:
