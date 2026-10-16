@@ -19,7 +19,7 @@ git push origin main          # push code first (note: origin = github, not gitl
 v1.5.4 tag pushed
   → release.yml (pyinstaller on macos-14) builds glmon-aarch64-apple-darwin
   → publishes GitHub release w/ asset
-  → release:published event triggers update-homebrew.yml
+  → release.yml dispatches update-homebrew.yml (a GITHUB_TOKEN release never fires release:published)
   → downloads asset, computes SHA256, regenerates Formula/gitlab-monitor.rb
   → commits to bearded-giant/homebrew-tap as github-actions[bot]
   → brew upgrade gitlab-monitor works

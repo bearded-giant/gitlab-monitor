@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   build:
@@ -74,3 +75,9 @@ jobs:
         with:
           files: artifacts/glmon-*
           generate_release_notes: true
+
+      # a GITHUB_TOKEN release can't fire release:published; workflow_dispatch is the exception
+      - name: Update Homebrew tap
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run update-homebrew.yml -R "${{ github.repository }}" -f tag="${{ github.ref_name }}"
