@@ -66,7 +66,10 @@ export GLMON_JOB_REFRESH_INTERVAL=10        # job list refresh (default: 10s)
 export GLMON_LOG_REFRESH_INTERVAL=5         # log view: status/duration meta tick (default: 5s)
 export GLMON_TRACE_REFRESH_INTERVAL=2       # log view: trace fetch cadence (default: 2s)
 export GLMON_FETCH_TIMEOUT=30               # per-fetch timeout in log view (default: 30s)
+export GLMON_IDLE_PAUSE_MINUTES=30          # pause all auto-refresh after this long with no input; 0 disables (default: 30)
 ```
+
+Only the screen you're looking at polls. Screens further back in the stack pause until you return to them. After `GLMON_IDLE_PAUSE_MINUTES` without a key or mouse event, auto-refresh stops and any key picks it back up, so a glmon left open overnight doesn't keep hitting GitLab.
 
 The log view splits refresh into a meta tick (job status + duration via a small JSON GET) and a trace tick that asks GitLab only for the log bytes it hasn't seen yet (an HTTP Range request). Both stay cheap, so the trace tick can run every couple of seconds without piling up multi-MB downloads.
 
@@ -120,7 +123,7 @@ By default `glmon` opens **My Work** — your starred repos, your open MRs group
 3. **Project Hub** -- per-project dashboard with MRs and pipelines on top, commits and tags below; `[`/`]` to cycle, capital letters to open a full view
 4. **Project picker with favorites** -- star projects you care about; favorites load first (fast), toggle to full list on demand
 5. **Pipeline age window** -- default 3 days (big speedup on busy projects); cycle `3d / 7d / 30d / all` with `t`
-6. **Real-time auto-refresh** -- pipeline and job lists refresh every 10 seconds, job detail every 5 seconds
+6. **Real-time auto-refresh** -- pipeline and job lists refresh every 10 seconds, job detail every 5 seconds; only the visible screen polls, and polling pauses after 30 idle minutes
 7. **Multi-level drill-down** -- Projects -> Pipelines -> Jobs -> Logs, including child/downstream pipelines
 8. **Merge request triage** -- cross-project and per-project MR lists, full detail view, approval state, per-MR local notes, markdown export
 9. **MR quick actions** -- merge, toggle auto-merge (merge-when-pipeline-succeeds), approve, close, assign, and comment straight from the detail view

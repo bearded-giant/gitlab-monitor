@@ -8,10 +8,12 @@ import sys
 import argparse
 import shutil
 import subprocess
+import time
 import webbrowser
 from datetime import datetime
 from pathlib import Path
 import asyncio
+from textual import events
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Static, Input, RichLog, TextArea, Label, Markdown, RadioSet, RadioButton, Collapsible
 from textual.containers import Container, Horizontal, ScrollableContainer
@@ -32,6 +34,7 @@ from .constants import (
     LOG_META_REFRESH_INTERVAL,
     LOG_TRACE_REFRESH_INTERVAL,
     LOG_FETCH_TIMEOUT,
+    IDLE_PAUSE_MINUTES,
     STATUS_STYLES,
     TERMINAL_STATUSES,
     MAX_LOG_LINES,
@@ -227,6 +230,15 @@ class ScreenBase(Screen):
             self._refresh_status()
         except Exception:
             pass
+
+    # textual keeps a buried screen's timers running, so every screen in the stack would keep polling
+    def on_screen_suspend(self) -> None:
+        for t in list(self._timers):
+            t.pause()
+
+    def on_screen_resume(self) -> None:
+        for t in list(self._timers):
+            t.resume()
 
     def _input_focused(self) -> bool:
         try:
@@ -7206,6 +7218,28 @@ class PipelineMonitor(App):
         self.explicit_project = explicit_project
         self._activity_counts = []
         self._activity_timer = None
+        self._last_input = time.monotonic()
+        self._idle_paused = False
+
+    def _check_idle(self) -> None:
+        if self._idle_paused or time.monotonic() - self._last_input < IDLE_PAUSE_MINUTES * 60:
+            return
+        self._idle_paused = True
+        for t in [*self.screen._timers, self._activity_timer]:
+            if t:
+                t.pause()
+        self.notify(f"Auto-refresh paused after {IDLE_PAUSE_MINUTES}m idle; any key resumes", timeout=86400)
+
+    async def on_event(self, event: events.Event) -> None:
+        if isinstance(event, events.InputEvent) and not event.is_forwarded:
+            self._last_input = time.monotonic()
+            if self._idle_paused:
+                self._idle_paused = False
+                self.clear_notifications()
+                for t in [*self.screen._timers, self._activity_timer]:
+                    if t:
+                        t.resume()
+        await super().on_event(event)
 
     def action_quit(self) -> None:
         self.exit()
@@ -7260,6 +7294,8 @@ class PipelineMonitor(App):
         self._activity_timer = self.set_interval(
             ACTIVITY_TTL, lambda: asyncio.create_task(self._refresh_activity())
         )
+        if IDLE_PAUSE_MINUTES > 0:
+            self.set_interval(60, self._check_idle)
 
     async def _refresh_activity(self) -> None:
         try:

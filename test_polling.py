@@ -88,6 +88,60 @@ def test_tag_auto_refresh_skips_settled_pipelines():
     assert manual == ["sha1", "sha2", "sha3"]
 
 
+def test_buried_screen_stops_polling():
+    async def run():
+        app = App()
+        async with app.run_test() as pilot:
+            ticker = _Ticker()
+            await app.push_screen(ticker)
+            await _settle(pilot)
+            assert ticker.ticks > 0
+
+            await app.push_screen(Screen())
+            await _settle(pilot, 2)
+            buried = ticker.ticks
+            await _settle(pilot)
+            still_buried = ticker.ticks
+
+            app.pop_screen()
+            await _settle(pilot)
+            return buried, still_buried, ticker.ticks
+
+    buried, still_buried, resumed = asyncio.run(run())
+    assert still_buried == buried
+    assert resumed > buried
+
+
+def test_idle_pauses_polling_until_input(monkeypatch):
+    async def noop_mount(self):
+        pass
+
+    monkeypatch.setattr(PipelineMonitor, "on_mount", noop_mount)
+
+    async def run():
+        app = PipelineMonitor(_Config())
+        async with app.run_test() as pilot:
+            ticker = _Ticker()
+            await app.push_screen(ticker)
+            await _settle(pilot)
+
+            app._last_input -= tui.IDLE_PAUSE_MINUTES * 60 + 1
+            app._check_idle()
+            await _settle(pilot, 2)
+            paused = ticker.ticks
+            await _settle(pilot)
+            still_paused = ticker.ticks
+
+            await pilot.press("z")
+            await _settle(pilot)
+            return paused, still_paused, ticker.ticks, app._idle_paused
+
+    paused, still_paused, resumed, idle_flag = asyncio.run(run())
+    assert still_paused == paused
+    assert resumed > paused
+    assert idle_flag is False
+
+
 def test_commit_status_lookup_is_one_request():
     from gitlab_monitor.api import GitLabAPI
 
