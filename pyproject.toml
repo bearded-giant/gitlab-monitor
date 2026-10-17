@@ -36,6 +36,7 @@ Homepage = "https://github.com/bearded-giant/gitlab-monitor"
 gitlab-monitor = "gitlab_monitor.tui:main"
 glmon = "gitlab_monitor.tui:main"
 glmon-reviewd = "gitlab_monitor.reviewd:main"
+glmon-jirad = "gitlab_monitor.jirad:main"
 
 [tool.setuptools.packages.find]
 include = ["gitlab_monitor*"]

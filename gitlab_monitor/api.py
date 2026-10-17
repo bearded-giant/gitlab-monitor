@@ -429,17 +429,20 @@ class GitLabAPI:
             'merge_commit_sha': getattr(mr, 'merge_commit_sha', None) or getattr(mr, 'squash_commit_sha', None),
         }
 
-    def get_my_merge_requests(self, state='opened', limit=50, days=None):
+    def get_my_merge_requests(self, state='opened', limit=50, days=None, created_after=None, get_all=False):
         params = dict(
             scope='created_by_me',
             state=state,
             per_page=limit,
             order_by='updated_at',
             sort='desc',
+            get_all=get_all,
         )
         if days is not None:
             since = datetime.now(timezone.utc) - timedelta(days=days)
             params['updated_after'] = since.isoformat().replace('+00:00', 'Z')
+        if created_after:
+            params['created_after'] = created_after
         mrs = self.gl.mergerequests.list(**params)
         return [self._mr_to_dict(mr) for mr in mrs]
 
@@ -675,6 +678,17 @@ class GitLabAPI:
             )
             store.set(project_path, users)
         return users
+
+    def get_merge_request_basic(self, project_path, iid):
+        project = self.gl.projects.get(project_path, lazy=True)
+        return self._mr_to_dict(project.mergerequests.get(iid), project_path=project_path)
+
+    def set_mr_title(self, project_path, iid, title):
+        project = self.gl.projects.get(project_path, lazy=True)
+        mr = project.mergerequests.get(iid)
+        mr.title = title
+        mr.save()
+        return True
 
     def set_mr_assignee(self, project_path, iid, user_id):
         project = self.gl.projects.get(project_path, lazy=True)

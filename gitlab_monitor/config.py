@@ -319,6 +319,18 @@ REVIEWS_DEFAULTS = {
     'settle_minutes': 10,
 }
 
+JIRA_DEFAULTS = {
+    'enabled': False,
+    'base': None,
+    'email': None,
+    'project': None,
+    'issue_type': 'Story',
+    'label': 'mr-sync',
+    'exclude_namespaces': [],
+    'lookback_days': 14,
+    'since': None,
+}
+
 
 class Config:
     """Handle configuration from environment variables and config files"""
@@ -372,17 +384,21 @@ class Config:
             'max_pipelines': 50,
             'theme': 'dark',
             'reviews': dict(REVIEWS_DEFAULTS),
+            'jira': dict(JIRA_DEFAULTS),
         }
-        
+
         # Load from config file if it exists
         if self.config_file.exists():
             try:
                 with open(self.config_file, 'r') as f:
                     file_config = json.load(f)
                     file_reviews = file_config.pop('reviews', None)
+                    file_jira = file_config.pop('jira', None)
                     config.update(file_config)
                     if isinstance(file_reviews, dict):
                         config['reviews'].update(file_reviews)
+                    if isinstance(file_jira, dict):
+                        config['jira'].update(file_jira)
             except Exception:
                 pass
         
@@ -410,7 +426,11 @@ class Config:
             config['reviews']['dir'] = os.environ['GLMON_REVIEWS_DIR']
         if os.environ.get('GLMON_REVIEWS_ENABLED'):
             config['reviews']['enabled'] = os.environ['GLMON_REVIEWS_ENABLED'].lower() not in ('0', 'false', 'no', 'off')
-        
+        if os.environ.get('JIRA_BASE'):
+            config['jira']['base'] = os.environ['JIRA_BASE']
+        if os.environ.get('JIRA_EMAIL'):
+            config['jira']['email'] = os.environ['JIRA_EMAIL']
+
         return config
     
     def save_config(self, **kwargs):
@@ -471,6 +491,28 @@ class Config:
         reviews = self.reviews
         reviews['enabled'] = bool(enabled)
         self.save_config(reviews=reviews)
+
+    @property
+    def jira(self) -> Dict[str, Any]:
+        merged = dict(JIRA_DEFAULTS)
+        merged.update(self._config.get('jira') or {})
+        return merged
+
+    def set_jira(self, **fields) -> None:
+        jira = self.jira
+        jira.update(fields)
+        self.save_config(jira=jira)
+
+    @property
+    def jira_token(self) -> Optional[str]:
+        token = os.environ.get('JIRA_TOKEN') or os.environ.get('JIRA_API_TOKEN')
+        if token:
+            return token
+        token_file = self.config_dir / 'jira_token'
+        try:
+            return token_file.read_text().strip() or None
+        except OSError:
+            return None
     
     def validate(self) -> tuple[bool, str]:
         """Validate required configuration (project_path is optional now)"""

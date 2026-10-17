@@ -89,7 +89,7 @@ Configuration can also be stored in `~/.config/gitlab-monitor/config.json`:
 }
 ```
 
-The `reviews` block drives the Reviews module and its poller (see view 13). Every key is optional and falls back to the value shown.
+The `reviews` block drives the Reviews module and its poller (see view 13). Every key is optional and falls back to the value shown. An optional `jira` block drives `glmon-jirad` (see [Jira Sync](#jira-sync)).
 
 Note: Never put the token in `config.json`. Use the `GITLAB_TOKEN` environment variable, or for non-interactive runs (the Reviews poller under launchd) a `~/.config/gitlab-monitor/token` file with mode 600.
 
@@ -506,6 +506,59 @@ At any level, press `b` to open the current selection in your browser for full G
 | `manual` | Blue |
 | `skipped` | Dim |
 
+## Jira Sync
+
+`glmon-jirad` keeps one Jira ticket per merge request you author, as a side effect of the MR itself. There is no webhook. Each run lists your MRs, works out what the ticket status should be from the MR's current state, and fixes anything that drifted, so a run missed while the laptop slept is caught up by the next one.
+
+For an open MR whose title carries no ticket key, it creates a ticket in `jira.project` (summary is the MR title, description is up to three plain-language bullets written by `claude -p --model haiku`, label `jira.label`, assigned to you, with a link back to the MR), then puts the key in the MR title. A placeholder key such as `PE-0000` is replaced where it sits, so `chore(PE-0000): x` becomes `chore(PE-123): x`; otherwise the key is prefixed as `[PE-123]`. The title is the only place the link lives, and Jira's GitLab integration reads it from there.
+
+Status follows the MR:
+
+| MR state | Ticket status |
+|----------|---------------|
+| draft, or head pipeline not green | In Progress |
+| not draft, head pipeline green (or the project runs no MR CI) | In Review |
+| merged | Done |
+| closed without merging | Won't fix |
+
+It only ever moves tickets carrying its own label, and only out of a To Do category status or one it set itself. If someone moves a ticket to In QA or In Monitoring by hand, it stays there. A ticket key you put in a title yourself is left alone. MRs under a namespace in `jira.exclude_namespaces` are skipped entirely, and only MRs created after you enable the sync get tickets, so turning it on never backfills.
+
+Config lives in the `jira` block of `~/.config/gitlab-monitor/config.json`:
+
+```json
+"jira": {
+  "base": "https://your-domain.atlassian.net",
+  "email": "you@example.com",
+  "project": "PE",
+  "exclude_namespaces": ["your.username", "some-group"]
+}
+```
+
+`JIRA_EMAIL` and `JIRA_TOKEN` (or `JIRA_API_TOKEN`) come from the environment, same names jira-tui uses; `JIRA_BASE` overrides `base`. launchd starts the job with a bare environment, so put the email in the config block too and the token in a file only you can read:
+
+```bash
+printf '%s' "$JIRA_API_TOKEN" > ~/.config/gitlab-monitor/jira_token && chmod 600 ~/.config/gitlab-monitor/jira_token
+```
+
+Run it by hand:
+
+```bash
+glmon-jirad --enable             # turn it on; MRs created from now on get tickets
+glmon-jirad --dry-run            # print what would change, write nothing
+glmon-jirad --once               # one run (the default)
+glmon-jirad --mr group/project!123 --summary-file bullets.md   # sync one MR now, with your own bullets
+glmon-jirad --status
+glmon-jirad --disable
+```
+
+Schedule it the same way as the review poller:
+
+```bash
+cp launchd/com.bryan.glmon-jirad.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.bryan.glmon-jirad.plist
+tail -f ~/.cache/glmon/jirad.err
+```
+
 ## Architecture
 
 ```
@@ -532,6 +585,8 @@ Screens dispatch keys via a per-screen `KEY_MAP` (case-sensitive) rather than Te
 
 `reviewd.py` is the Reviews poller, installed as the `glmon-reviewd` console script. It shares `Config`, `GitLabAPI`, and the `ReviewFiles` index (`config.py`) with the TUI; the two processes talk only through the review files on disk.
 
+`jirad.py` is the Jira sync, installed as `glmon-jirad`. It reuses `Config`, `GitLabAPI`, and reviewd's lock and claude helpers, and talks to Jira's REST API with the standard library. The TUI knows nothing about Jira.
+
 ## Files
 
 | Path | Purpose |
@@ -544,6 +599,10 @@ Screens dispatch keys via a per-screen `KEY_MAP` (case-sensitive) rather than Te
 | `~/dev/reviews/` (or `reviews.dir`) | Local AI review files, one markdown file per MR; `_locks/` holds per-MR lockfiles while a review runs |
 | `~/.cache/glmon/reviewd.{out,err}` | launchd poller logs; `reviewd-manual.log` for reviews started from the TUI |
 | `~/Library/LaunchAgents/com.bryan.glmon-reviewd.plist` | Poller schedule (copied from `launchd/` in this repo) |
+| `~/.config/gitlab-monitor/jira_token` | Optional 0600 Jira API token, read only when `JIRA_TOKEN` and `JIRA_API_TOKEN` are unset (launchd sync) |
+| `~/.cache/glmon/jirad-state.json` | Last ticket status the sync applied per MR, so unchanged MRs cost no Jira calls |
+| `~/.cache/glmon/jirad.{out,err}` | launchd Jira sync logs |
+| `~/Library/LaunchAgents/com.bryan.glmon-jirad.plist` | Jira sync schedule (copied from `launchd/` in this repo) |
 
 ## Screenshots
 
