@@ -243,7 +243,7 @@ def _now_iso():
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='glmon-jirad', description='keep one Jira ticket per merge request you author (one tick per run)')
     ap.add_argument('--once', action='store_true', help='run one tick (default)')
-    ap.add_argument('--dry-run', action='store_true', help='print what would change, write nothing')
+    ap.add_argument('--dry-run', action='store_true', help='print what would change, write nothing; works while disabled')
     ap.add_argument('--mr', metavar='URL|project!iid', help='sync one MR now, even if it predates jira.since')
     ap.add_argument('--summary-file', metavar='PATH', help='with --mr: bullets for a new ticket description')
     ap.add_argument('--enable', action='store_true', help='turn sync on; only MRs created from now on get tickets')
@@ -265,12 +265,13 @@ def main(argv=None):
               f"exclude={cfg['exclude_namespaces']} token={'set' if config.jira_token else 'missing'} "
               f"tracked={len(load_state(STATE_FILE).get('mrs', {}))}")
         return 0
-    if not cfg['enabled']:
+    if not cfg['enabled'] and not args.dry_run:
         _log("jira sync disabled (jira.enabled=false); nothing to do")
         return 0
     if not cfg.get('since'):
-        config.set_jira(since=_now_iso())
-        cfg = config.jira
+        cfg = {**cfg, 'since': _now_iso()}
+        if not args.dry_run:
+            config.set_jira(since=cfg['since'])
     missing = [k for k in ('base', 'email', 'project') if not cfg.get(k)] + ([] if config.jira_token else ['token'])
     if missing:
         _log(f"jira config missing: {', '.join(missing)}")
