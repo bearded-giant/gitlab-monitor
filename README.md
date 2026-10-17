@@ -508,64 +508,9 @@ At any level, press `b` to open the current selection in your browser for full G
 
 ## Jira Sync
 
-`glmon-jirad` keeps one Jira ticket per merge request you author, as a side effect of the MR itself. There is no webhook. Each run lists your MRs, works out what the ticket status should be from the MR's current state, and fixes anything that drifted, so a run missed while the laptop slept is caught up by the next one.
+`glmon-jirad` keeps one Jira ticket per merge request you author, as a side effect of the MR. Open an MR and it creates the ticket and writes the key into the MR title; the ticket then follows the MR (In Progress, In Review once the pipeline is green, Done on merge, Won't fix on close). It runs from launchd every five minutes with no webhook, and `glmon-jirad --lookup` checks the ticket behind any branch or MR.
 
-For an open MR whose title carries no ticket key, it creates a ticket in `jira.project` (summary is the MR title, description is up to three plain-language bullets written by `claude -p --model haiku`, label `jira.label`, assigned to you, with a link back to the MR), then puts the key in the MR title. A placeholder key such as `PE-0000` is replaced where it sits, so `chore(PE-0000): x` becomes `chore(PE-123): x`; otherwise the key is prefixed as `[PE-123]`. The title is the only place the link lives, and Jira's GitLab integration reads it from there.
-
-Status follows the MR:
-
-| MR state | Ticket status |
-|----------|---------------|
-| draft, or head pipeline not green | In Progress |
-| not draft, head pipeline green (or the project runs no MR CI) | In Review |
-| merged | Done |
-| closed without merging | Won't fix |
-
-It only ever moves tickets carrying its own label, and only out of a To Do category status or one it set itself. If someone moves a ticket to In QA or In Monitoring by hand, it stays there. A ticket key you put in a title yourself is left alone. MRs under a namespace in `jira.exclude_namespaces` are skipped entirely, and only MRs created after you enable the sync get tickets, so turning it on never backfills.
-
-Config lives in the `jira` block of `~/.config/gitlab-monitor/config.json`:
-
-```json
-"jira": {
-  "base": "https://your-domain.atlassian.net",
-  "email": "you@example.com",
-  "project": "PE",
-  "exclude_namespaces": ["your.username", "some-group"]
-}
-```
-
-`JIRA_EMAIL` and `JIRA_TOKEN` (or `JIRA_API_TOKEN`) come from the environment, same names jira-tui uses; `JIRA_BASE` overrides `base`. launchd starts the job with a bare environment, so put the email in the config block too and the token in a file only you can read:
-
-```bash
-printf '%s' "$JIRA_API_TOKEN" > ~/.config/gitlab-monitor/jira_token && chmod 600 ~/.config/gitlab-monitor/jira_token
-```
-
-Run it by hand:
-
-```bash
-glmon-jirad --enable             # turn it on; MRs created from now on get tickets
-glmon-jirad --dry-run            # print what would change, write nothing
-glmon-jirad --once               # one run (the default)
-glmon-jirad --mr group/project!123 --summary-file bullets.md   # sync one MR now, with your own bullets
-glmon-jirad --status
-glmon-jirad --disable
-```
-
-To check on a ticket, `glmon-jirad --lookup` reads the current checkout's GitLab remote and branch, finds the MR, and prints the ticket, its status, and whether it matches what the MR says it should be. Pass a branch name, an MR URL, or `group/project!123` to look elsewhere. It only reads, and works while the sync is disabled.
-
-```
-$ glmon-jirad --lookup
-PE-123  In Review  feat: add the thing  https://your-domain.atlassian.net/browse/PE-123
-group/project!77  opened  pipeline success  expects In Review: in sync
-```
-
-Schedule it the same way as the review poller:
-
-```bash
-cp launchd/com.bryan.glmon-jirad.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.bryan.glmon-jirad.plist
-tail -f ~/.cache/glmon/jirad.err
-```
+Setup, commands, the lookup output, and troubleshooting are in [JIRA_SYNC.md](JIRA_SYNC.md).
 
 ## Architecture
 
