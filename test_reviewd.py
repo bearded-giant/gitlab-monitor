@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from gitlab_monitor.config import ReviewFiles
-from gitlab_monitor.reviewd import build_prompt, build_queue, claude_argv, parse_claude_output
+from gitlab_monitor.reviewd import Lock, build_prompt, build_queue, claude_argv, parse_claude_output
 
 
 def _mr(iid, sha, draft=False, minutes_ago=60):
@@ -59,6 +59,17 @@ def test_prompt_and_argv_never_post():
         pass
     else:
         raise AssertionError('--post must be refused')
+
+
+def test_lock_blocked_caller_leaves_holder_lock():
+    root = tempfile.mkdtemp()
+    with Lock(root, 'g/p:1') as held:
+        assert held is not None
+        with Lock(root, 'g/p:1') as blocked:
+            assert blocked is None
+        # the blocked caller must not delete the holder's lockfile on exit
+        assert held.path.exists()
+    assert not held.path.exists()
 
 
 def test_parse_claude_output_array_and_object():

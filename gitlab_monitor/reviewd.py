@@ -113,6 +113,7 @@ def notify(reason, mr):
 class Lock:
     def __init__(self, root, key):
         self.path = Path(root) / '_locks' / (key.replace('/', '-').replace(':', '-') + '.lock')
+        self.owned = False
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,9 +124,12 @@ class Lock:
             except (OSError, ValueError):
                 pass
         self.path.write_text(str(os.getpid()))
+        self.owned = True
         return self
 
     def __exit__(self, *exc):
+        if not self.owned:
+            return
         try:
             self.path.unlink()
         except OSError:
