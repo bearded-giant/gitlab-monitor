@@ -6,7 +6,9 @@ import argparse
 import base64
 import json
 import os
+import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -22,6 +24,8 @@ from .reviewd import Lock, _key, _log, _parse_ts, claude_argv, parse_claude_outp
 
 STATE_DIR = Path.home() / '.cache' / 'glmon'
 STATE_FILE = STATE_DIR / 'jirad-state.json'
+LAUNCHD_LABEL = 'com.bryan.glmon-jirad'
+PLIST_PATH = Path.home() / 'Library' / 'LaunchAgents' / f'{LAUNCHD_LABEL}.plist'
 SUMMARY_MODEL = 'haiku'
 SUMMARY_PROMPT = (
     "Summarize the purpose of this merge request for a Jira ticket in at most 3 short bullet points. "
@@ -341,6 +345,66 @@ def token_source(config):
         (file_ok, env_ok), 'missing')
 
 
+def launchd_plist(exe_argv, home):
+    return {
+        'Label': LAUNCHD_LABEL,
+        'ProgramArguments': [*exe_argv, '--once'],
+        'StartInterval': 300,
+        'RunAtLoad': True,
+        'ProcessType': 'Background',
+        'StandardOutPath': f"{home}/.cache/glmon/jirad.out",
+        'StandardErrorPath': f"{home}/.cache/glmon/jirad.err",
+        'EnvironmentVariables': {
+            'PATH': f"{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            'HOME': str(home),
+        },
+    }
+
+
+def _launchctl(run, *args):
+    return run(['launchctl', *args], capture_output=True, text=True, check=False)
+
+
+def scheduled(run=subprocess.run):
+    return _launchctl(run, 'print', f"gui/{os.getuid()}/{LAUNCHD_LABEL}").returncode == 0
+
+
+def schedule(plist_path=PLIST_PATH, run=subprocess.run, exe_argv=None):
+    exe = shutil.which('glmon-jirad')
+    data = launchd_plist(exe_argv or ([exe] if exe else [sys.executable, '-m', 'gitlab_monitor.jirad']), Path.home())
+    try:
+        current = plistlib.loads(Path(plist_path).read_bytes())
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        current = None
+    if current != data:
+        Path(plist_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(plist_path).write_bytes(plistlib.dumps(data))
+    if scheduled(run):
+        if current == data:
+            return 'already scheduled'
+        _launchctl(run, 'bootout', f"gui/{os.getuid()}/{LAUNCHD_LABEL}")
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    result = _launchctl(run, 'bootstrap', f"gui/{os.getuid()}", str(plist_path))
+    if result.returncode != 0:
+        raise RuntimeError(f"launchctl bootstrap failed: {result.stderr.strip()}")
+    return 'scheduled'
+
+
+def unschedule(plist_path=PLIST_PATH, run=subprocess.run):
+    if scheduled(run):
+        _launchctl(run, 'bootout', f"gui/{os.getuid()}/{LAUNCHD_LABEL}")
+    Path(plist_path).unlink(missing_ok=True)
+
+
+def ensure_scheduled(cfg):
+    if not cfg['enabled'] or sys.platform != 'darwin' or scheduled():
+        return
+    try:
+        _log(f"launchd job was not loaded; {schedule()} ({PLIST_PATH})")
+    except Exception as e:
+        _log(f"could not schedule launchd job: {e}")
+
+
 def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
@@ -351,8 +415,8 @@ def main(argv=None):
     ap.add_argument('--dry-run', action='store_true', help='print what would change, write nothing; works while disabled')
     ap.add_argument('--mr', metavar='URL|project!iid', help='sync one MR now, even if it predates jira.since')
     ap.add_argument('--summary-file', metavar='PATH', help='with --mr: bullets for a new ticket description')
-    ap.add_argument('--enable', action='store_true', help='turn sync on; only MRs created from now on get tickets')
-    ap.add_argument('--disable', action='store_true', help='turn sync off; --mr is off too')
+    ap.add_argument('--enable', action='store_true', help='turn sync on and load the launchd job; only MRs created from now on get tickets')
+    ap.add_argument('--disable', action='store_true', help='turn sync off and unload the launchd job; --mr is off too')
     ap.add_argument('--status', action='store_true')
     ap.add_argument('--lookup', nargs='?', const='', metavar='BRANCH|URL|project!iid',
                     help='read-only: ticket and status for a branch (default: current checkout) or MR; works while disabled')
@@ -366,11 +430,24 @@ def main(argv=None):
             fields['since'] = _now_iso()
         config.set_jira(**fields)
         _log(f"jira sync {'enabled' if args.enable else 'disabled'} ({config.config_file})")
+        if sys.platform != 'darwin':
+            _log("no launchd here: schedule `glmon-jirad --once` every few minutes yourself")
+            return 0
+        try:
+            if args.enable:
+                _log(f"launchd job {schedule()} ({PLIST_PATH}), runs every 5 minutes")
+            else:
+                unschedule()
+                _log("launchd job unloaded and removed")
+        except Exception as e:
+            _log(f"launchd: {e}")
+            return 1
         return 0
     if args.status:
         print(f"enabled={cfg['enabled']} project={cfg['project']} since={cfg['since']} "
               f"exclude={cfg['exclude_namespaces']} token={token_source(config)} "
-              f"tracked={len(load_state(STATE_FILE).get('mrs', {}))}")
+              f"tracked={len(load_state(STATE_FILE).get('mrs', {}))} "
+              f"launchd={'loaded' if sys.platform == 'darwin' and scheduled() else 'not loaded'}")
         return 0
     if args.lookup is not None:
         missing = [k for k in ('base', 'email', 'project') if not cfg.get(k)] + ([] if config.jira_token else ['token'])
@@ -378,6 +455,7 @@ def main(argv=None):
         if missing or not ok:
             _log(f"jira config missing: {', '.join(missing)}" if missing else msg)
             return 2
+        ensure_scheduled(cfg)
         return run_lookup(config, cfg, args.lookup)
     if not cfg['enabled'] and not args.dry_run:
         _log("jira sync disabled (jira.enabled=false); nothing to do")
@@ -407,6 +485,8 @@ def main(argv=None):
         if not state.get('account_id'):
             state['account_id'] = jira.myself()
         if args.mr:
+            if not args.dry_run:
+                ensure_scheduled(cfg)
             mr = resolve_mr(api, args.mr)
             if excluded(mr['project_path'], cfg['exclude_namespaces']):
                 _log(f"skip {_key(mr)}: excluded namespace")

@@ -59,25 +59,18 @@ MRs under a namespace in `jira.exclude_namespaces` are skipped entirely, and so 
    glmon-jirad --status
    ```
 
-   You want `enabled=True` and `token=file+env` or `token=file`. If you see `token=env-only(launchd-needs-file)`, step 2 didn't happen.
+   `--enable` also writes `~/Library/LaunchAgents/com.bryan.glmon-jirad.plist` and loads it, so a run happens right away and then every five minutes, including after a reboot. You want `enabled=True`, `launchd=loaded`, and `token=file+env` or `token=file`. If you see `token=env-only(launchd-needs-file)`, step 2 didn't happen.
 
-4. Try it on one MR before scheduling it.
+4. Watch a run, or push one MR through by hand.
 
    ```bash
+   tail -f ~/.cache/glmon/jirad.out
    glmon-jirad --dry-run --mr 'group/project!123'
    glmon-jirad --mr 'group/project!123'
    glmon-jirad --lookup 'group/project!123'
    ```
 
-5. Schedule it every five minutes.
-
-   ```bash
-   cp launchd/com.bryan.glmon-jirad.plist ~/Library/LaunchAgents/
-   launchctl load ~/Library/LaunchAgents/com.bryan.glmon-jirad.plist
-   tail -f ~/.cache/glmon/jirad.err
-   ```
-
-   Edit the paths and username in the plist if yours differ.
+   If the job ever gets unloaded while the sync is enabled, the next `--mr` or `--lookup` loads it again. `launchd/com.bryan.glmon-jirad.plist` in this repo is the same job for a manual install.
 
 ## Commands
 
@@ -88,8 +81,8 @@ MRs under a namespace in `jira.exclude_namespaces` are skipped entirely, and so 
 | `--mr <ref>` | sync one MR now, even one created before `--enable`; waits up to 90 seconds if a scheduled run is in progress |
 | `--mr <ref> --summary-file <path>` | same, but use your own bullets for a new ticket's description |
 | `--lookup [<ref>]` | read-only check of the ticket behind a branch or MR (see below) |
-| `--status` | config, token source, and how many MRs are tracked |
-| `--enable` / `--disable` | turn the sync on or off; `--lookup` keeps working either way |
+| `--status` | config, token source, launchd job state, and how many MRs are tracked |
+| `--enable` / `--disable` | turn the sync on (and load the launchd job) or off (and unload it); `--lookup` keeps working either way |
 
 `<ref>` is an MR URL or `group/project!123`. `--lookup` also takes a branch name, and with no argument it uses the current checkout and branch.
 
@@ -122,16 +115,18 @@ With no ticket, you get one line saying why: the namespace is excluded, there's 
 | `~/.config/gitlab-monitor/config.json` | the `jira` block |
 | `~/.config/gitlab-monitor/jira_token` | 0600 API token for the launchd job |
 | `~/.cache/glmon/jirad-state.json` | last status applied per MR, so unchanged MRs cost no Jira calls |
-| `~/.cache/glmon/jirad.{out,err}` | launchd logs |
+| `~/.cache/glmon/jirad.out` | run log: what each run found, created, and moved, plus `FAILED` lines |
+| `~/.cache/glmon/jirad.err` | crashes only (Python tracebacks) |
+| `~/Library/LaunchAgents/com.bryan.glmon-jirad.plist` | the five-minute job, written by `--enable` |
 | `~/.cache/glmon/_locks/jirad.lock` | held while a run is going, so two runs never create the same ticket |
 
 ## Troubleshooting
 
 | You see | Why | Fix |
 |---------|-----|-----|
-| `jira config missing: token` in `jirad.err` | launchd can't see your shell's token | write `~/.config/gitlab-monitor/jira_token` (setup step 2) |
+| `jira config missing: token` in `jirad.out` | launchd can't see your shell's token | write `~/.config/gitlab-monitor/jira_token` (setup step 2) |
 | `jira config missing: base` (or `email`, `project`) | the config block is incomplete | add the key to the `jira` block |
-| a new MR never gets a ticket | it's in an excluded namespace, it predates `--enable`, or the job isn't loaded | `glmon-jirad --lookup <ref>` says which; `launchctl list \| grep jirad` |
+| a new MR never gets a ticket | it's in an excluded namespace, it predates `--enable`, or the job isn't loaded | `glmon-jirad --lookup <ref>` says which and reloads the job if needed; `--status` shows `launchd=` |
 | `no transition to 'Done'` | the Jira workflow blocks the move, usually open sub-tasks | close the sub-tasks or move the ticket by hand |
 | `another jirad run holds the lock` | a run was already in progress | nothing; the next run picks the MR up |
 | `jira lookup failed: 404` | the key in the title has no ticket | fix the title, or remove the key and let the sync create one |
@@ -139,4 +134,4 @@ With no ticket, you get one line saying why: the namespace is excluded, there's 
 
 ## Turning it off
 
-`glmon-jirad --disable` makes scheduled runs exit straight away. `launchctl unload ~/Library/LaunchAgents/com.bryan.glmon-jirad.plist` stops the schedule. Neither touches existing tickets or MR titles.
+`glmon-jirad --disable` turns the sync off, unloads the launchd job, and removes its plist. It doesn't touch existing tickets or MR titles. `--enable` puts everything back.

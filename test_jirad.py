@@ -288,6 +288,50 @@ def test_token_source_flags_env_only():
         os.environ.update({k: v for k, v in saved.items() if v is not None})
 
 
+def test_launchd_plist_runs_once_every_five_minutes():
+    d = jirad.launchd_plist(['/x/bin/glmon-jirad'], Path('/h'))
+    assert d['Label'] == jirad.LAUNCHD_LABEL and d['ProgramArguments'] == ['/x/bin/glmon-jirad', '--once']
+    assert d['StartInterval'] == 300 and d['RunAtLoad'] is True
+    assert d['StandardOutPath'] == '/h/.cache/glmon/jirad.out'
+    assert d['EnvironmentVariables']['PATH'].startswith('/h/.local/bin:') and d['EnvironmentVariables']['HOME'] == '/h'
+
+
+class FakeLaunchctl:
+    def __init__(self, loaded=False):
+        self.loaded, self.calls = loaded, []
+
+    def __call__(self, argv, **kw):
+        import types
+        self.calls.append(argv[1])
+        if argv[1] == 'print':
+            return types.SimpleNamespace(returncode=0 if self.loaded else 113, stderr='')
+        if argv[1] == 'bootstrap':
+            self.loaded = True
+        if argv[1] == 'bootout':
+            self.loaded = False
+        return types.SimpleNamespace(returncode=0, stderr='')
+
+
+def test_schedule_installs_loads_and_is_idempotent():
+    plist = Path(tempfile.mkdtemp()) / 'agents' / 'j.plist'
+    lc = FakeLaunchctl()
+    assert jirad.schedule(plist, run=lc, exe_argv=['/x/glmon-jirad']) == 'scheduled'
+    assert plist.exists() and lc.calls == ['print', 'bootstrap']
+    assert jirad.schedule(plist, run=lc, exe_argv=['/x/glmon-jirad']) == 'already scheduled'
+    assert lc.calls[-1] == 'print'
+    assert jirad.schedule(plist, run=lc, exe_argv=['/y/glmon-jirad']) == 'scheduled'
+    assert lc.calls[-2:] == ['bootout', 'bootstrap']
+
+
+def test_unschedule_unloads_and_removes_plist():
+    plist = Path(tempfile.mkdtemp()) / 'j.plist'
+    lc = FakeLaunchctl()
+    jirad.schedule(plist, run=lc, exe_argv=['/x/glmon-jirad'])
+    jirad.unschedule(plist, run=lc)
+    assert not plist.exists() and not lc.loaded
+    jirad.unschedule(plist, run=lc)
+
+
 def test_state_round_trip_and_corrupt_file():
     path = Path(tempfile.mkdtemp()) / 'state.json'
     assert load_state(path) == {}

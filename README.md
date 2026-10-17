@@ -508,7 +508,7 @@ At any level, press `b` to open the current selection in your browser for full G
 
 ## Jira Sync
 
-`glmon-jirad` keeps one Jira ticket per merge request you author, as a side effect of the MR. Open an MR and it creates the ticket and writes the key into the MR title; the ticket then follows the MR (In Progress, In Review once the pipeline is green, Done on merge, Won't fix on close). It runs from launchd every five minutes with no webhook, and `glmon-jirad --lookup` checks the ticket behind any branch or MR.
+`glmon-jirad` keeps one Jira ticket per merge request you author, as a side effect of the MR. Open an MR and it creates the ticket and writes the key into the MR title; the ticket then follows the MR (In Progress, In Review once the pipeline is green, Done on merge, Won't fix on close). `glmon-jirad --enable` turns it on and loads a launchd job that runs every five minutes, with no webhook, and `glmon-jirad --lookup` checks the ticket behind any branch or MR.
 
 Setup, commands, the lookup output, and troubleshooting are in [JIRA_SYNC.md](JIRA_SYNC.md).
 
@@ -554,8 +554,8 @@ Screens dispatch keys via a per-screen `KEY_MAP` (case-sensitive) rather than Te
 | `~/Library/LaunchAgents/com.bryan.glmon-reviewd.plist` | Poller schedule (copied from `launchd/` in this repo) |
 | `~/.config/gitlab-monitor/jira_token` | Optional 0600 Jira API token, read only when `JIRA_TOKEN` and `JIRA_API_TOKEN` are unset (launchd sync) |
 | `~/.cache/glmon/jirad-state.json` | Last ticket status the sync applied per MR, so unchanged MRs cost no Jira calls |
-| `~/.cache/glmon/jirad.{out,err}` | launchd Jira sync logs |
-| `~/Library/LaunchAgents/com.bryan.glmon-jirad.plist` | Jira sync schedule (copied from `launchd/` in this repo) |
+| `~/.cache/glmon/jirad.{out,err}` | Jira sync run log (`.out`) and crashes (`.err`) |
+| `~/Library/LaunchAgents/com.bryan.glmon-jirad.plist` | Jira sync schedule, written and loaded by `glmon-jirad --enable` |
 
 ## Screenshots
 
