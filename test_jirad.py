@@ -258,6 +258,18 @@ def test_lookup_lines_without_ticket():
     assert 'next jirad tick' in ll(LCFG, 'engineering/app', 'b', new, None, None)[0]
 
 
+def test_acquire_waits_for_running_tick_then_gives_up():
+    root = tempfile.mkdtemp()
+    with jirad.Lock(root, 'jirad') as held:
+        assert held is not None
+        assert jirad.acquire(root, wait=0) is None
+        assert jirad.acquire(root, wait=0.3, poll=0.1) is None
+    lock = jirad.acquire(root, wait=0)
+    assert lock is not None and lock.path.exists()
+    lock.__exit__(None, None, None)
+    assert not lock.path.exists()
+
+
 def test_state_round_trip_and_corrupt_file():
     path = Path(tempfile.mkdtemp()) / 'state.json'
     assert load_state(path) == {}

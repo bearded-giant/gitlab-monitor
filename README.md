@@ -555,8 +555,8 @@ To check on a ticket, `glmon-jirad --lookup` reads the current checkout's GitLab
 
 ```
 $ glmon-jirad --lookup
-PE-1601  In Review  feat(admin): show stored session record on detail  https://your-domain.atlassian.net/browse/PE-1601
-identity/recharge-auth!77  opened  pipeline success  expects In Review: in sync
+PE-123  In Review  feat: add the thing  https://your-domain.atlassian.net/browse/PE-123
+group/project!77  opened  pipeline success  expects In Review: in sync
 ```
 
 Schedule it the same way as the review poller:

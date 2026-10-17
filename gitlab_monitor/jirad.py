@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -87,7 +88,7 @@ def claude_describe(mr):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(claude_argv(prompt, SUMMARY_MODEL), cwd=str(STATE_DIR),
-                              capture_output=True, text=True, timeout=180)
+                              capture_output=True, text=True, timeout=180, check=False)
         lines = summarize(parse_claude_output(proc.stdout).get('result')) if proc.returncode == 0 else []
         if lines:
             return lines
@@ -244,7 +245,7 @@ def remote_project_path(url):
 
 def git_project(host, cwd=None):
     def git(*args):
-        return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True).stdout.strip()
+        return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, check=False).stdout.strip()
     branch = git('branch', '--show-current')
     for name in git('remote').split():
         remote_host, path = remote_project_path(git('remote', 'get-url', name))
@@ -321,6 +322,17 @@ def run_lookup(config, cfg, ref):
     return 0
 
 
+def acquire(root, wait=0, poll=2):
+    deadline = time.monotonic() + wait
+    while True:
+        lock = Lock(root, 'jirad')
+        if lock.__enter__():
+            return lock
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(poll)
+
+
 def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
@@ -377,10 +389,12 @@ def main(argv=None):
 
     api = GitLabAPI(config)
     jira = Jira(cfg['base'], cfg['email'], config.jira_token)
-    with Lock(STATE_DIR, 'jirad') as lock:
-        if lock is None:
-            _log("another jirad run holds the lock; the next tick picks this MR up")
-            return 0
+    # an explicit --mr (ship-it) waits out a running tick so its own summary bullets are used
+    lock = acquire(STATE_DIR, wait=90 if args.mr else 0)
+    if lock is None:
+        _log("another jirad run holds the lock; the next tick picks this MR up")
+        return 0
+    try:
         state = load_state(STATE_FILE)
         if not state.get('account_id'):
             state['account_id'] = jira.myself()
@@ -390,11 +404,16 @@ def main(argv=None):
                 _log(f"skip {_key(mr)}: excluded namespace")
                 return 0
             lines = summarize(Path(args.summary_file).read_text()) if args.summary_file else None
-            sync_one(mr, api, jira, cfg, state, dry_run=args.dry_run, summary_lines=lines)
+            result = sync_one(mr, api, jira, cfg, state, dry_run=args.dry_run, summary_lines=lines)
+            key = (state.get('mrs', {}).get(_key(mr)) or {}).get('key')
+            outcome = {None: 'no change', 'create': 'would create', 'transition': 'would move'}.get(result, f"at {result}")
+            _log(f"{_key(mr)}: ticket {key or 'none'}, {outcome}")
         else:
             tick(api, jira, cfg, state, dry_run=args.dry_run, save=lambda: save_state(STATE_FILE, state))
         if not args.dry_run:
             save_state(STATE_FILE, state)
+    finally:
+        lock.__exit__(None, None, None)
     return 0
 
 
