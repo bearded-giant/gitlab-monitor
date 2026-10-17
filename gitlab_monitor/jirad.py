@@ -333,6 +333,14 @@ def acquire(root, wait=0, poll=2):
         time.sleep(poll)
 
 
+def token_source(config):
+    # launchd sees only the file, so an env-only token reads as set here but missing under the job
+    file_ok = (config.config_dir / 'jira_token').exists()
+    env_ok = bool(os.environ.get('JIRA_TOKEN') or os.environ.get('JIRA_API_TOKEN'))
+    return {(True, True): 'file+env', (True, False): 'file', (False, True): 'env-only(launchd-needs-file)'}.get(
+        (file_ok, env_ok), 'missing')
+
+
 def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
@@ -361,7 +369,7 @@ def main(argv=None):
         return 0
     if args.status:
         print(f"enabled={cfg['enabled']} project={cfg['project']} since={cfg['since']} "
-              f"exclude={cfg['exclude_namespaces']} token={'set' if config.jira_token else 'missing'} "
+              f"exclude={cfg['exclude_namespaces']} token={token_source(config)} "
               f"tracked={len(load_state(STATE_FILE).get('mrs', {}))}")
         return 0
     if args.lookup is not None:

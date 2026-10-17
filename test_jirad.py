@@ -270,6 +270,24 @@ def test_acquire_waits_for_running_tick_then_gives_up():
     assert not lock.path.exists()
 
 
+def test_token_source_flags_env_only():
+    import os
+    class C:
+        config_dir = Path(tempfile.mkdtemp())
+    saved = {k: os.environ.pop(k, None) for k in ('JIRA_TOKEN', 'JIRA_API_TOKEN')}
+    try:
+        assert jirad.token_source(C) == 'missing'
+        os.environ['JIRA_API_TOKEN'] = 'x'
+        assert jirad.token_source(C) == 'env-only(launchd-needs-file)'
+        (C.config_dir / 'jira_token').write_text('x')
+        assert jirad.token_source(C) == 'file+env'
+        del os.environ['JIRA_API_TOKEN']
+        assert jirad.token_source(C) == 'file'
+    finally:
+        os.environ.pop('JIRA_API_TOKEN', None)
+        os.environ.update({k: v for k, v in saved.items() if v is not None})
+
+
 def test_state_round_trip_and_corrupt_file():
     path = Path(tempfile.mkdtemp()) / 'state.json'
     assert load_state(path) == {}
