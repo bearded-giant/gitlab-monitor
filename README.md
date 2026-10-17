@@ -551,6 +551,14 @@ glmon-jirad --status
 glmon-jirad --disable
 ```
 
+To check on a ticket, `glmon-jirad --lookup` reads the current checkout's GitLab remote and branch, finds the MR, and prints the ticket, its status, and whether it matches what the MR says it should be. Pass a branch name, an MR URL, or `group/project!123` to look elsewhere. It only reads, and works while the sync is disabled.
+
+```
+$ glmon-jirad --lookup
+PE-1601  In Review  feat(admin): show stored session record on detail  https://your-domain.atlassian.net/browse/PE-1601
+identity/recharge-auth!77  opened  pipeline success  expects In Review: in sync
+```
+
 Schedule it the same way as the review poller:
 
 ```bash

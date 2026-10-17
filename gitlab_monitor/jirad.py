@@ -13,10 +13,11 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .api import GitLabAPI
 from .config import Config
-from .reviewd import Lock, _key, _log, claude_argv, parse_claude_output, resolve_mr
+from .reviewd import Lock, _key, _log, _parse_ts, claude_argv, parse_claude_output, resolve_mr
 
 STATE_DIR = Path.home() / '.cache' / 'glmon'
 STATE_FILE = STATE_DIR / 'jirad-state.json'
@@ -132,9 +133,9 @@ class Jira:
         return self._req('GET', 'myself')['accountId']
 
     def get_issue(self, key):
-        status = self._req('GET', f'issue/{key}?fields=status,labels')['fields']
+        status = self._req('GET', f'issue/{key}?fields=status,labels,summary')['fields']
         return {'status': status['status']['name'], 'category': status['status']['statusCategory']['key'],
-                'labels': status.get('labels') or []}
+                'labels': status.get('labels') or [], 'summary': status.get('summary') or ''}
 
     def create_issue(self, project, issue_type, summary, lines, label, account_id):
         fields = {
@@ -236,6 +237,90 @@ def tick(api, jira, cfg, state, dry_run=False, save=None):
     return 0
 
 
+def remote_project_path(url):
+    m = re.match(r'^(?:\w+://)?(?:[^@/]+@)?([^:/]+)(?::\d+)?[:/](.+?)(?:\.git)?/?$', (url or '').strip())
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def git_project(host, cwd=None):
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True).stdout.strip()
+    branch = git('branch', '--show-current')
+    for name in git('remote').split():
+        remote_host, path = remote_project_path(git('remote', 'get-url', name))
+        if remote_host == host:
+            return path, branch
+    return None, branch
+
+
+def lookup_lines(cfg, project_path, branch, mr, key, issue):
+    if excluded(project_path, cfg['exclude_namespaces']):
+        return [f"{project_path} is in jira.exclude_namespaces: no ticket by design"]
+    ref = f"{project_path}!{mr['iid']}" if mr else project_path
+    if not key:
+        if not mr:
+            return [f"no MR for branch {branch} in {project_path}: the ticket is created when the MR opens"]
+        if mr['state'] != 'opened':
+            return [f"no ticket: {ref} is {mr['state']} and jirad never creates one for a closed MR"]
+        if not cfg['enabled']:
+            return [f"no ticket yet for {ref}: jirad is disabled (glmon-jirad --enable)"]
+        if cfg.get('since') and mr.get('created_at') and _parse_ts(mr['created_at']) < _parse_ts(cfg['since']):
+            return [f"no ticket for {ref}: it predates jira.since; glmon-jirad --mr {ref} creates one"]
+        return [f"no ticket yet for {ref}: the next jirad tick creates it"]
+    if not issue or 'error' in issue:
+        return [f"{key}: jira lookup failed: {(issue or {}).get('error')}"]
+    lines = [f"{key}  {issue['status']}  {issue.get('summary', '')[:70]}  {cfg['base'].rstrip('/')}/browse/{key}"]
+    if not mr:
+        return lines + [f"no MR for branch {branch} yet"]
+    desired = desired_status(mr)
+    if cfg['label'] not in issue['labels']:
+        verdict = 'not created by jirad, so it is left alone'
+    elif desired is None or issue['status'].lower() == desired.lower():
+        verdict = 'in sync'
+    elif can_move(issue, desired):
+        verdict = 'drift: the next jirad tick moves it' if cfg['enabled'] else 'drift: jirad is disabled'
+    else:
+        verdict = f"held at {issue['status']} by hand, jirad leaves it"
+    state = mr['state'] + (' draft' if mr.get('draft') else '')
+    lines.append(f"{ref}  {state}  pipeline {mr.get('head_pipeline_status') or 'none'}  "
+                 f"expects {desired or 'no change'}: {verdict}")
+    return lines
+
+
+def run_lookup(config, cfg, ref):
+    api = GitLabAPI(config)
+    if ref.startswith('http') or '!' in ref:
+        try:
+            mr = resolve_mr(api, ref)
+        except ValueError:
+            print(f"bad MR ref {ref!r}: use a URL or group/project!iid")
+            return 1
+        project_path, branch = mr['project_path'], mr['source_branch']
+    else:
+        host = urlparse(config.gitlab_url).hostname
+        project_path, branch = git_project(host)
+        if not project_path:
+            print(f"not a checkout with a {host} remote: no ticket by design")
+            return 1
+        branch = ref or branch
+        if not branch:
+            print("detached HEAD: pass a branch, MR URL, or project!iid")
+            return 1
+        mr = None if excluded(project_path, cfg['exclude_namespaces']) else api.find_mr_by_branch(project_path, branch)
+    key = None
+    if not excluded(project_path, cfg['exclude_namespaces']):
+        tracked = (load_state(STATE_FILE).get('mrs') or {}).get(_key(mr)) if mr else None
+        key = find_key(cfg['project'], mr['title'] if mr else '', branch) or (tracked or {}).get('key')
+    issue = None
+    if key:
+        try:
+            issue = Jira(cfg['base'], cfg['email'], config.jira_token).get_issue(key)
+        except Exception as e:
+            issue = {'error': str(e)}
+    print('\n'.join(lookup_lines(cfg, project_path, branch, mr, key, issue)))
+    return 0
+
+
 def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
@@ -249,6 +334,8 @@ def main(argv=None):
     ap.add_argument('--enable', action='store_true', help='turn sync on; only MRs created from now on get tickets')
     ap.add_argument('--disable', action='store_true', help='turn sync off; --mr is off too')
     ap.add_argument('--status', action='store_true')
+    ap.add_argument('--lookup', nargs='?', const='', metavar='BRANCH|URL|project!iid',
+                    help='read-only: ticket and status for a branch (default: current checkout) or MR; works while disabled')
     args = ap.parse_args(argv)
 
     config = Config()
@@ -265,6 +352,13 @@ def main(argv=None):
               f"exclude={cfg['exclude_namespaces']} token={'set' if config.jira_token else 'missing'} "
               f"tracked={len(load_state(STATE_FILE).get('mrs', {}))}")
         return 0
+    if args.lookup is not None:
+        missing = [k for k in ('base', 'email', 'project') if not cfg.get(k)] + ([] if config.jira_token else ['token'])
+        ok, msg = config.validate()
+        if missing or not ok:
+            _log(f"jira config missing: {', '.join(missing)}" if missing else msg)
+            return 2
+        return run_lookup(config, cfg, args.lookup)
     if not cfg['enabled'] and not args.dry_run:
         _log("jira sync disabled (jira.enabled=false); nothing to do")
         return 0

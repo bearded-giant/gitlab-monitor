@@ -204,6 +204,60 @@ def test_tick_skips_excluded_namespaces_and_passes_since():
     assert api.list_kwargs['created_after'] == CFG['since'] and api.list_kwargs['state'] == 'all'
 
 
+def test_remote_project_path_forms():
+    rp = jirad.remote_project_path
+    assert rp('git@gitlab.rechargeapps.net:identity/recharge-auth.git') == ('gitlab.rechargeapps.net', 'identity/recharge-auth')
+    assert rp('https://gitlab.rechargeapps.net/engineering/frontend/frontend.git') == ('gitlab.rechargeapps.net', 'engineering/frontend/frontend')
+    assert rp('ssh://git@gitlab.rechargeapps.net:2222/g/p.git') == ('gitlab.rechargeapps.net', 'g/p')
+    assert rp('git@github.com:bearded-giant/gitlab-monitor.git') == ('github.com', 'bearded-giant/gitlab-monitor')
+    assert rp('') == (None, None)
+
+
+def test_git_project_picks_remote_on_gitlab_host():
+    import subprocess
+    repo = tempfile.mkdtemp()
+    git = lambda *a: subprocess.run(['git', *a], cwd=repo, capture_output=True, check=True)  # noqa: E731
+    git('init', '-q', '-b', 'feat/x')
+    git('remote', 'add', 'origin', 'git@github.com:me/thing.git')
+    git('remote', 'add', 'gitlab', 'git@gitlab.example.com:team/thing.git')
+    assert jirad.git_project('gitlab.example.com', cwd=repo) == ('team/thing', 'feat/x')
+    assert jirad.git_project('other.host', cwd=repo) == (None, 'feat/x')
+
+
+LCFG = {**CFG, 'enabled': True, 'base': 'https://acme.atlassian.net/'}
+
+
+def _issue(status, labels=('mr-sync',), category='indeterminate'):
+    return {'status': status, 'category': category, 'labels': list(labels), 'summary': 'feat: add thing'}
+
+
+def test_lookup_lines_ticket_states():
+    ll = jirad.lookup_lines
+    got = ll(LCFG, 'engineering/app', 'add-thing', _mr(), 'PE-5', _issue('In Review'))
+    assert got[0] == 'PE-5  In Review  feat: add thing  https://acme.atlassian.net/browse/PE-5'
+    assert got[1] == 'engineering/app!1  opened  pipeline success  expects In Review: in sync'
+    assert ll(LCFG, 'engineering/app', 'b', _mr(pipeline='failed'), 'PE-5', _issue('In Review'))[1].endswith(
+        'expects In Progress: drift: the next jirad tick moves it')
+    assert ll(LCFG, 'engineering/app', 'b', _mr(state='merged'), 'PE-5', _issue('In QA'))[1].endswith(
+        'held at In QA by hand, jirad leaves it')
+    assert ll(LCFG, 'engineering/app', 'b', _mr(), 'PE-5', _issue('Backlog', labels=()))[1].endswith(
+        'not created by jirad, so it is left alone')
+    assert ll(LCFG, 'engineering/app', 'b', None, 'PE-5', _issue('Backlog'))[1] == 'no MR for branch b yet'
+    assert ll(LCFG, 'engineering/app', 'b', _mr(), 'PE-5', {'error': '404'}) == ['PE-5: jira lookup failed: 404']
+
+
+def test_lookup_lines_without_ticket():
+    ll = jirad.lookup_lines
+    assert ll(LCFG, 'ai-tooling/x', 'b', None, None, None) == ['ai-tooling/x is in jira.exclude_namespaces: no ticket by design']
+    assert 'created when the MR opens' in ll(LCFG, 'engineering/app', 'b', None, None, None)[0]
+    assert 'merged' in ll(LCFG, 'engineering/app', 'b', _mr(state='merged'), None, None)[0]
+    assert 'disabled' in ll({**LCFG, 'enabled': False}, 'engineering/app', 'b', _mr(), None, None)[0]
+    old = {**_mr(), 'created_at': '2025-12-31T00:00:00.000Z'}
+    assert 'glmon-jirad --mr engineering/app!1' in ll(LCFG, 'engineering/app', 'b', old, None, None)[0]
+    new = {**_mr(), 'created_at': '2026-02-01T00:00:00.000Z'}
+    assert 'next jirad tick' in ll(LCFG, 'engineering/app', 'b', new, None, None)[0]
+
+
 def test_state_round_trip_and_corrupt_file():
     path = Path(tempfile.mkdtemp()) / 'state.json'
     assert load_state(path) == {}

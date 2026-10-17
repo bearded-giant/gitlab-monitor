@@ -683,6 +683,12 @@ class GitLabAPI:
         project = self.gl.projects.get(project_path, lazy=True)
         return self._mr_to_dict(project.mergerequests.get(iid), project_path=project_path)
 
+    def find_mr_by_branch(self, project_path, branch):
+        project = self.gl.projects.get(project_path, lazy=True)
+        mrs = project.mergerequests.list(source_branch=branch, state='all', order_by='updated_at', sort='desc',
+                                         per_page=1, get_all=False)
+        return self.get_merge_request_basic(project_path, mrs[0].iid) if mrs else None
+
     def set_mr_title(self, project_path, iid, title):
         project = self.gl.projects.get(project_path, lazy=True)
         mr = project.mergerequests.get(iid)
