@@ -15,6 +15,8 @@ brew tap bearded-giant/tap
 brew install gitlab-monitor
 ```
 
+The Homebrew build is a single `glmon` binary. The background commands, `glmon-reviewd` (review poller) and `glmon-jirad` (Jira sync), come only with the source install below.
+
 ### From source (development)
 
 ```bash

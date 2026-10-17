@@ -31,6 +31,8 @@ MRs under a namespace in `jira.exclude_namespaces` are skipped entirely, and so 
 
 ## Setup
 
+`glmon-jirad` ships with the Python package (`make install` from source, which uses pipx), not the Homebrew binary, which only contains `glmon`.
+
 1. Add a `jira` block to `~/.config/gitlab-monitor/config.json`. Only `base`, `email`, and `project` are required.
 
    ```json
