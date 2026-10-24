@@ -86,6 +86,7 @@ def run_review(mr, prev_sha, model, cwd):
         'cost_usd': round(float(res.get('total_cost_usd') or 0), 4),
         'session_id': res.get('session_id'),
         'num_turns': res.get('num_turns'),
+        'models': sorted(res.get('modelUsage') or {}),
         'reviewed_at': started.isoformat(timespec='seconds'),
     }
 
@@ -167,7 +168,7 @@ def review_one(config, api, mr, reason):
             'author': mr.get('author'),
             'reviewed_at': res['reviewed_at'],
             'reason': reason,
-            'model': config.reviews['model'],
+            'model': ','.join(res['models']) or config.reviews['model'],
             'cost_usd': res['cost_usd'],
             'session_id': res['session_id'],
             'num_turns': res['num_turns'],

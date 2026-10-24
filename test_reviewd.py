@@ -1,8 +1,10 @@
 import json
+import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from gitlab_monitor import reviewd
 from gitlab_monitor.config import ReviewFiles
 from gitlab_monitor.reviewd import Lock, build_prompt, build_queue, claude_argv, parse_claude_output
 
@@ -76,6 +78,19 @@ def test_parse_claude_output_array_and_object():
     arr = [{'type': 'system'}, {'type': 'assistant'}, {'type': 'result', 'result': 'ok', 'total_cost_usd': 1.2}]
     assert parse_claude_output(json.dumps(arr))['result'] == 'ok'
     assert parse_claude_output(json.dumps(arr[-1]))['total_cost_usd'] == 1.2
+
+
+def test_run_review_records_models_used():
+    # a skill can pin its own model (grill forks to sonnet), so --model is not what ran
+    out = json.dumps([{'type': 'result', 'result': 'r', 'total_cost_usd': 0.5, 'session_id': 's', 'num_turns': 1,
+                       'modelUsage': {'claude-sonnet-5-5': {'costUSD': 0.5}}}])
+    real = reviewd.subprocess.run
+    reviewd.subprocess.run = lambda argv, **_: subprocess.CompletedProcess(argv, 0, stdout=out, stderr='')
+    try:
+        res = reviewd.run_review(_mr(1, 'abc'), None, 'opus', '.')
+    finally:
+        reviewd.subprocess.run = real
+    assert res['models'] == ['claude-sonnet-5-5']
 
 
 if __name__ == '__main__':
