@@ -54,7 +54,8 @@ def build_prompt(web_url, prev_sha=None):
     prompt = f"/grill {web_url}"
     if prev_sha:
         prompt += f"\nPreviously reviewed at {prev_sha}. Call out what changed since."
-    return prompt
+    # a forked skill never sees --append-system-prompt, only its arguments
+    return f"{prompt}\n{NO_WRITE_PROMPT}"
 
 
 def claude_argv(prompt, model):

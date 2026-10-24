@@ -51,8 +51,11 @@ def test_build_queue_reasons_and_skips():
 
 def test_prompt_and_argv_never_post():
     p = build_prompt('https://gl/g/p/-/merge_requests/9', 'oldsha')
+    # grill runs as a forked skill: --append-system-prompt stops at the parent, its arguments reach the fork
     assert p.splitlines() == ['/grill https://gl/g/p/-/merge_requests/9',
-                              'Previously reviewed at oldsha. Call out what changed since.']
+                              'Previously reviewed at oldsha. Call out what changed since.',
+                              reviewd.NO_WRITE_PROMPT]
+    assert build_prompt('https://x').splitlines()[-1] == reviewd.NO_WRITE_PROMPT
     argv = claude_argv(p, 'opus')
     assert '--post' not in ' '.join(argv) and '--append-system-prompt' in argv and '--output-format' in argv
     try:
