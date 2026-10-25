@@ -287,3 +287,23 @@ def test_stale_refresh_after_tab_switch_keeps_new_tab_rows():
     tab, kinds = asyncio.run(run())
     assert tab == "merged"
     assert ("mr", "merged_recently_assigned") in kinds
+
+
+def test_username_lookup_retries_after_auth_failure():
+    api = GitLabAPI(_Config())
+    attempts = []
+
+    class _User:
+        username = "me"
+
+    def flaky_auth():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise ConnectionError("down")
+        api.gl.user = _User()
+
+    api.gl.auth = flaky_auth
+    assert api.current_username() == ""
+    assert api.current_username() == "me"
+    assert api.current_username() == "me"
+    assert len(attempts) == 2

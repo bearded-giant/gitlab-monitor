@@ -49,7 +49,7 @@ class GitLabAPI:
                 self.gl.auth()
                 self._username_cache = getattr(self.gl.user, 'username', None) or ''
             except Exception:
-                self._username_cache = ''
+                return ''
         return self._username_cache
 
     def current_user_id(self):
