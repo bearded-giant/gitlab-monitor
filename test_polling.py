@@ -179,3 +179,87 @@ def test_commit_status_lookup_is_one_request():
     api.gl.http_get = fake_get
     assert api.get_commit_pipeline_status("group/project", "abc") == "success"
     assert paths == ["/projects/group%2Fproject/repository/commits/abc"]
+
+
+class _ReviewFiles:
+    def index(self):
+        return {}
+
+
+class _ListConfig(_Config):
+    reviews_enabled = False
+    reviews_dir = "/nonexistent"
+    review_files = _ReviewFiles()
+    recent_projects = None
+
+    class mr_notes:
+        @staticmethod
+        def has(*a):
+            return False
+
+
+class _MRListApi:
+    config = _ListConfig()
+
+    def __init__(self):
+        self.rows = [
+            {
+                "iid": i,
+                "project_path": "g/proj",
+                "title": f"mr {i}",
+                "draft": False,
+                "state": "opened",
+                "web_url": f"https://gitlab.example.com/g/proj/-/merge_requests/{i}",
+                "source_branch": f"b{i}",
+                "target_branch": "main",
+                "author": "me",
+                "created_at": "2026-10-20T00:00:00Z",
+                "updated_at": "2026-10-20T00:00:00Z",
+                "sha": f"sha{i}",
+                "reviewers": [],
+                "assignees": [],
+                "head_pipeline_status": None,
+                "head_pipeline_id": None,
+                "head_pipeline_web_url": None,
+                "has_conflicts": False,
+                "merge_when_pipeline_succeeds": False,
+            }
+            for i in (1, 2, 3)
+        ]
+        self.lists = 0
+        self.approvals = []
+        self.unresolved = []
+
+    def _list(self, *a, **kw):
+        self.lists += 1
+        return [dict(r) for r in self.rows]
+
+    get_my_merge_requests = _list
+    get_review_requests = _list
+
+    def get_mr_head_pipelines(self, project_path, iids):
+        return {}
+
+    def get_mr_approvals_summary(self, project_path, iid):
+        self.approvals.append(iid)
+        return {"approvals_count": 1, "approvals_required": 1, "user_has_approved": False}
+
+    def get_mr_unresolved_count(self, project_path, iid):
+        self.unresolved.append(iid)
+        return 0
+
+
+
+def test_my_reviews_manual_refresh_reloads():
+    async def run():
+        api = _MRListApi()
+        app = App()
+        async with app.run_test() as pilot:
+            screen = tui.MyReviewsScreen(api)
+            await app.push_screen(screen)
+            await _settle(pilot)
+            lists = api.lists
+            await screen.action_refresh()
+            return api.lists - lists
+
+    assert asyncio.run(run()) == 1

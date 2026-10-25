@@ -2860,6 +2860,8 @@ class MyReviewsScreen(ScreenBase):
         self._refreshing = False
         self._fetch_error = None
         self._unresolved_cache = {}
+        # borrowed action_refresh clears it
+        self._related_cache = {}
         self._review_index = {}
         self._auto_review_enabled = api.config.reviews_enabled
         self._row_to_mr = []
