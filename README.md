@@ -63,7 +63,8 @@ export GLMON_REVIEWS_ENABLED=0              # kill switch for the auto-review po
 Override default refresh cadences for each view. Useful when GitLab traces are large and the log view auto-refresh appears stalled — bump `GLMON_FETCH_TIMEOUT` and/or `GLMON_TRACE_REFRESH_INTERVAL` so the trace GET completes before the next tick.
 
 ```bash
-export GLMON_PIPELINE_REFRESH_INTERVAL=120  # list + MR screens refresh (default: 120s)
+export GLMON_PIPELINE_REFRESH_INTERVAL=120  # pipeline lists, MR detail, home, tags refresh (default: 120s)
+export GLMON_MR_REFRESH_INTERVAL=120        # MR lists, dashboard, reviews refresh (default: 120s)
 export GLMON_JOB_REFRESH_INTERVAL=120       # job list refresh (default: 120s)
 export GLMON_LOG_REFRESH_INTERVAL=5         # log view: status/duration meta tick (default: 5s)
 export GLMON_TRACE_REFRESH_INTERVAL=2       # log view: trace fetch cadence (default: 2s)

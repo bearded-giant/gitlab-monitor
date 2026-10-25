@@ -30,6 +30,7 @@ from .constants import (
     COMMIT_WINDOW_CYCLE,
     DEFAULT_COMMIT_WINDOW_DAYS,
     PIPELINE_REFRESH_INTERVAL,
+    MR_REFRESH_INTERVAL,
     JOB_REFRESH_INTERVAL,
     LOG_META_REFRESH_INTERVAL,
     LOG_TRACE_REFRESH_INTERVAL,
@@ -1824,7 +1825,7 @@ class MyMergeRequestsScreen(ScreenBase):
 
     KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "a": "toggle_all", "t": "dashboard", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window", "A": "toggle_auto_merge", "M": "merge", "u": "assign"}
 
-    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+    REFRESH_INTERVAL = MR_REFRESH_INTERVAL
 
     def __init__(self, api: GitLabAPI):
         super().__init__()
@@ -2429,7 +2430,7 @@ class MRDashboardScreen(ScreenBase):
 
     KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "t": "next_tab", "m": "open_modules", "tab": "open_modules", "n": "note", "p": "pipelines", "A": "toggle_auto_merge", "M": "merge", "u": "assign"}
 
-    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+    REFRESH_INTERVAL = MR_REFRESH_INTERVAL
 
     def __init__(self, api: GitLabAPI, tab: str = 'active'):
         super().__init__()
@@ -2848,7 +2849,7 @@ class MyReviewsScreen(ScreenBase):
 
     KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "m": "open_modules", "tab": "open_modules", "v": "view_review", "R": "review_now", "T": "poll_now", "P": "toggle_auto_review", "a": "approve", "n": "note", "p": "pipelines"}
 
-    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+    REFRESH_INTERVAL = MR_REFRESH_INTERVAL
 
     def __init__(self, api: GitLabAPI):
         super().__init__()
@@ -3190,7 +3191,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
 
     KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "s": "toggle_state", "a": "toggle_all", "A": "toggle_auto_merge", "u": "assign"}
 
-    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+    REFRESH_INTERVAL = MR_REFRESH_INTERVAL
 
     def __init__(self, api: GitLabAPI, project_path: str):
         super().__init__()
