@@ -677,11 +677,11 @@ class ProjectSelectScreen(ScreenBase):
 
 class PipelineListScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel", "s": "toggle_status", "f": "failed", "c": "clear_filter", "M": "project_mrs", "P": "my_pipelines"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel", "s": "toggle_status", "f": "failed", "a": "toggle_active", "c": "clear_filter", "M": "project_mrs", "P": "my_pipelines"}
 
     STATUS_CYCLE = [None, 'running', 'pending']
 
-    def __init__(self, api: GitLabAPI, age_days=DEFAULT_PIPELINE_AGE_DAYS, initial_filter: str = ""):
+    def __init__(self, api: GitLabAPI, age_days=DEFAULT_PIPELINE_AGE_DAYS, initial_filter: str = "", active_only: bool = True):
         super().__init__()
         self.api = api
         self.pipelines = []
@@ -689,6 +689,7 @@ class PipelineListScreen(ScreenBase):
         self.age_days = age_days
         self.initial_filter = initial_filter or ""
         self.status_filter = None
+        self.active_only = active_only
         self._refresh_timer = None
         self._refreshing = False
         self._bridges_cache = {}
@@ -699,8 +700,9 @@ class PipelineListScreen(ScreenBase):
     def _info_pairs(self):
         total = len(getattr(self, 'pipelines', []) or [])
         pipelines_label = str(total)
-        if self.status_filter:
-            pipelines_label = f"{len(self.filtered_pipelines)}/{total}  ({self.status_filter})"
+        view = self._view_label()
+        if view:
+            pipelines_label = f"{len(self.filtered_pipelines)}/{total}  ({view})"
         return [
             ("GitLab", self.api.config.gitlab_url),
             ("Project", self.api.project_name or "project"),
@@ -708,15 +710,19 @@ class PipelineListScreen(ScreenBase):
             ("Pipelines", pipelines_label),
         ]
 
+    def _view_label(self):
+        return self.status_filter or ("active" if self.active_only else None)
+
     def _keys(self):
         status_label = f"status:{self.status_filter}" if self.status_filter else "status"
         failed_label = "failed*" if self.status_filter == 'failed' else "failed"
+        active_label = "show all" if self.active_only else "active only"
         return [
             [("/", "filter"),    ("enter", "jobs"),  ("r", "refresh")],
             [("b", "browser"),   ("y", "copy url"),  ("c", "clear")],
             [("t", "age"),       ("s", status_label),("f", failed_label)],
             [("M", "MRs"),       ("P", "my pipes"),  ("x", "cancel")],
-            [("q", "back")],
+            [("a", active_label),("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -744,6 +750,8 @@ class PipelineListScreen(ScreenBase):
         parts = [count, ("scope", self._age_label())]
         if self.status_filter:
             parts.append(("status", self.status_filter))
+        elif self.active_only:
+            parts.append(("view", "active"))
         if text_filter:
             parts.append(("filter", text_filter))
         return _status_line(parts)
@@ -853,6 +861,8 @@ class PipelineListScreen(ScreenBase):
         pipelines = self.pipelines
         if self.status_filter:
             pipelines = [p for p in pipelines if p['status'] == self.status_filter]
+        elif self.active_only:
+            pipelines = self._active_groups(pipelines)
         if query:
             self.filtered_pipelines = [
                 p for p in pipelines
@@ -868,6 +878,17 @@ class PipelineListScreen(ScreenBase):
             self.filtered_pipelines = pipelines
         self._update_table()
         self._refresh_status()
+
+    @staticmethod
+    def _active_groups(pipelines):
+        # downstream rows follow their parent; keep the group whole if any member is still running
+        groups = []
+        for p in pipelines:
+            if p.get('_is_downstream') and groups:
+                groups[-1].append(p)
+            else:
+                groups.append([p])
+        return [p for g in groups if any(x['status'] not in TERMINAL_STATUSES for x in g) for p in g]
 
     def _update_table(self) -> None:
         table = self.query_one("#pipeline-table", DataTable)
@@ -964,6 +985,11 @@ class PipelineListScreen(ScreenBase):
 
     async def action_failed(self) -> None:
         self.status_filter = None if self.status_filter == 'failed' else 'failed'
+        self._apply_filter()
+        self._refresh_header()
+
+    async def action_toggle_active(self) -> None:
+        self.active_only = not self.active_only
         self._apply_filter()
         self._refresh_header()
 
@@ -4863,7 +4889,7 @@ class TagListScreen(ScreenBase):
         if t is None:
             return
         self.api.set_project(self.project_path)
-        self.app.push_screen(PipelineListScreen(self.api, initial_filter=t['name']))
+        self.app.push_screen(PipelineListScreen(self.api, initial_filter=t['name'], active_only=False))
 
     async def action_browser(self) -> None:
         t = self._tag_at_row(self.query_one("#tag-table", DataTable).cursor_row)
@@ -5300,7 +5326,7 @@ class ProjectHubScreen(ScreenBase):
         elif tid == "hub-tags":
             tg = self._row(self._tags_shown, row)
             if tg:
-                self.app.push_screen(PipelineListScreen(self.api, initial_filter=tg['name']))
+                self.app.push_screen(PipelineListScreen(self.api, initial_filter=tg['name'], active_only=False))
 
     async def action_back(self) -> None:
         self.app.pop_screen()

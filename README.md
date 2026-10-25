@@ -131,7 +131,7 @@ By default `glmon` opens **My Work** — your starred repos, your open MRs group
 9. **MR quick actions** -- merge, toggle auto-merge (merge-when-pipeline-succeeds), approve, close, assign, and comment straight from the detail view
 10. **Tag management** -- list tags with per-tag pipeline status; create + push a tag (`t`), roll a deploy back by re-running an older tag's pipeline (`R`), or open a revert MR for a tag's commit (`V`)
 11. **Commit browser** -- browse a project's default-branch commits, drill into commit detail and its pipeline
-12. **Filtering** -- K9s-style filter bar for branch/user, a status cycle (running / pending), and a failed-only toggle
+12. **Filtering** -- K9s-style filter bar for branch/user, an active-only default with `a` to show all, a status cycle (running / pending), and a failed-only toggle
 13. **Failure extraction** -- automatically extracts and highlights test failures; failed jobs flagged in red
 14. **Browser + clipboard** -- `b` opens the current selection in GitLab, `y` copies its URL or log output
 15. **Job detail info bar** -- live status and duration while viewing job logs
@@ -180,11 +180,13 @@ Cycle the focused panel with `[` and `]`, `enter` opens the highlighted row, and
 
 Shows recent pipelines with ID, status (color-coded), branch, creation time, and commit SHA. Defaults to the last 3 days to keep load fast on busy projects. Press `t` to cycle window: `3d -> 7d -> 30d -> all`. Current window shown in breadcrumb. `M` jumps to this project's MRs, `P` to your pipelines.
 
+The list opens on **active** pipelines only, meaning anything that hasn't finished yet (running, pending, created, and so on). A parent stays on screen with its child pipelines while any of them is still going. Press `a` to show every pipeline in the window, and `a` again to go back. Opening pipelines from a tag skips the active filter, since a tag's pipeline is usually done.
+
 K9s-style filter bar — press `/` to filter by branch or user:
 
 ![Filter bar](glmon-assets/K9s-filtering.png)
 
-`s` cycles a status filter (all / running / pending) and `f` toggles failed-only, so you can narrow the list without typing a filter:
+`s` cycles a status filter (all / running / pending) and `f` toggles failed-only, so you can narrow the list without typing a filter. Either one overrides the active filter while it's set:
 
 ![Status quick toggle](glmon-assets/Quick-status-toggle.png)
 
@@ -367,6 +369,7 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | `t` | Cycle age window: 3d -> 7d -> 30d -> all |
 | `s` | Cycle status filter: all -> running -> pending |
 | `f` | Toggle failed-only filter |
+| `a` | Toggle active-only (default) / all pipelines |
 | `x` | Cancel selected pipeline |
 | `c` | Clear filter |
 | `M` | This project's MRs |
@@ -499,7 +502,7 @@ glmon -p my-group/my-project
 Skips My Work and the picker, landing on that project's pipelines. Useful for shell aliases or keyboard launchers.
 
 ### Loading Older Pipelines
-Default view is last 3 days. Press `t` in the pipeline list to expand to 7d, 30d, or all. Or launch with `--days 30` to set a different default.
+Default view is last 3 days. Press `t` in the pipeline list to expand to 7d, 30d, or all. Or launch with `--days 30` to set a different default. Finished pipelines stay hidden until you press `a`.
 
 ### Investigating Failures
 1. Navigate to a pipeline with failed status (red)
