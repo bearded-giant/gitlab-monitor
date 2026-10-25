@@ -253,3 +253,37 @@ def test_tab_key_cycles_active_merged_list_and_back():
     assert ("more", "merged_recently_assigned") in kinds
     assert listed == "MyMergeRequestsScreen"
     assert list_key == "show active"
+
+
+def test_stale_refresh_after_tab_switch_keeps_new_tab_rows():
+    import time
+
+    class SlowApi(_DashApi):
+        slow = False
+
+        def get_mr_dashboard_lists(self, full, counts=()):
+            out = super().get_mr_dashboard_lists(full, counts)
+            if self.slow and full[0][2] == "active":
+                time.sleep(0.5)
+            return out
+
+    async def run():
+        app = App()
+        async with app.run_test(size=(200, 40)) as pilot:
+            api = SlowApi()
+            screen = MRDashboardScreen(api)
+            await app.push_screen(screen)
+            for _ in range(10):
+                await pilot.pause(0.03)
+            api.slow = True
+            task = asyncio.create_task(screen._safe_refresh())
+            await pilot.pause(0.1)
+            await pilot.press("t")
+            await pilot.pause(0.2)
+            await task
+            await pilot.pause(0.1)
+            return screen.tab, _kinds(screen)
+
+    tab, kinds = asyncio.run(run())
+    assert tab == "merged"
+    assert ("mr", "merged_recently_assigned") in kinds

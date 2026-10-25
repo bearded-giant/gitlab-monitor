@@ -2510,10 +2510,13 @@ class MRDashboardScreen(ScreenBase):
     async def load_mrs(self) -> None:
         if not self.me:
             self.me = await asyncio.to_thread(self.api.current_username)
+        tab = self.tab
         results = await asyncio.gather(*(
             asyncio.to_thread(self.api.get_mr_dashboard_lists, full, counts)
-            for full, counts in self.api.dashboard_batches(self.tab)
+            for full, counts in self.api.dashboard_batches(tab)
         ), return_exceptions=True)
+        if tab != self.tab:
+            return
         errors = [r for r in results if isinstance(r, Exception)]
         for r in results:
             if isinstance(r, dict):
