@@ -41,6 +41,8 @@ from .constants import (
     INFO_PANE_WIDTH,
     KEY_COLS,
     MR_STATE_CYCLE,
+    MR_DASHBOARD_TABS,
+    MR_DASHBOARD_LISTS,
     MERGED_WINDOW_CYCLE,
     DEFAULT_MERGED_WINDOW_DAYS,
     LOGO,
@@ -65,6 +67,9 @@ from .formatting import (
     _pipeline_status_with_id,
     _branch_pair_text,
     _mr_state_badge,
+    _dashboard_badge,
+    _reviewers_text,
+    _ratio_text,
     _auto_merge_badge,
     _mr_state_color,
     _is_mr_approved,
@@ -1791,7 +1796,7 @@ def _mr_state_keys(state):
 
 class MyMergeRequestsScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "a": "toggle_all", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window", "A": "toggle_auto_merge", "M": "merge", "u": "assign"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "a": "toggle_all", "t": "dashboard", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window", "A": "toggle_auto_merge", "M": "merge", "u": "assign"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -1836,7 +1841,7 @@ class MyMergeRequestsScreen(ScreenBase):
             [("p", "pipelines"),  state_key,         all_key],
             [("e", "export md"),  ("n", "note"),     ("A", "auto-merge")],
             [("M", "merge"),      ("u", "assign"),   window_slot],
-            [("g", "goto MR"),    ("esc", "quit")],
+            [("g", "goto MR"),    ("t", "show active"),  ("esc", "quit")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2204,6 +2209,9 @@ class MyMergeRequestsScreen(ScreenBase):
     async def action_toggle_all(self) -> None:
         await self._set_state('opened' if self.state == 'all' else 'all')
 
+    async def action_dashboard(self) -> None:
+        self.app.switch_screen(MRDashboardScreen(self.api))
+
     async def _set_state(self, state) -> None:
         self.state = state
         self._unresolved_cache.clear()
@@ -2389,6 +2397,267 @@ class MyMergeRequestsScreen(ScreenBase):
         with open(path, 'w') as f:
             f.write("\n".join(lines))
         return path
+
+
+class MRDashboardScreen(ScreenBase):
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "t": "next_tab", "m": "open_modules", "tab": "open_modules", "n": "note", "p": "pipelines", "A": "toggle_auto_merge", "M": "merge", "u": "assign"}
+
+    REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
+
+    def __init__(self, api: GitLabAPI, tab: str = 'active'):
+        super().__init__()
+        self.api = api
+        self.tab = tab
+        self.me = ''
+        self.lists = {}
+        self.collapsed = {s[0] for s in MR_DASHBOARD_LISTS if s[3] == 2}
+        self._rows = []
+        self._refresh_timer = None
+        self._refreshing = False
+        self._fetch_error = None
+
+    def _next_tab(self):
+        return MR_DASHBOARD_TABS[(MR_DASHBOARD_TABS.index(self.tab) + 1) % len(MR_DASHBOARD_TABS)]
+
+    def _tab_count(self, tab):
+        # gitlab's active count skips the second group ("excluded from the active count")
+        return sum(
+            (self.lists.get(s[0]) or {}).get('count', 0)
+            for s in MR_DASHBOARD_LISTS if s[2] == tab and not (tab == 'active' and s[3] == 2)
+        )
+
+    def _info_pairs(self):
+        return [
+            ("GitLab", self.api.config.gitlab_url),
+            ("User", self.me or "…"),
+            ("Active", str(self._tab_count('active'))),
+            ("Merged", str(self._tab_count('merged'))),
+        ]
+
+    def _keys(self):
+        return [
+            [("tab", "modules"),  ("/", "filter"),                      ("enter", "open / fold")],
+            [("r", "refresh"),    ("b", "browser"),                     ("y", "copy url")],
+            [("p", "pipelines"),  ("t", f"show {self._next_tab()}"),    ("g", "goto MR")],
+            [("A", "auto-merge"), ("M", "merge"),                       ("n", "note")],
+            [("u", "assign"),     ("esc", "quit")],
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield K9sHeader(self._info_pairs(), self._keys(), id="header")
+        yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield Container(
+            Input(placeholder="/  filter MRs...", id="mr-filter"),
+            id="filter-bar",
+        )
+        yield DataTable(id="mr-table")
+        yield StatusBar(self._status_text(), id="statusbar")
+
+    def _breadcrumb(self):
+        return _breadcrumb_text(["Merge Requests", self.tab.title()])
+
+    def _filter_text(self):
+        try:
+            return self.query_one("#mr-filter", Input).value.strip()
+        except Exception:
+            return ""
+
+    def _status_text(self):
+        if self._fetch_error:
+            return _status_line([("⚠ fetch failed", f"{self._fetch_error} — retrying")])
+        parts = [("tab", self.tab)]
+        if self._filter_text():
+            parts.append(("filter", self._filter_text()))
+        return _status_line(parts)
+
+    def _refresh_status(self) -> None:
+        try:
+            sb = self.query_one("#statusbar", StatusBar)
+            sb.set_text(_loading_indicator(self._user_loading_label) if self._user_loading_label else self._status_text())
+            sb.set_right(_auto_refresh_indicator(
+                self.REFRESH_INTERVAL,
+                active=self._refresh_timer is not None,
+                refreshing=self._refreshing,
+                loading_label=self._user_loading_label,
+            ))
+        except Exception:
+            pass
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        table.add_columns("●", "Status", "MR", "Title", "Author", "Reviewers", "Threads", "Approvals", "Pipeline", "Updated")
+        table.cursor_type = "row"
+        self._user_loading_label = "loading MRs..."
+        try:
+            self.query_one("#statusbar", StatusBar).set_text(_loading_indicator(self._user_loading_label))
+        except Exception:
+            pass
+        self.call_after_refresh(lambda: asyncio.create_task(self._initial_load()))
+
+    async def _initial_load(self) -> None:
+        try:
+            await self.load_mrs()
+        finally:
+            self._clear_loading()
+        try:
+            self.query_one("#mr-table", DataTable).focus()
+        except Exception:
+            pass
+        self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
+        self._refresh_status()
+
+    async def load_mrs(self) -> None:
+        if not self.me:
+            self.me = await asyncio.to_thread(self.api.current_username)
+        results = await asyncio.gather(*(
+            asyncio.to_thread(self.api.get_mr_dashboard_lists, full, counts)
+            for full, counts in self.api.dashboard_batches(self.tab)
+        ), return_exceptions=True)
+        errors = [r for r in results if isinstance(r, Exception)]
+        for r in results:
+            if isinstance(r, dict):
+                self.lists.update(r)
+        self._fetch_error = type(errors[0]).__name__ if errors else None
+        if errors:
+            _dbg(f"dashboard fetch failed: {type(errors[0]).__name__}: {errors[0]}")
+        self._apply_filter()
+        try:
+            self.query_one("#header", K9sHeader).set_info(self._info_pairs())
+            self.query_one("#header", K9sHeader).set_keys(self._keys())
+            self.query_one("#breadcrumb", Static).update(self._breadcrumb())
+        except Exception:
+            pass
+
+    def _apply_filter(self) -> None:
+        self._update_table()
+        self._refresh_status()
+
+    def _matches(self, m, q):
+        return not q or any(q in (v or '').lower() for v in (
+            m.get('title'), m.get('project_path'), m.get('author'), m.get('source_branch'), str(m.get('iid')),
+        ))
+
+    def _update_table(self) -> None:
+        table = self.query_one("#mr-table", DataTable)
+        prev = table.cursor_row
+        table.clear()
+        self._rows = []
+        q = self._filter_text().lower()
+        blank = Text("")
+        group = None
+        for spec in MR_DASHBOARD_LISTS:
+            list_id, title, tab, grp = spec[:4]
+            if tab != self.tab:
+                continue
+            if group is not None and grp != group:
+                table.add_row(blank, Text("excluded from active count", style="dim italic"), *[blank] * 8)
+                self._rows.append((None, None, None))
+            group = grp
+            blk = self.lists.get(list_id) or {}
+            folded = list_id in self.collapsed
+            label = Text(f"{'▸' if folded else '▾'} ", style="#6c7086")
+            label.append(title, style="bold #89b4fa")
+            label.append(f"  {blk.get('count', 0)}", style="dim")
+            table.add_row(blank, label, *[blank] * 8)
+            self._rows.append(('section', list_id, None))
+            if folded:
+                continue
+            mrs = blk.get('mrs') or []
+            for m in mrs:
+                if self._matches(m, q):
+                    table.add_row(*self._mr_cells(list_id, m))
+                    self._rows.append(('mr', list_id, m))
+            hidden = blk.get('count', 0) - len(mrs)
+            if hidden > 0:
+                table.add_row(blank, blank, blank, Text(f"… {hidden} more (b opens GitLab)", style="dim italic"), *[blank] * 6)
+                self._rows.append(('more', list_id, None))
+        if prev is not None and self._rows:
+            table.move_cursor(row=min(prev, len(self._rows) - 1))
+
+    def _mr_cells(self, list_id, m):
+        proj = m.get('project_path') or ''
+        has_note = self.api.config.mr_notes.has(proj, m['iid'])
+        age = format_age(m.get('merged_at') if self.tab == 'merged' else (m.get('updated_at') or m.get('created_at')))
+        return (
+            Text("●", style="bold #f9e2af") if has_note else Text(""),
+            _dashboard_badge(list_id, m, self.me),
+            Text(f"{proj.rsplit('/', 1)[-1]}!{m['iid']}", style="bold #89b4fa"),
+            Text((m.get('title') or '')[:60], style="bold #cdd6f4"),
+            Text(m.get('author') or '', style="dim"),
+            _reviewers_text(m),
+            _ratio_text(m.get('threads_resolved', 0), m.get('threads_resolvable', 0)),
+            _ratio_text(m.get('approvals_count', 0), m.get('approvals_required', 0)),
+            _pipeline_status_with_id(m.get('head_pipeline_status'), m.get('head_pipeline_id')),
+            Text(age, style="dim italic"),
+        )
+
+    def _row(self, idx):
+        if idx is None or idx < 0 or idx >= len(self._rows):
+            return (None, None, None)
+        return self._rows[idx]
+
+    def _mr_at_row(self, idx):
+        kind, _, m = self._row(idx)
+        return m if kind == 'mr' else None
+
+    def _dashboard_url(self):
+        base = f"{self.api.config.gitlab_url.rstrip('/')}/dashboard/merge_requests"
+        return f"{base}/merged" if self.tab == 'merged' else base
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        kind, list_id, m = self._row(event.cursor_row)
+        if kind == 'section':
+            self.collapsed ^= {list_id}
+            self._update_table()
+        elif kind == 'mr':
+            self.app.push_screen(MergeRequestDetailScreen(self.api, m['project_path'], m['iid']))
+        elif kind == 'more':
+            webbrowser.open(self._dashboard_url())
+
+    async def action_browser(self) -> None:
+        kind, _, m = self._row(self.query_one("#mr-table", DataTable).cursor_row)
+        if kind == 'mr':
+            webbrowser.open(m['web_url'])
+        elif kind is not None:
+            webbrowser.open(self._dashboard_url())
+
+    async def action_next_tab(self) -> None:
+        nxt = self._next_tab()
+        if nxt == 'list':
+            self.app.switch_screen(MyMergeRequestsScreen(self.api))
+            return
+        self.tab = nxt
+        await self._show_loading(f"loading {nxt} MRs...")
+        try:
+            await self.load_mrs()
+        finally:
+            self._clear_loading()
+
+    async def action_refresh(self) -> None:
+        if self._refreshing:
+            return
+        await self._show_loading("loading MRs...")
+        try:
+            await self.load_mrs()
+        finally:
+            self._clear_loading()
+
+    _safe_refresh = MyMergeRequestsScreen._safe_refresh
+    on_unmount = MyMergeRequestsScreen.on_unmount
+    on_input_changed = MyMergeRequestsScreen.on_input_changed
+    on_input_submitted = MyMergeRequestsScreen.on_input_submitted
+    action_back = MyMergeRequestsScreen.action_back
+    action_open_modules = MyMergeRequestsScreen.action_open_modules
+    action_search = MyMergeRequestsScreen.action_search
+    action_pipelines = MyMergeRequestsScreen.action_pipelines
+    action_yank = MyMergeRequestsScreen.action_yank
+    action_note = MyMergeRequestsScreen.action_note
+    action_goto = MyMergeRequestsScreen.action_goto
+    _open_mr = MyMergeRequestsScreen._open_mr
+    action_toggle_auto_merge = MyMergeRequestsScreen.action_toggle_auto_merge
+    action_merge = MyMergeRequestsScreen.action_merge
+    action_assign = MyMergeRequestsScreen.action_assign
 
 
 def _start_review(screen, project_path: str, iid: int) -> bool:
@@ -5149,7 +5418,7 @@ class MyWorkScreen(ScreenBase):
     def _keys(self):
         return [
             [("[ ]", "section"), ("enter", "open"),  ("r", "refresh")],
-            [("M", "all MRs"),   ("P", "pipelines"), ("m", "modules")],
+            [("M", "MRs"),       ("P", "pipelines"), ("m", "modules")],
             [("b", "browser"),   ("y", "copy url"),  ("esc", "quit")],
         ]
 
@@ -5488,7 +5757,7 @@ class MyWorkScreen(ScreenBase):
         self.app.open_modules()
 
     async def action_all_mrs(self) -> None:
-        self.app.push_screen(MyMergeRequestsScreen(self.api))
+        self.app.push_screen(MRDashboardScreen(self.api))
 
     async def action_all_pipelines(self) -> None:
         age = getattr(self.app, 'default_age_days', DEFAULT_PIPELINE_AGE_DAYS)
@@ -6494,7 +6763,7 @@ class ModuleModal(ModalScreen[str | None]):
     MODULES = [
         (MODULE_MYWORK,    "1", "My Work",     "favorites, my open MRs, tag deploys"),
         (MODULE_PROJECTS,  "2", "Project Hub", "favorites + MRs, pipelines, commits, tags"),
-        (MODULE_MRS,       "3", "MRs",       "my merge requests"),
+        (MODULE_MRS,       "3", "MRs",       "dashboard: active, merged, list"),
         (MODULE_PIPELINES, "4", "Pipelines", "my pipelines (across favorites)"),
         (MODULE_TAGS,      "5", "Tags",      "project tags + create/push"),
         (MODULE_REVIEWS,   "6", "Reviews",   "MRs where I am reviewer + local AI reviews"),
@@ -7296,7 +7565,7 @@ class PipelineMonitor(App):
             elif result == MODULE_PROJECTS:
                 self.switch_screen(ProjectSelectScreen(self.api, self.config.favorites))
             elif result == MODULE_MRS:
-                self.switch_screen(MyMergeRequestsScreen(self.api))
+                self.switch_screen(MRDashboardScreen(self.api))
             elif result == MODULE_PIPELINES:
                 self.switch_screen(MyPipelineListScreen(self.api, age_days=self.default_age_days))
             elif result == MODULE_TAGS:

@@ -9,12 +9,27 @@ from datetime import datetime, timedelta, timezone
 import gitlab
 
 from .config import Config
-from .constants import LOG_FETCH_TIMEOUT
+from .constants import (
+    LOG_FETCH_TIMEOUT,
+    MR_DASHBOARD_LISTS,
+    MR_DASHBOARD_PAGE,
+    MR_DASHBOARD_BATCH,
+    MR_DASHBOARD_MERGED_DAYS,
+)
 
 
 ACTIVITY_TTL = 300
 ACTIVITY_WINDOW_DAYS = 7
 ACTIVITY_PAGE_CAP = 5
+
+_DASHBOARD_NODE = (
+    'iid project { fullPath } title draft state webUrl sourceBranch targetBranch createdAt updatedAt mergedAt '
+    'author { username } assignees { nodes { username } } '
+    'reviewers { nodes { username mergeRequestInteraction { reviewState } } } '
+    'approvalsRequired approvalsLeft approvedBy { nodes { username } } '
+    'headPipeline { id status path } resolvedDiscussionsCount resolvableDiscussionsCount '
+    'diffStatsSummary { additions deletions fileCount } autoMergeEnabled mergeabilityChecks { status }'
+)
 
 
 class GitLabAPI:
@@ -761,18 +776,83 @@ class GitLabAPI:
             'query($p:ID!,$i:[String!]){project(fullPath:$p){mergeRequests(iids:$i,first:100){nodes{iid headPipeline{id status path}}}}}',
             {'p': project_path, 'i': [str(i) for i in iids]},
         )
-        base = self.config.gitlab_url.rstrip('/')
         out = {}
         for n in ((data.get('project') or {}).get('mergeRequests') or {}).get('nodes') or []:
-            hp = n.get('headPipeline')
-            if not hp:
-                continue
-            out[int(n['iid'])] = {
-                'status': (hp.get('status') or '').lower() or None,
-                'id': int(str(hp.get('id') or '').rsplit('/', 1)[-1] or 0) or None,
-                'web_url': f"{base}{hp['path']}" if hp.get('path') else None,
-            }
+            if n.get('headPipeline'):
+                out[int(n['iid'])] = self._gql_pipeline(n['headPipeline'])
         return out
+
+    def _gql_pipeline(self, hp):
+        hp = hp or {}
+        return {
+            'status': (hp.get('status') or '').lower() or None,
+            'id': int(str(hp.get('id') or '').rsplit('/', 1)[-1] or 0) or None,
+            'web_url': f"{self.config.gitlab_url.rstrip('/')}{hp['path']}" if hp.get('path') else None,
+        }
+
+    @staticmethod
+    def dashboard_batches(tab):
+        full = [spec for spec in MR_DASHBOARD_LISTS if spec[2] == tab]
+        counts = [spec for spec in MR_DASHBOARD_LISTS if spec[2] != tab]
+        batches = [(full[i:i + MR_DASHBOARD_BATCH], []) for i in range(0, len(full), MR_DASHBOARD_BATCH)]
+        # count-only lists ride on the lightest batch so the other tab's total costs no extra request
+        batches[-1] = (batches[-1][0], counts)
+        return batches
+
+    def get_mr_dashboard_lists(self, full, counts=()):
+        fields = [f'{s[0]}: {s[4]}({s[5]}, first: {MR_DASHBOARD_PAGE}) {{ count nodes {{ {_DASHBOARD_NODE} }} }}' for s in full]
+        fields += [f'{s[0]}: {s[4]}({s[5]}) {{ count }}' for s in counts]
+        body = ' '.join(fields)
+        variables = {}
+        header = 'query'
+        if '$mergedAfter' in body:
+            since = datetime.now(timezone.utc) - timedelta(days=MR_DASHBOARD_MERGED_DAYS)
+            variables['mergedAfter'] = since.isoformat().replace('+00:00', 'Z')
+            header = 'query($mergedAfter: Time)'
+        user = self._graphql(f'{header} {{ currentUser {{ {body} }} }}', variables).get('currentUser') or {}
+        out = {}
+        for s in list(full) + list(counts):
+            blk = user.get(s[0]) or {}
+            out[s[0]] = {'count': blk.get('count') or 0, 'mrs': [self._gql_mr_to_dict(n) for n in blk.get('nodes') or []]}
+        return out
+
+    def _gql_mr_to_dict(self, n):
+        reviewers = (n.get('reviewers') or {}).get('nodes') or []
+        approved_by = [u.get('username') for u in ((n.get('approvedBy') or {}).get('nodes') or [])]
+        checks = n.get('mergeabilityChecks')
+        diff = n.get('diffStatsSummary') or {}
+        hp = self._gql_pipeline(n.get('headPipeline'))
+        return {
+            'iid': int(n['iid']),
+            'project_path': (n.get('project') or {}).get('fullPath') or '',
+            'title': n.get('title') or '',
+            'draft': bool(n.get('draft')),
+            'state': n.get('state'),
+            'web_url': n.get('webUrl'),
+            'source_branch': n.get('sourceBranch'),
+            'target_branch': n.get('targetBranch'),
+            'created_at': n.get('createdAt'),
+            'updated_at': n.get('updatedAt'),
+            'merged_at': n.get('mergedAt'),
+            'author': (n.get('author') or {}).get('username') or '',
+            'assignees': [a.get('username') for a in ((n.get('assignees') or {}).get('nodes') or [])],
+            'reviewers': [r.get('username') for r in reviewers],
+            'review_states': {r.get('username'): (r.get('mergeRequestInteraction') or {}).get('reviewState') for r in reviewers},
+            'approved_by': approved_by,
+            'approvals_count': len(approved_by),
+            'approvals_required': n.get('approvalsRequired') or 0,
+            'approvals_left': n.get('approvalsLeft'),
+            'head_pipeline_status': hp['status'],
+            'head_pipeline_id': hp['id'],
+            'head_pipeline_web_url': hp['web_url'],
+            'threads_resolved': n.get('resolvedDiscussionsCount') or 0,
+            'threads_resolvable': n.get('resolvableDiscussionsCount') or 0,
+            'diff_files': diff.get('fileCount'),
+            'additions': diff.get('additions'),
+            'deletions': diff.get('deletions'),
+            'merge_when_pipeline_succeeds': bool(n.get('autoMergeEnabled')),
+            'ready': n.get('state') == 'opened' and checks is not None and not any(c.get('status') == 'FAILED' for c in checks),
+        }
 
     def create_mr_note(self, project_path, iid, body):
         project = self.gl.projects.get(project_path, lazy=True)
