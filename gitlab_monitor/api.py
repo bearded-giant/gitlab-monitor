@@ -465,6 +465,7 @@ class GitLabAPI:
         project = self.gl.projects.get(project_path, lazy=True)
         mrs = project.mergerequests.list(
             state=state,
+            get_all=False,
             per_page=limit,
             order_by='updated_at',
             sort='desc',
