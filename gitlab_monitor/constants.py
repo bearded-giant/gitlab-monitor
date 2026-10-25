@@ -51,6 +51,41 @@ INFO_PANE_WIDTH = 56
 KEY_COLS = 3
 
 MR_STATE_CYCLE = ['opened', 'merged', 'closed', 'failed']
+
+MR_DASHBOARD_TABS = ['active', 'merged', 'list']
+MR_DASHBOARD_PAGE = 20
+# measured on gitlab 19.2: 3 lists x full node at first:20 = 223 of the 250 complexity cap
+MR_DASHBOARD_BATCH = 3
+MR_DASHBOARD_MERGED_DAYS = 14
+
+_AUTHORED = 'authoredMergeRequests'
+_REVIEWING = 'reviewRequestedMergeRequests'
+_MINE = 'includeAssigned: true, '
+
+# (id, title, tab, group, field, args), from gitlab's merge_request_dashboard_data
+MR_DASHBOARD_LISTS = [
+    ('returned_to_you', 'Returned to you', 'active', 1, _AUTHORED,
+     _MINE + 'state: opened, reviewStates: [REVIEWED, REQUESTED_CHANGES]'),
+    ('reviews_requested', 'Review requested', 'active', 1, _REVIEWING,
+     'state: opened, reviewStates: [UNAPPROVED, UNREVIEWED, REVIEW_STARTED]'),
+    # gitlab's or:{reviewerWildcard: NONE} is a no-op on its own; reviewerWildcardId filters
+    ('assigned_to_you', 'Your merge requests', 'active', 1, _AUTHORED,
+     _MINE + 'state: opened, reviewerWildcardId: NONE'),
+    ('waiting_for_assignee', 'Waiting for author or assignee', 'active', 2, _REVIEWING,
+     'state: opened, reviewStates: [REVIEWED, REQUESTED_CHANGES]'),
+    ('waiting_for_approvals', 'Waiting for approvals', 'active', 2, _AUTHORED,
+     _MINE + 'state: opened, reviewStates: [UNREVIEWED, UNAPPROVED, REVIEW_STARTED], '
+     'not: {reviewStates: [REQUESTED_CHANGES, REVIEWED]}'),
+    ('approved_by_you', 'Approved by you', 'active', 2, _REVIEWING,
+     'state: opened, reviewState: APPROVED'),
+    ('approved_by_others', 'Approved by others', 'active', 2, _AUTHORED,
+     _MINE + 'state: opened, reviewState: APPROVED, '
+     'not: {reviewStates: [REQUESTED_CHANGES, REVIEWED, UNREVIEWED, REVIEW_STARTED, UNAPPROVED]}'),
+    ('merged_recently_reviews', 'Reviews', 'merged', 1, _REVIEWING,
+     'state: merged, mergedAfter: $mergedAfter, sort: MERGED_AT_DESC'),
+    ('merged_recently_assigned', 'Your merge requests', 'merged', 1, _AUTHORED,
+     _MINE + 'state: merged, mergedAfter: $mergedAfter, sort: MERGED_AT_DESC'),
+]
 MERGED_WINDOW_CYCLE = [1, 7, 10]
 DEFAULT_MERGED_WINDOW_DAYS = 7
 

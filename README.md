@@ -141,7 +141,7 @@ By default `glmon` opens **My Work** — your starred repos, your open MRs group
 
 ### 1. My Work (home)
 
-The default landing screen. Three panels: your **Favorites** (starred repos), **My Open MRs** (every MR you authored, across all projects, grouped by repository), and **My Tag Deploys** (the latest tag pipeline you pushed in each favorite, running ones pinned on top). Cycle panels with `[`/`]`, `enter` to open the highlighted repo (into its Project Hub) or MR (into detail). `M` jumps to the full MRs list, `P` to your pipelines. This is module `1`; it always opens here (no last-view restore). `esc` or `Ctrl+c` quits the app; `q` is back-only and a no-op on the home.
+The default landing screen. Three panels: your **Favorites** (starred repos), **My Open MRs** (every MR you authored, across all projects, grouped by repository), and **My Tag Deploys** (the latest tag pipeline you pushed in each favorite, running ones pinned on top). Cycle panels with `[`/`]`, `enter` to open the highlighted repo (into its Project Hub) or MR (into detail). `M` jumps to the MR dashboard, `P` to your pipelines. This is module `1`; it always opens here (no last-view restore). `esc` or `Ctrl+c` quits the app; `q` is back-only and a no-op on the home.
 
 ### 2. Module Switcher
 
@@ -153,7 +153,7 @@ Press `m` or `tab` from any home screen to switch modules. Six of them:
 |---|--------|------|
 | 1 | My Work | favorites, my open MRs, tag deploys |
 | 2 | Project Hub | pick a project, then its MRs, pipelines, commits, tags |
-| 3 | MRs | my merge requests |
+| 3 | MRs | MR dashboard (active, merged) plus the flat list |
 | 4 | Pipelines | my pipelines across favorites |
 | 5 | Tags | pick a project, then its tags + create/push/rollback |
 | 6 | Reviews | MRs where I'm a reviewer + local AI reviews |
@@ -207,7 +207,9 @@ Press `f` in the job list for a quick view of the pipeline's failed jobs with th
 
 ![My MRs grouped by project](glmon-assets/MR-assigned-open-project-grouped.png)
 
-Two flavors: **My MRs** (module `3`) is a cross-project view of the MRs you authored, grouped by repository; **Project MRs** (reached with `M` from a project's pipeline list) scopes to one project. Both open on open MRs and support `/` filter, `s` to cycle state (open / merged / closed / failed, where failed means open MRs whose head pipeline failed), `a` to flip between all MRs and open, `A` to toggle auto-merge, `u` to assign the highlighted MR (same user lookup as MR detail), and `b`/`y` for browser/copy. My MRs adds more: `w` cycles the merged/closed window (1d / 7d / 10d), per-MR local notes show a yellow `●` glyph, `e` exports the list to markdown, and `M` merges without opening the MR.
+Module `3` opens the **MR dashboard**, a terminal take on GitLab's merge request homepage. The **Active** tab has the same sections GitLab shows: Returned to you, Review requested, and Your merge requests, then (collapsed, below an "excluded from active count" divider) Waiting for author or assignee, Waiting for approvals, Approved by you, and Approved by others. The **Merged** tab lists Reviews and Your merge requests merged in the last 14 days. Section counts and the Active/Merged totals in the header match the web page. Each row carries GitLab's status badge for its section (Draft, Reviewers needed, Requested, Changes requested, N approvals required, Ready to merge, and so on), the reviewers with their review state (`✓` approved, `✗` changes requested, `✎` commented, `…` review started, `·` not yet), resolved threads, approvals, and the head pipeline. `enter` on a section header folds it, `enter` on an MR opens detail, and `t` steps through Active, Merged, and List; the key label names the tab you'll land on and the footer names the one you're on. Sections show their 20 most recent MRs, with a "more" row that opens the same view in GitLab. The whole dashboard refreshes in three GraphQL requests no matter how many MRs it holds.
+
+The **List** tab is the flat **My MRs** view: the MRs you authored, grouped by repository. **Project MRs** (reached with `M` from a project's pipeline list) is the same list scoped to one project. Both open on open MRs and support `/` filter, `s` to cycle state (open / merged / closed / failed, where failed means open MRs whose head pipeline failed), `a` to flip between all MRs and open, `A` to toggle auto-merge, `u` to assign the highlighted MR (same user lookup as MR detail), and `b`/`y` for browser/copy. My MRs adds more: `w` cycles the merged/closed window (1d / 7d / 10d), per-MR local notes show a yellow `●` glyph, `e` exports the list to markdown, and `M` merges without opening the MR.
 
 ### 10. Merge Request Detail
 
@@ -333,7 +335,7 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 |-----|--------|
 | `[` / `]` | Cycle panel (Favorites / My Open MRs / My Tag Deploys) |
 | `Enter` | Open highlighted repo (hub) or MR (detail) |
-| `M` | Full MRs list |
+| `M` | MR dashboard |
 | `P` | My pipelines |
 
 ### Project Hub
@@ -393,10 +395,23 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | `c` | Clear filter |
 | `a` | Pick a project (opens its Project Hub) |
 
+### MR Dashboard
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Fold / unfold a section, open an MR, or open GitLab from a "more" row |
+| `t` | Next tab: Active -> Merged -> List (header shows the next one, footer the current one) |
+| `/` | Filter MRs within the sections |
+| `b` / `y` | Open / copy the MR URL (on a section row, `b` opens the dashboard in GitLab) |
+| `p` | Pipelines for the selected MR |
+| `A` / `M` / `u` / `n` | Auto-merge, merge, assign, local note |
+| `g` | Go to MR by number |
+
 ### Merge Request List
 
 | Key | Action |
 |-----|--------|
+| `t` | Back to the MR dashboard (My MRs) |
 | `/` | Focus filter input |
 | `s` | Cycle state: open -> merged -> closed -> failed (header shows the next one, footer the current one) |
 | `a` | Toggle all MRs / back to open |

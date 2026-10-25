@@ -360,6 +360,117 @@ def _auto_merge_badge(m=None):
     return Text('false', style='dim #6c7086')
 
 
+_BADGE_STYLES = {
+    'success': 'bold #a6e3a1',
+    'warning': 'bold #f9e2af',
+    'neutral': 'bold #a6adc8',
+    'info': 'bold #89b4fa',
+}
+
+
+def _returned_badge(m, me):
+    states = set(m.get('review_states', {}).values())
+    if 'REQUESTED_CHANGES' in states:
+        return 'Changes requested', 'warning'
+    if 'REVIEWED' in states:
+        return 'Reviewer commented', 'warning'
+    return None
+
+
+def _requested_badge(m, me):
+    mine = m.get('review_states', {}).get(me)
+    if mine == 'REVIEW_STARTED':
+        return 'Review started', 'warning'
+    if mine in ('UNREVIEWED', 'UNAPPROVED'):
+        return 'Requested', 'warning'
+    return None
+
+
+def _assigned_badge(m, me):
+    if m.get('draft'):
+        return 'Draft', 'warning'
+    if not [r for r in m.get('reviewers', []) if (r or '').lower() != 'gitlabduo']:
+        return 'Reviewers needed', 'warning'
+    return None
+
+
+def _waiting_badge(m, me):
+    mine = m.get('review_states', {}).get(me)
+    if mine == 'REQUESTED_CHANGES':
+        return 'You requested changes', 'neutral'
+    if mine == 'REVIEWED':
+        return 'You commented', 'neutral'
+    return None
+
+
+def _approval_badge(m, me):
+    left = m.get('approvals_left')
+    not_approved = [s for s in m.get('review_states', {}).values() if s != 'APPROVED']
+    if (left or 0) > 0 or (m.get('approvals_required') == 0 and not_approved):
+        n = left or len(not_approved)
+        return f"{n} approval{'s' if n != 1 else ''} required", 'neutral'
+    if me in m.get('approved_by', []) or left == 0:
+        return 'Approved', 'neutral'
+    return 'Waiting for approval', 'neutral'
+
+
+_DASHBOARD_BADGES = {
+    'returned_to_you': _returned_badge,
+    'reviews_requested': _requested_badge,
+    'assigned_to_you': _assigned_badge,
+    'waiting_for_assignee': _waiting_badge,
+    'waiting_for_approvals': _approval_badge,
+    'approved_by_you': _approval_badge,
+    'approved_by_others': _approval_badge,
+}
+
+
+def _dashboard_badge(list_id, m, me):
+    if m.get('state') == 'merged':
+        label = ('Merged', 'info')
+    elif m.get('ready'):
+        label = ('Ready to merge', 'success')
+    else:
+        method = _DASHBOARD_BADGES.get(list_id)
+        label = method(m, me) if method else None
+    if not label:
+        return Text('')
+    return Text(label[0], style=_BADGE_STYLES[label[1]])
+
+
+_REVIEW_GLYPHS = {
+    'APPROVED': ('✓', '#a6e3a1'),
+    'REQUESTED_CHANGES': ('✗', '#f38ba8'),
+    'REVIEWED': ('✎', '#f9e2af'),
+    'REVIEW_STARTED': ('…', '#f9e2af'),
+}
+
+
+def _reviewers_text(m, limit=2):
+    names = m.get('reviewers') or []
+    if not names:
+        return Text('—', style='dim')
+    states = m.get('review_states') or {}
+    # acted-on reviewers first: a 9-reviewer MR should show who approved or blocked
+    shown = sorted(names, key=lambda u: states.get(u) not in _REVIEW_GLYPHS)[:limit]
+    t = Text()
+    for i, u in enumerate(shown):
+        glyph, color = _REVIEW_GLYPHS.get(states.get(u), ('·', '#6c7086'))
+        if i:
+            t.append(' ')
+        t.append(u, style='#cdd6f4')
+        t.append(glyph, style=f'bold {color}')
+    if len(names) > limit:
+        t.append(f' +{len(names) - limit}', style='dim')
+    return t
+
+
+def _ratio_text(done, total, empty='—'):
+    if not total:
+        return Text(empty, style='dim')
+    return Text(f"{done}/{total}", style='bold #a6e3a1' if done >= total else 'bold #f9e2af')
+
+
 def _mr_state_color(state, m=None):
     if m is not None and _is_mr_approved(m):
         return '#a6e3a1'
