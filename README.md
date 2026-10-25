@@ -207,7 +207,7 @@ Press `f` in the job list for a quick view of the pipeline's failed jobs with th
 
 ![My MRs grouped by project](glmon-assets/MR-assigned-open-project-grouped.png)
 
-Two flavors: **My MRs** (module `3`) is a cross-project view of the MRs you authored, grouped by repository; **Project MRs** (reached with `M` from a project's pipeline list) scopes to one project. Both support `/` filter, `s` to cycle state (opened / merged / closed / all), `A` to toggle auto-merge, `u` to assign the highlighted MR (same user lookup as MR detail), and `b`/`y` for browser/copy. My MRs adds more: `w` cycles the merged/closed window (1d / 7d / 10d), per-MR local notes show a yellow `●` glyph, `e` exports the list to markdown, and `M` merges without opening the MR.
+Two flavors: **My MRs** (module `3`) is a cross-project view of the MRs you authored, grouped by repository; **Project MRs** (reached with `M` from a project's pipeline list) scopes to one project. Both open on open MRs and support `/` filter, `s` to cycle state (open / merged / closed / failed, where failed means open MRs whose head pipeline failed), `a` to flip between all MRs and open, `A` to toggle auto-merge, `u` to assign the highlighted MR (same user lookup as MR detail), and `b`/`y` for browser/copy. My MRs adds more: `w` cycles the merged/closed window (1d / 7d / 10d), per-MR local notes show a yellow `●` glyph, `e` exports the list to markdown, and `M` merges without opening the MR.
 
 ### 10. Merge Request Detail
 
@@ -398,7 +398,8 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | Key | Action |
 |-----|--------|
 | `/` | Focus filter input |
-| `s` | Cycle state: opened / merged / closed / all |
+| `s` | Cycle state: open -> merged -> closed -> failed (header shows the next one, footer the current one) |
+| `a` | Toggle all MRs / back to open |
 | `A` | Toggle auto-merge |
 | `u` | Assign to a project user |
 | `g` | Go to MR by number (My MRs) |

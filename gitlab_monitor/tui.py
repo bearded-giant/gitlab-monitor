@@ -1771,9 +1771,27 @@ def _pipeline_status_color(status):
 
 
 
+def _mr_state_label(state):
+    return 'open' if state == 'opened' else state
+
+
+def _mr_api_state(state):
+    return 'opened' if state == 'failed' else state
+
+
+def _next_mr_state(state):
+    if state not in MR_STATE_CYCLE:
+        return MR_STATE_CYCLE[0]
+    return MR_STATE_CYCLE[(MR_STATE_CYCLE.index(state) + 1) % len(MR_STATE_CYCLE)]
+
+
+def _mr_state_keys(state):
+    return [("s", f"show {_mr_state_label(_next_mr_state(state))}"), ("a", "show open" if state == 'all' else "show all")]
+
+
 class MyMergeRequestsScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window", "A": "toggle_auto_merge", "M": "merge", "u": "assign"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "a": "toggle_all", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window", "A": "toggle_auto_merge", "M": "merge", "u": "assign"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -1802,7 +1820,7 @@ class MyMergeRequestsScreen(ScreenBase):
         pairs = [
             ("GitLab", self.api.config.gitlab_url),
             ("Scope", "created_by_me"),
-            ("State", self.state),
+            ("State", _mr_state_label(self.state)),
             ("MRs", count),
         ]
         if self._is_windowed_state():
@@ -1811,13 +1829,14 @@ class MyMergeRequestsScreen(ScreenBase):
 
     def _keys(self):
         window_slot = ("w", f"window:{self.window_days}d") if self._is_windowed_state() else None
+        state_key, all_key = _mr_state_keys(self.state)
         return [
-            [("tab", "modules"),  ("/", "filter"),              ("enter", "view")],
-            [("r", "refresh"),    ("b", "browser"),             ("y", "copy url")],
-            [("p", "pipelines"),  ("s", f"state:{self.state}"), ("g", "goto MR")],
-            [("e", "export md"),  ("n", "note"),                ("A", "auto-merge")],
-            [("M", "merge"),      ("u", "assign"),              window_slot],
-            [("esc", "quit")],
+            [("tab", "modules"),  ("/", "filter"),   ("enter", "view")],
+            [("r", "refresh"),    ("b", "browser"),  ("y", "copy url")],
+            [("p", "pipelines"),  state_key,         all_key],
+            [("e", "export md"),  ("n", "note"),     ("A", "auto-merge")],
+            [("M", "merge"),      ("u", "assign"),   window_slot],
+            [("g", "goto MR"),    ("esc", "quit")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -1844,7 +1863,7 @@ class MyMergeRequestsScreen(ScreenBase):
         except Exception:
             pass
         count = f"{shown}/{total} MRs" if shown != total else f"{total} MRs"
-        parts = [count, ("state", self.state)]
+        parts = [count, ("state", _mr_state_label(self.state))]
         if text_filter:
             parts.append(("filter", text_filter))
         return _status_line(parts)
@@ -1907,21 +1926,23 @@ class MyMergeRequestsScreen(ScreenBase):
     async def load_mrs(self) -> None:
         days = self.window_days if self._is_windowed_state() else None
         try:
-            self.mrs = await asyncio.to_thread(self.api.get_my_merge_requests, self.state, 50, days)
+            self.mrs = await asyncio.to_thread(self.api.get_my_merge_requests, _mr_api_state(self.state), 50, days)
         except Exception as e:
             self._fetch_error = f"{type(e).__name__}"
             _dbg(f"load_mrs fetch failed: {type(e).__name__}: {e}")
             self._refresh_status()
             return
         self._fetch_error = None
-        if self.state == 'opened':
+        if self.state == 'failed':
+            await self._backfill_head_pipelines(self.mrs)
+            self.mrs = [m for m in self.mrs if m.get('head_pipeline_status') == 'failed']
+        if self.state in ('opened', 'failed'):
             if self.mrs:
                 await asyncio.gather(
                     self._backfill_head_pipelines(self.mrs),
                     self._fetch_unresolved_counts(self.mrs),
                     self._backfill_approvals(self.mrs),
                 )
-            await self._append_merged_untagged()
         elif self._is_windowed_state() and self.mrs:
             await self._enrich_merged_mrs()
         self._set_unresolved_col_label("Related" if self._is_windowed_state() else "Threads")
@@ -1933,18 +1954,25 @@ class MyMergeRequestsScreen(ScreenBase):
             pass
 
     async def _backfill_head_pipelines(self, mrs) -> None:
-        todo = [m for m in mrs if m.get('project_path') and m.get('iid') is not None and not m.get('head_pipeline_status')]
-        if not todo:
+        by_proj = {}
+        for m in mrs:
+            if m.get('project_path') and m.get('iid') is not None and not m.get('head_pipeline_status'):
+                by_proj.setdefault(m['project_path'], []).append(m)
+        if not by_proj:
             return
         results = await asyncio.gather(*(
-            asyncio.to_thread(self.api.get_mr_pipelines, m['project_path'], m['iid'])
-            for m in todo
+            asyncio.to_thread(self.api.get_mr_head_pipelines, p, [m['iid'] for m in group])
+            for p, group in by_proj.items()
         ), return_exceptions=True)
-        for mr, r in zip(todo, results):
-            if isinstance(r, list) and r:
-                mr['head_pipeline_status'] = r[0].get('status') or mr.get('head_pipeline_status')
-                mr['head_pipeline_id'] = r[0].get('id') or mr.get('head_pipeline_id')
-                mr['head_pipeline_web_url'] = r[0].get('web_url') or mr.get('head_pipeline_web_url')
+        for group, r in zip(by_proj.values(), results):
+            if not isinstance(r, dict):
+                continue
+            for mr in group:
+                hp = r.get(mr['iid'])
+                if hp:
+                    mr['head_pipeline_status'] = hp['status']
+                    mr['head_pipeline_id'] = hp['id']
+                    mr['head_pipeline_web_url'] = hp['web_url']
 
     async def _backfill_approvals(self, mrs) -> None:
         todo = [m for m in mrs if m.get('project_path') and m.get('iid') is not None and m.get('approvals_count') is None]
@@ -1995,30 +2023,6 @@ class MyMergeRequestsScreen(ScreenBase):
             ), return_exceptions=True)
             for (p, i, _, _), r in zip(related_todo, results):
                 self._related_cache[(p, i)] = r if isinstance(r, list) else []
-
-    async def _append_merged_untagged(self) -> None:
-        try:
-            merged = await asyncio.to_thread(
-                self.api.get_my_merge_requests, 'merged', 50, DEFAULT_MERGED_WINDOW_DAYS
-            )
-        except Exception:
-            return
-        if not merged:
-            return
-        # ponytail: 1 tag-check API call per recently-merged MR — bounded by my merged MRs in the window; no cache (untagged must drop off once a tag lands)
-        checks = await asyncio.gather(*(
-            asyncio.to_thread(self.api.commit_has_tag, m.get('project_path') or '', m.get('merge_commit_sha'))
-            for m in merged
-        ), return_exceptions=True)
-        existing = {(m.get('project_path'), m.get('iid')) for m in self.mrs}
-        add = [
-            m for m, tagged in zip(merged, checks)
-            if tagged is False and (m.get('project_path'), m.get('iid')) not in existing
-        ]
-        if not add:
-            return
-        self.mrs.extend(add)
-        await self._backfill_head_pipelines(add)
 
     async def _safe_refresh(self) -> None:
         if self._refreshing:
@@ -2195,14 +2199,16 @@ class MyMergeRequestsScreen(ScreenBase):
         self.query_one("#mr-filter", Input).focus()
 
     async def action_toggle_state(self) -> None:
-        try:
-            idx = MR_STATE_CYCLE.index(self.state)
-        except ValueError:
-            idx = -1
-        self.state = MR_STATE_CYCLE[(idx + 1) % len(MR_STATE_CYCLE)]
+        await self._set_state(_next_mr_state(self.state))
+
+    async def action_toggle_all(self) -> None:
+        await self._set_state('opened' if self.state == 'all' else 'all')
+
+    async def _set_state(self, state) -> None:
+        self.state = state
         self._unresolved_cache.clear()
         self._related_cache.clear()
-        await self._show_loading("loading MRs...")
+        await self._show_loading(f"loading {_mr_state_label(state)} MRs...")
         try:
             await self.load_mrs()
         finally:
@@ -2884,10 +2890,9 @@ class MyReviewsScreen(ScreenBase):
 
 class ProjectMergeRequestsScreen(ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "s": "toggle_state", "A": "toggle_auto_merge", "u": "assign"}
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "s": "toggle_state", "a": "toggle_all", "A": "toggle_auto_merge", "u": "assign"}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
-    STATE_CYCLE = ['merged', 'closed', 'opened', 'all']
 
     def __init__(self, api: GitLabAPI, project_path: str):
         super().__init__()
@@ -2895,7 +2900,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
         self.project_path = project_path
         self.mrs = []
         self.filtered_mrs = []
-        self.state = 'merged'
+        self.state = 'opened'
         self._refresh_timer = None
         self._refreshing = False
         self._fetch_error = None
@@ -2907,15 +2912,17 @@ class ProjectMergeRequestsScreen(ScreenBase):
         return [
             ("GitLab", self.api.config.gitlab_url),
             ("Project", self.project_path),
-            ("State", self.state),
+            ("State", _mr_state_label(self.state)),
             ("MRs", count),
         ]
 
     def _keys(self):
+        state_key, all_key = _mr_state_keys(self.state)
         return [
-            [("/", "filter"),   ("enter", "view"),         ("r", "refresh")],
-            [("b", "browser"),  ("y", "copy url"),         ("s", f"state:{self.state}")],
-            [("A", "auto-merge"), ("u", "assign"),       ("q", "back")],
+            [("/", "filter"),     ("enter", "view"),  ("r", "refresh")],
+            [("b", "browser"),    ("y", "copy url"),  state_key],
+            [("A", "auto-merge"), ("u", "assign"),    all_key],
+            [("q", "back")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2942,7 +2949,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
         except Exception:
             pass
         count = f"{shown}/{total} MRs" if shown != total else f"{total} MRs"
-        parts = [count, ("state", self.state)]
+        parts = [count, ("state", _mr_state_label(self.state))]
         if text_filter:
             parts.append(("filter", text_filter))
         return _status_line(parts)
@@ -2986,14 +2993,17 @@ class ProjectMergeRequestsScreen(ScreenBase):
 
     async def load_mrs(self) -> None:
         try:
-            self.mrs = await asyncio.to_thread(self.api.get_project_merge_requests, self.project_path, self.state)
+            self.mrs = await asyncio.to_thread(self.api.get_project_merge_requests, self.project_path, _mr_api_state(self.state))
         except Exception as e:
             self._fetch_error = f"{type(e).__name__}"
             _dbg(f"project load_mrs fetch failed: {type(e).__name__}: {e}")
             self._refresh_status()
             return
         self._fetch_error = None
-        if self.mrs and self.state in ('opened', 'all'):
+        await self._backfill_head_pipelines(self.mrs)
+        if self.state == 'failed':
+            self.mrs = [m for m in self.mrs if m.get('head_pipeline_status') == 'failed']
+        if self.mrs and self.state in ('opened', 'failed', 'all'):
             await self._backfill_approvals(self.mrs)
         self._apply_filter()
         try:
@@ -3001,6 +3011,8 @@ class ProjectMergeRequestsScreen(ScreenBase):
             self.query_one("#header", K9sHeader).set_keys(self._keys())
         except Exception:
             pass
+
+    _backfill_head_pipelines = MyMergeRequestsScreen._backfill_head_pipelines
 
     async def _backfill_approvals(self, mrs) -> None:
         todo = [m for m in mrs if m.get('state') == 'opened' and m.get('project_path') and m.get('iid') is not None and m.get('approvals_count') is None]
@@ -3097,12 +3109,14 @@ class ProjectMergeRequestsScreen(ScreenBase):
         self.query_one("#proj-mr-filter", Input).focus()
 
     async def action_toggle_state(self) -> None:
-        try:
-            idx = self.STATE_CYCLE.index(self.state)
-        except ValueError:
-            idx = -1
-        self.state = self.STATE_CYCLE[(idx + 1) % len(self.STATE_CYCLE)]
-        await self._show_loading("loading MRs...")
+        await self._set_state(_next_mr_state(self.state))
+
+    async def action_toggle_all(self) -> None:
+        await self._set_state('opened' if self.state == 'all' else 'all')
+
+    async def _set_state(self, state) -> None:
+        self.state = state
+        await self._show_loading(f"loading {_mr_state_label(state)} MRs...")
         try:
             await self.load_mrs()
         finally:

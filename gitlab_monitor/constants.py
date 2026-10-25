@@ -50,7 +50,7 @@ MAX_LOG_LINES = 5000
 INFO_PANE_WIDTH = 56
 KEY_COLS = 3
 
-MR_STATE_CYCLE = ['opened', 'merged', 'closed', 'all']
+MR_STATE_CYCLE = ['opened', 'merged', 'closed', 'failed']
 MERGED_WINDOW_CYCLE = [1, 7, 10]
 DEFAULT_MERGED_WINDOW_DAYS = 7
 

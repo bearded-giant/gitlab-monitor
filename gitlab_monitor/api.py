@@ -754,14 +754,24 @@ class GitLabAPI:
         mr.merge(squash=squash, should_remove_source_branch=delete_source_branch)
         return True
 
-    def commit_has_tag(self, project_path, sha):
-        if not sha:
-            return False
-        project = self.gl.projects.get(project_path, lazy=True)
-        refs = project.commits.get(sha, lazy=True).refs('tag')
-        if not isinstance(refs, list):
-            return bool(refs)
-        return any((r.get('type') == 'tag') if isinstance(r, dict) else False for r in refs)
+    def get_mr_head_pipelines(self, project_path, iids):
+        # REST MR lists omit head_pipeline; one GraphQL call covers every MR in the project
+        data = self._graphql(
+            'query($p:ID!,$i:[String!]){project(fullPath:$p){mergeRequests(iids:$i,first:100){nodes{iid headPipeline{id status path}}}}}',
+            {'p': project_path, 'i': [str(i) for i in iids]},
+        )
+        base = self.config.gitlab_url.rstrip('/')
+        out = {}
+        for n in ((data.get('project') or {}).get('mergeRequests') or {}).get('nodes') or []:
+            hp = n.get('headPipeline')
+            if not hp:
+                continue
+            out[int(n['iid'])] = {
+                'status': (hp.get('status') or '').lower() or None,
+                'id': int(str(hp.get('id') or '').rsplit('/', 1)[-1] or 0) or None,
+                'web_url': f"{base}{hp['path']}" if hp.get('path') else None,
+            }
+        return out
 
     def create_mr_note(self, project_path, iid, body):
         project = self.gl.projects.get(project_path, lazy=True)
