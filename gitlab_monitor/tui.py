@@ -1957,6 +1957,7 @@ class MyMergeRequestsScreen(ScreenBase):
 
     async def load_mrs(self) -> None:
         days = self.window_days if self._is_windowed_state() else None
+        old = self.mrs
         try:
             self.mrs = await asyncio.to_thread(self.api.get_my_merge_requests, _mr_api_state(self.state), 50, days)
         except Exception as e:
@@ -1965,6 +1966,7 @@ class MyMergeRequestsScreen(ScreenBase):
             self._refresh_status()
             return
         self._fetch_error = None
+        self._carry_settled(old)
         if self.state == 'failed':
             await self._backfill_head_pipelines(self.mrs)
             self.mrs = [m for m in self.mrs if m.get('head_pipeline_status') == 'failed']
@@ -2019,8 +2021,21 @@ class MyMergeRequestsScreen(ScreenBase):
                 mr['approvals_count'] = r.get('approvals_count', 0)
                 mr['approvals_required'] = r.get('approvals_required', 0)
 
+    def _carry_settled(self, old) -> None:
+        # approvals and thread changes write notes, which bump the MR's updated_at
+        prev = {(m.get('project_path'), m.get('iid')): m for m in old}
+        for m in self.mrs:
+            key = (m.get('project_path'), m.get('iid'))
+            p = prev.get(key)
+            if p is not None and m.get('updated_at') and p.get('updated_at') == m.get('updated_at'):
+                for k in ('approvals_count', 'approvals_required', 'user_has_approved'):
+                    if k in p:
+                        m[k] = p[k]
+            else:
+                getattr(self, '_unresolved_cache', {}).pop(key, None)
+
     async def _fetch_unresolved_counts(self, mrs) -> None:
-        todo = [(m['project_path'], m['iid']) for m in mrs if m.get('project_path')]
+        todo = [(m['project_path'], m['iid']) for m in mrs if m.get('project_path') and (m['project_path'], m['iid']) not in self._unresolved_cache]
         if not todo:
             return
         results = await asyncio.gather(*(
@@ -2960,6 +2975,7 @@ class MyReviewsScreen(ScreenBase):
         return self.api.config.review_files.index()
 
     async def load_mrs(self) -> None:
+        old = self.mrs
         try:
             self.mrs = await asyncio.to_thread(self.api.get_review_requests, 'opened', 100)
         except Exception as e:
@@ -2968,6 +2984,7 @@ class MyReviewsScreen(ScreenBase):
             self._refresh_status()
             return
         self._fetch_error = None
+        self._carry_settled(old)
         try:
             self._review_index = await asyncio.to_thread(self._reload_review_state)
         except Exception as e:
@@ -2987,6 +3004,7 @@ class MyReviewsScreen(ScreenBase):
 
     _backfill_head_pipelines = MyMergeRequestsScreen._backfill_head_pipelines
     _fetch_unresolved_counts = MyMergeRequestsScreen._fetch_unresolved_counts
+    _carry_settled = MyMergeRequestsScreen._carry_settled
     _safe_refresh = MyMergeRequestsScreen._safe_refresh
     on_unmount = MyMergeRequestsScreen.on_unmount
     on_input_changed = MyMergeRequestsScreen.on_input_changed
@@ -3003,7 +3021,7 @@ class MyReviewsScreen(ScreenBase):
     on_data_table_row_selected = MyMergeRequestsScreen.on_data_table_row_selected
 
     async def _backfill_approvals(self, mrs) -> None:
-        todo = [m for m in mrs if m.get('project_path') and m.get('iid') is not None]
+        todo = [m for m in mrs if m.get('project_path') and m.get('iid') is not None and m.get('approvals_count') is None]
         if not todo:
             return
         results = await asyncio.gather(*(
@@ -3293,6 +3311,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
         self._refresh_status()
 
     async def load_mrs(self) -> None:
+        old = self.mrs
         try:
             self.mrs = await asyncio.to_thread(self.api.get_project_merge_requests, self.project_path, _mr_api_state(self.state))
         except Exception as e:
@@ -3301,6 +3320,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
             self._refresh_status()
             return
         self._fetch_error = None
+        self._carry_settled(old)
         await self._backfill_head_pipelines(self.mrs)
         if self.state == 'failed':
             self.mrs = [m for m in self.mrs if m.get('head_pipeline_status') == 'failed']
@@ -3314,6 +3334,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
             pass
 
     _backfill_head_pipelines = MyMergeRequestsScreen._backfill_head_pipelines
+    _carry_settled = MyMergeRequestsScreen._carry_settled
 
     async def _backfill_approvals(self, mrs) -> None:
         todo = [m for m in mrs if m.get('state') == 'opened' and m.get('project_path') and m.get('iid') is not None and m.get('approvals_count') is None]

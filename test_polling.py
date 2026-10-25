@@ -263,3 +263,46 @@ def test_my_reviews_manual_refresh_reloads():
             return api.lists - lists
 
     assert asyncio.run(run()) == 1
+
+
+def _tick_lookups(screen_cls):
+    async def run():
+        api = _MRListApi()
+        app = App()
+        async with app.run_test() as pilot:
+            screen = screen_cls(api)
+            await app.push_screen(screen)
+            await _settle(pilot)
+            initial = (sorted(api.approvals), sorted(api.unresolved))
+
+            api.approvals.clear()
+            api.unresolved.clear()
+            api.rows[1]["updated_at"] = "2026-10-21T00:00:00Z"
+            await screen._safe_refresh()
+            tick = (sorted(api.approvals), sorted(api.unresolved))
+            shown = {m["iid"]: m.get("approvals_count") for m in screen.mrs}
+
+            api.unresolved.clear()
+            lists = api.lists
+            await screen.action_refresh()
+            manual = (api.lists - lists, sorted(api.unresolved))
+        return initial, tick, shown, manual
+
+    return asyncio.run(run())
+
+
+def test_my_mrs_tick_reuses_settled_row_lookups():
+    initial, tick, shown, manual = _tick_lookups(tui.MyMergeRequestsScreen)
+    assert initial == ([1, 2, 3], [1, 2, 3])
+    # notes and approvals bump updated_at, so only the changed MR is looked up again
+    assert tick == ([2], [2])
+    assert shown == {1: 1, 2: 1, 3: 1}
+    assert manual == (1, [1, 2, 3])
+
+
+def test_my_reviews_tick_reuses_settled_row_lookups():
+    initial, tick, shown, manual = _tick_lookups(tui.MyReviewsScreen)
+    assert initial == ([1, 2, 3], [1, 2, 3])
+    assert tick == ([2], [2])
+    assert shown == {1: 1, 2: 1, 3: 1}
+    assert manual == (1, [1, 2, 3])
