@@ -306,3 +306,26 @@ def test_my_reviews_tick_reuses_settled_row_lookups():
     assert tick == ([2], [2])
     assert shown == {1: 1, 2: 1, 3: 1}
     assert manual == (1, [1, 2, 3])
+
+
+def test_mr_subresource_lookups_are_one_request():
+    from gitlab_monitor.api import GitLabAPI
+
+    api = GitLabAPI(_Config())
+    paths = []
+
+    def fake_get(path, **kw):
+        paths.append(path)
+        return {"iid": 7, "approved_by": [], "approvals_required": 1, "user_has_approved": False, "rules": []}
+
+    def fake_list(path, **kw):
+        paths.append(path)
+        return []
+
+    api.gl.http_get = fake_get
+    api.gl.http_list = fake_list
+    api.get_mr_approvals_summary("group/project", 7)
+    api.get_mr_approval_state("group/project", 7)
+    api.get_mr_discussions("group/project", 7)
+    base = "/projects/group%2Fproject/merge_requests/7"
+    assert paths == [f"{base}/approvals", f"{base}/approval_state", f"{base}/discussions"]

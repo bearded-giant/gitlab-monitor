@@ -525,7 +525,7 @@ class GitLabAPI:
     def get_mr_approval_state(self, project_path, iid):
         try:
             project = self.gl.projects.get(project_path, lazy=True)
-            mr = project.mergerequests.get(iid)
+            mr = project.mergerequests.get(iid, lazy=True)
             state = mr.approval_state.get()
             rules_raw = getattr(state, 'rules', None) or []
             rules = []
@@ -615,7 +615,7 @@ class GitLabAPI:
     def get_mr_discussions(self, project_path, iid):
         try:
             project = self.gl.projects.get(project_path, lazy=True)
-            mr = project.mergerequests.get(iid)
+            mr = project.mergerequests.get(iid, lazy=True)
             discussions = mr.discussions.list(all=True)
             results = []
             for d in discussions:
@@ -658,7 +658,7 @@ class GitLabAPI:
     def get_mr_approvals_summary(self, project_path, iid):
         try:
             project = self.gl.projects.get(project_path, lazy=True)
-            mr = project.mergerequests.get(iid)
+            mr = project.mergerequests.get(iid, lazy=True)
             approvals = mr.approvals.get()
             approved_by = getattr(approvals, 'approved_by', None) or []
             return {
