@@ -461,11 +461,11 @@ class GitLabAPI:
         mrs = self.gl.mergerequests.list(**params)
         return [self._mr_to_dict(mr) for mr in mrs]
 
-    def get_review_requests(self, state='opened', limit=100):
+    def get_review_requests(self, state='opened', limit=100, approved_by_me=False):
         uid = self.current_user_id()
         if uid is None:
             return []
-        mrs = self.gl.mergerequests.list(
+        params = dict(
             reviewer_id=uid,
             scope='all',
             get_all=False,
@@ -474,6 +474,9 @@ class GitLabAPI:
             order_by='updated_at',
             sort='desc',
         )
+        if approved_by_me:
+            params['approved_by_ids'] = [uid]
+        mrs = self.gl.mergerequests.list(**params)
         return [self._mr_to_dict(mr) for mr in mrs]
 
     def get_project_merge_requests(self, project_path, state='merged', limit=50):

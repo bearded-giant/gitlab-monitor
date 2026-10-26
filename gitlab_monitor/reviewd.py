@@ -186,12 +186,12 @@ def review_one(config, api, mr, reason):
 def refresh_approvals(config, api, mrs):
     files = config.review_files
     index = files.index()
-    for mr in mrs:
-        entry = index.get(_key(mr))
-        if not entry or entry.get('sha') != mr.get('sha'):
-            continue
-        summ = api.get_mr_approvals_summary(mr['project_path'], mr['iid']) or {}
-        approved = bool(summ.get('user_has_approved'))
+    tracked = [(mr, index[_key(mr)]) for mr in mrs if index.get(_key(mr), {}).get('sha') == mr.get('sha')]
+    if not tracked:
+        return
+    mine = {_key(m) for m in api.get_review_requests(approved_by_me=True)}
+    for mr, entry in tracked:
+        approved = _key(mr) in mine
         if approved != bool(entry.get('approved_by_me')):
             files.update_meta(mr['project_path'], mr['iid'], approved_by_me=approved)
             _log(f"approved_by_me {_key(mr)} -> {approved}")

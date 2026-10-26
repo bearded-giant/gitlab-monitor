@@ -96,6 +96,34 @@ def test_run_review_records_models_used():
     assert res['models'] == ['claude-sonnet-5-5']
 
 
+def test_refresh_approvals_one_request_per_tick():
+    # launchd ticks every 5 min, 24/7: a per-MR approvals lookup ran 15 req/tick against shared GitLab
+    rf = ReviewFiles(Path(tempfile.mkdtemp()))
+    for iid, approved in ((1, False), (2, True), (3, False)):
+        rf.write('g/p', iid, {'sha': f's{iid}', 'approved_by_me': approved, 'status': 'read'}, 'b')
+    rf.write('g/p', 4, {'sha': 'old', 'approved_by_me': False, 'status': 'read'}, 'b')
+    mrs = [_mr(1, 's1'), _mr(2, 's2'), _mr(3, 's3'), _mr(4, 'new'), _mr(5, 's5')]
+    calls = []
+
+    class Api:
+        def get_review_requests(self, **kw):
+            calls.append(kw)
+            return [_mr(1, 's1'), _mr(4, 'new')]
+
+        def get_mr_approvals_summary(self, *a):
+            raise AssertionError('per-MR approvals lookup on a tick')
+
+    config = type('C', (), {'review_files': rf})()
+    reviewd.refresh_approvals(config, Api(), mrs)
+    assert calls == [{'approved_by_me': True}], calls
+    got = {i: rf.get('g/p', i)['approved_by_me'] for i in (1, 2, 3, 4)}
+    assert got == {1: True, 2: False, 3: False, 4: False}, got
+
+    calls.clear()
+    reviewd.refresh_approvals(config, Api(), [_mr(5, 's5')])
+    assert calls == []
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):
