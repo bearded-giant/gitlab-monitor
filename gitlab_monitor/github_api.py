@@ -206,6 +206,25 @@ class GitHubAPI:
     def host_label(self, project_path=None):
         return ('GitHub', self.web_url.replace('https://', ''))
 
+    def project_url(self, project_path):
+        return f'{self.web_url}/{self._repo(project_path)}'
+
+    def mr_url(self, project_path, iid):
+        return f'{self.project_url(project_path)}/pull/{iid}'
+
+    def pipeline_url(self, project_path, pipeline_id):
+        return f'{self.project_url(project_path)}/actions/runs/{pipeline_id}'
+
+    def commit_url(self, project_path, sha):
+        return f'{self.project_url(project_path)}/commit/{sha}'
+
+    def tag_url(self, project_path, name):
+        return f'{self.project_url(project_path)}/releases/tag/{name}'
+
+    def dashboard_url(self, merged=False):
+        q = 'is:pr+is:merged+author:@me' if merged else 'is:pr+is:open+author:@me'
+        return f'{self.web_url}/pulls?q={q}'
+
     @staticmethod
     def _repo_to_dict(r):
         return {

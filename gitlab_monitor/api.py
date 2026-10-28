@@ -95,6 +95,25 @@ class GitLabAPI:
     def host_label(self, project_path=None):
         return ('GitLab', self.config.gitlab_url)
 
+    def project_url(self, project_path):
+        return f"{self.config.gitlab_url.rstrip('/')}/{project_path}"
+
+    def mr_url(self, project_path, iid):
+        return f"{self.project_url(project_path)}/-/merge_requests/{iid}"
+
+    def pipeline_url(self, project_path, pipeline_id):
+        return f"{self.project_url(project_path)}/-/pipelines/{pipeline_id}"
+
+    def commit_url(self, project_path, sha):
+        return f"{self.project_url(project_path)}/-/commit/{sha}"
+
+    def tag_url(self, project_path, name):
+        return f"{self.project_url(project_path)}/-/tags/{name}"
+
+    def dashboard_url(self, merged=False):
+        base = f"{self.config.gitlab_url.rstrip('/')}/dashboard/merge_requests"
+        return f"{base}/merged" if merged else base
+
     @staticmethod
     def _project_activity(p):
         # GitLab's last_activity_at lags + skips pipeline events; take max with updated_at
