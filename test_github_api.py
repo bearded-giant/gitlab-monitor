@@ -263,3 +263,12 @@ def test_tag_deploys_from_deployments_api():
     rows = api.list_tag_pipelines('gh:o/r', username='me')
     assert [r['status'] for r in rows] == ['running', 'success'] and rows[0]['user'] == 'vercel[bot]'
     assert rows[0]['web_url'].endswith('/o/r/deployments') and rows[1]['web_url'] == 'https://l'
+
+
+def test_paged_keeps_page_size_stable_past_100():
+    def page(kw):
+        p, n = kw['params']['page'], kw['params']['per_page']
+        lo = (p - 1) * n
+        return list(range(lo, min(lo + n, 250)))
+    api = _api({'/x': page})
+    assert api._paged('/x', 250) == list(range(250))

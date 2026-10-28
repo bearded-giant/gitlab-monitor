@@ -472,7 +472,7 @@ class Config:
     def github_token(self) -> Optional[str]:
         token = self._config.get('github_token')
         if token is None and os.environ.get('GLMON_GH_AUTH', '1') not in ('0', 'false', 'off'):
-            # interactive fallback only; launchd daemons use the token file
+            # GLMON_GH_AUTH=0 keeps a daemon from shelling out to gh
             try:
                 out = subprocess.run(['gh', 'auth', 'token'], capture_output=True, text=True, timeout=5)
                 token = out.stdout.strip() if out.returncode == 0 else ''

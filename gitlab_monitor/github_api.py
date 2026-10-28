@@ -136,12 +136,13 @@ class GitHubAPI:
     def _paged(self, path, limit, key=None, **params):
         out = []
         page = 1
+        per_page = min(100, limit)
         while len(out) < limit:
-            params.update(per_page=min(100, limit - len(out)), page=page)
+            params.update(per_page=per_page, page=page)
             data = self._get(path, **params)
             items = data.get(key) or [] if key else data
             out.extend(items)
-            if len(items) < params['per_page']:
+            if len(items) < per_page:
                 break
             page += 1
         return out[:limit]
@@ -536,8 +537,8 @@ class GitHubAPI:
             'web_url': (run or {}).get('url'),
         }
 
-    def _gql_pr_to_dict(self, n):
-        me = self.current_username()
+    def _gql_pr_to_dict(self, n, me=None):
+        me = self.current_username() if me is None else me
         reviews = (n.get('latestReviews') or {}).get('nodes') or []
         states = {(r.get('author') or {}).get('login'): r.get('state') for r in reviews}
         approved_by = [u for u, s in states.items() if s == 'APPROVED' and u]
@@ -608,7 +609,8 @@ class GitHubAPI:
                 {'q': query, 'n': min(100, max(1, limit - len(out))), 'c': cursor},
             )
             blk = data.get('search') or {}
-            out.extend(self._gql_pr_to_dict(n) for n in blk.get('nodes') or [] if n)
+            me = self.current_username()
+            out.extend(self._gql_pr_to_dict(n, me) for n in blk.get('nodes') or [] if n)
             page = blk.get('pageInfo') or {}
             if not get_all or not page.get('hasNextPage') or len(out) >= limit:
                 break
@@ -637,7 +639,8 @@ class GitHubAPI:
             {'o': owner, 'n': name, 's': _PR_STATES.get(state, _PR_STATES['all']), 'l': min(limit, 100)},
         )
         nodes = ((data.get('repository') or {}).get('pullRequests') or {}).get('nodes') or []
-        return [self._gql_pr_to_dict(n) for n in nodes]
+        me = self.current_username()
+        return [self._gql_pr_to_dict(n, me) for n in nodes]
 
     def _pr_node(self, project_path, iid):
         owner, name = self._owner_name(project_path)
@@ -903,11 +906,12 @@ class GitHubAPI:
             for lid, q, with_nodes in aliases
         )
         data = self._graphql(f'query{{{body}}}' + _PR_NODE)
+        me = self.current_username()
         out = {}
         for s in list(full) + list(counts):
             blk = data.get(s[0]) or {}
             out[s[0]] = {'count': blk.get('issueCount') or 0,
-                         'mrs': [self._gql_pr_to_dict(n) for n in blk.get('nodes') or [] if n]}
+                         'mrs': [self._gql_pr_to_dict(n, me) for n in blk.get('nodes') or [] if n]}
         return out
 
     # -- tags / commits ------------------------------------------------------
