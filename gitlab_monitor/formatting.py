@@ -627,3 +627,67 @@ def markdown_segments(body):
         stack.append(node[2])
     stack[-1].append(('md', text[pos:]))
     return _finish_segments(root, store)
+
+
+_GT_SCORE_RE = re.compile(r'greptile_confidence_score:(\d+)|Confidence Score:\s*(\d+)\s*/\s*5', re.I)
+_GT_PRIORITY_RE = re.compile(r'<img\b[^>]*\balt="(P\d)"', re.I)
+_GT_BADGE_LINK_RE = re.compile(r'<a\b[^>]*>\s*<img\b[^>]*>\s*</a>', re.I)
+# prompt-to-fix blocks repeat the finding; mermaid diagrams can't render in a terminal
+_GT_DROP_RE = re.compile(
+    r'<details\b[^>]*>(?:(?!</details>).)*?(?:Prompt To Fix|```mermaid)(?:(?!</details>).)*</details\s*>',
+    re.S | re.I,
+)
+_GT_TITLE_RE = re.compile(r'\*\*(.+?)\*\*')
+
+
+def format_local(iso_str):
+    if not iso_str:
+        return ""
+    return datetime.fromisoformat(iso_str.replace('Z', '+00:00')).astimezone().strftime('%Y-%m-%d %H:%M')
+
+
+def _is_greptile(d):
+    notes = d.get('notes') or []
+    return bool(notes) and 'greptile' in (notes[0].get('author') or '').lower()
+
+
+def is_greptile_summary(d):
+    return _is_greptile(d) and 'greptile_summary' in (d['notes'][0].get('body') or '')
+
+
+def greptile_review(discussions):
+    summary = None
+    by_sha = {}
+    for d in discussions:
+        if not _is_greptile(d):
+            continue
+        note = d['notes'][0]
+        body = note.get('body') or ''
+        if is_greptile_summary(d):
+            m = _GT_SCORE_RE.search(body)
+            segments = []
+            for seg in markdown_segments(_GT_DROP_RE.sub('', re.sub(r'<h2\b.*?</h2>', '', body, flags=re.S | re.I))):
+                segments.extend(seg[2] if seg[0] == 'details' and seg[1] == 'Summary' else [seg])
+            summary = {
+                'score': int(m.group(1) or m.group(2)) if m else None,
+                'updated_at': note.get('updated_at') or note.get('created_at') or '',
+                'segments': segments,
+            }
+        elif d.get('resolvable'):
+            p = _GT_PRIORITY_RE.search(body)
+            body = _GT_DROP_RE.sub('', _GT_BADGE_LINK_RE.sub('', body)).strip()
+            t = _GT_TITLE_RE.match(body)
+            by_sha.setdefault(d.get('head_sha') or '', []).append({
+                'priority': p.group(1) if p else '',
+                'title': t.group(1) if t else '',
+                'segments': markdown_segments(body[t.end():] if t else body),
+                'unresolved': bool(d.get('unresolved')),
+                'created_at': note.get('created_at') or '',
+                'path': d.get('path') or '',
+                'line': d.get('line'),
+            })
+    if summary is None and not by_sha:
+        return None
+    # shortcut: review # = order of reviewed head shas that drew findings, a clean review in between shifts later numbers; read greptile's review list if that bites
+    reviews = sorted(by_sha.values(), key=lambda fs: min(f['created_at'] for f in fs))
+    return {**(summary or {'score': None, 'updated_at': '', 'segments': []}), 'reviews': reviews}

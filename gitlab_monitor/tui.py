@@ -79,6 +79,9 @@ from .formatting import (
     format_activity_strip,
     markdown_segments,
     diff_text,
+    format_local,
+    greptile_review,
+    is_greptile_summary,
 )
 from .api import GitLabAPI, ACTIVITY_TTL
 
@@ -3506,6 +3509,7 @@ class MergeRequestDetailScreen(ScreenBase):
         "R": "review_now",
         "u": "assign",
         "e": "toggle_details",
+        "G": "focus_greptile",
     }
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
@@ -3522,6 +3526,7 @@ class MergeRequestDetailScreen(ScreenBase):
         self._refresh_timer = None
         self._refreshing = False
         self._disc_sig = None
+        self._gt_sig = None
 
     def _info_pairs(self):
         if not self.mr:
@@ -3555,24 +3560,29 @@ class MergeRequestDetailScreen(ScreenBase):
             [("A", "auto-merge"), ("f", resolved_label),("t", auto_label)],
             [("M", "merge"),      ("v", "review"),     ("R", "review now")],
             [("u", "assign"),     ("e", "details"),    ("q", "back")],
+            [("G", "greptile")],
         ]
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
-        yield ScrollableContainer(
-            Horizontal(
-                Static("", id="mr-col-left", classes="mr-col"),
-                Static("", id="mr-col-right", classes="mr-col"),
-                id="mr-cols",
+        yield Horizontal(
+            ScrollableContainer(
+                Horizontal(
+                    Static("", id="mr-col-left", classes="mr-col"),
+                    Static("", id="mr-col-right", classes="mr-col"),
+                    id="mr-cols",
+                ),
+                Static("", id="mr-approvals"),
+                Static("", id="mr-review"),
+                Static("", id="mr-desc-heading", classes="mr-section"),
+                Markdown("", id="mr-desc"),
+                Static("", id="mr-disc-heading", classes="mr-section"),
+                Container(id="mr-disc"),
+                id="mr-body-scroll",
             ),
-            Static("", id="mr-approvals"),
-            Static("", id="mr-review"),
-            Static("", id="mr-desc-heading", classes="mr-section"),
-            Markdown("", id="mr-desc"),
-            Static("", id="mr-disc-heading", classes="mr-section"),
-            Container(id="mr-disc"),
-            id="mr-body-scroll",
+            ScrollableContainer(id="mr-greptile"),
+            id="mr-split",
         )
         yield StatusBar(self._status_text(), id="statusbar")
 
@@ -3646,6 +3656,7 @@ class MergeRequestDetailScreen(ScreenBase):
             pass
         self._render_body()
         await self._render_discussions()
+        await self._render_greptile()
         self._refresh_status()
 
     async def _safe_refresh(self) -> None:
@@ -3779,7 +3790,7 @@ class MergeRequestDetailScreen(ScreenBase):
         visible = self.discussions if self.show_resolved else [
             d for d in self.discussions if d.get('unresolved') or not d.get('resolvable')
         ]
-        return [d for d in visible if not d.get('system')]
+        return [d for d in visible if not d.get('system') and not is_greptile_summary(d)]
 
     @staticmethod
     def _note_header(d, note, first) -> Text:
@@ -3834,6 +3845,73 @@ class MergeRequestDetailScreen(ScreenBase):
         await box.remove_children()
         if widgets:
             await box.mount_all(widgets)
+
+    @staticmethod
+    def _greptile_head(gt) -> Text:
+        out = Text()
+        out.append(" GREPTILE ", style="bold #1e1e2e on #a6e3a1")
+        score = gt['score']
+        if score is not None:
+            color = "#a6e3a1" if score >= 4 else ("#f9e2af" if score == 3 else "#f38ba8")
+            out.append(f"  {score}/5", style=f"bold {color}")
+        if gt['updated_at']:
+            out.append("\nupdated ", style="bold #f9e2af")
+            out.append(format_local(gt['updated_at']), style="#cdd6f4")
+            out.append(f"  ({format_age(gt['updated_at'])})", style="dim italic #a6adc8")
+        return out
+
+    @staticmethod
+    def _finding_head(f) -> Text:
+        out = Text()
+        if f['unresolved']:
+            out.append("● open", style="bold #f38ba8")
+        else:
+            out.append("✓ resolved", style="dim #a6e3a1")
+        if f['priority']:
+            out.append(f"  {f['priority']}", style="bold #fab387")
+        out.append(f"  {format_local(f['created_at'])}", style="dim italic #a6adc8")
+        if f['title']:
+            out.append(f"\n{f['title']}", style="bold #cdd6f4")
+        if f['path']:
+            out.append(f"\n{f['path']}:{f['line']}" if f['line'] else f"\n{f['path']}", style="#89dceb")
+        return out
+
+    async def _render_greptile(self) -> None:
+        gt = greptile_review(self.discussions) if self.mr else None
+        sig = (repr(gt), self.show_resolved)
+        if sig == self._gt_sig:
+            return
+        self._gt_sig = sig
+        try:
+            pane = self.query_one("#mr-greptile", ScrollableContainer)
+        except Exception:
+            return
+        pane.display = gt is not None
+        widgets = []
+        if gt:
+            widgets.append(Static(self._greptile_head(gt), classes="gt-head"))
+            widgets.extend(_note_widgets(gt['segments']))
+            findings = [f for r in gt['reviews'] for f in r]
+            open_n = sum(1 for f in findings if f['unresolved'])
+            heading = Text()
+            heading.append(" FINDINGS ", style="bold #1e1e2e on #89b4fa")
+            heading.append(f"  ({open_n} open · {len(findings) - open_n} resolved)", style="dim #a6adc8")
+            widgets.append(Static(heading, classes="mr-section"))
+            if not findings:
+                widgets.append(Static(Text("(no findings)", style="dim italic #6c7086")))
+            for n, review in enumerate(gt['reviews'], 1):
+                head = Text()
+                head.append(f"Review #{n}", style="bold #cba6f7")
+                head.append(f"  {format_local(review[0]['created_at'])}", style="#a6adc8")
+                items = [Static(head, classes="gt-review")]
+                for f in review:
+                    items.append(Static(self._finding_head(f), classes="mr-note-head"))
+                    if f['unresolved'] or self.show_resolved:
+                        items.extend(_note_widgets(f['segments']))
+                widgets.append(Container(*items, classes="mr-disc-item"))
+        await pane.remove_children()
+        if widgets:
+            await pane.mount_all(widgets)
 
     def _disc_heading_text(self) -> Text:
         non_system = self._visible_discussions()
@@ -3928,6 +4006,18 @@ class MergeRequestDetailScreen(ScreenBase):
             pass
         self._render_body()
         await self._render_discussions()
+        await self._render_greptile()
+
+    async def action_focus_greptile(self) -> None:
+        try:
+            pane = self.query_one("#mr-greptile", ScrollableContainer)
+            body = self.query_one("#mr-body-scroll", ScrollableContainer)
+        except Exception:
+            return
+        if not pane.display:
+            self.notify("No Greptile review on this MR", timeout=2)
+            return
+        (body if pane.has_focus else pane).focus()
 
     async def action_toggle_details(self) -> None:
         boxes = list(self.query(".mr-note-details"))
@@ -7439,12 +7529,47 @@ class PipelineMonitor(App):
         margin-top: 1;
     }
 
+    #mr-split {
+        height: 1fr;
+    }
+
     #mr-body-scroll {
         background: #1e1e2e;
         color: #cdd6f4;
         padding: 1 2;
         height: 1fr;
+        width: 1fr;
         scrollbar-size: 1 1;
+    }
+
+    #mr-greptile {
+        background: #181825;
+        color: #cdd6f4;
+        padding: 1 1;
+        height: 1fr;
+        width: 30%;
+        border-left: solid #313244;
+        scrollbar-size: 1 1;
+        display: none;
+    }
+
+    #mr-greptile:focus {
+        border-left: solid #a6e3a1;
+    }
+
+    .gt-head {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    .gt-review {
+        height: auto;
+        margin-top: 1;
+    }
+
+    #mr-greptile .mr-note-md, #mr-greptile .mr-note-md MarkdownH1,
+    #mr-greptile .mr-note-md MarkdownH2, #mr-greptile .mr-note-md MarkdownH3 {
+        background: #181825;
     }
 
     #mr-cols {

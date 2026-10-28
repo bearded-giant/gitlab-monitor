@@ -638,6 +638,7 @@ class GitLabAPI:
                             'author': (n.get('author') or {}).get('username', 'unknown'),
                             'body': n.get('body') or '',
                             'created_at': n.get('created_at', ''),
+                            'updated_at': n.get('updated_at', ''),
                             'system': bool(n.get('system')),
                             'resolved': bool(n.get('resolved')),
                             'resolvable': bool(n.get('resolvable')),
@@ -649,6 +650,7 @@ class GitLabAPI:
                     'system': bool(first.get('system')),
                     'path': pos.get('new_path') or pos.get('old_path') or '',
                     'line': pos.get('new_line') or pos.get('old_line'),
+                    'head_sha': pos.get('head_sha') or '',
                 })
             return results
         except Exception:
