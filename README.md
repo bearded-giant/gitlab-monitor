@@ -439,7 +439,8 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | `c` | Comment (`ctrl+s` posts) |
 | `p` / `k` | Open pipelines / commits |
 | `f` | Toggle resolved discussions (and resolved Greptile finding bodies) |
-| `G` | Move focus between the MR body and the Greptile pane, so arrow keys scroll it |
+| `G` | Open the MR in Greptile (the summary comment's "View in Greptile" link) |
+| `w` | Move focus between the MR body and the Greptile pane, so arrow keys scroll it |
 | `e` | Expand / collapse all `<details>` sections in discussions |
 | `t` | Toggle auto-refresh |
 | `g` | Go to another MR by number |

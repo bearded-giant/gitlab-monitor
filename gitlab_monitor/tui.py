@@ -3509,7 +3509,8 @@ class MergeRequestDetailScreen(ScreenBase):
         "R": "review_now",
         "u": "assign",
         "e": "toggle_details",
-        "G": "focus_greptile",
+        "G": "greptile_browser",
+        "w": "focus_greptile",
     }
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
@@ -3527,6 +3528,7 @@ class MergeRequestDetailScreen(ScreenBase):
         self._refreshing = False
         self._disc_sig = None
         self._gt_sig = None
+        self._greptile_url = ''
 
     def _info_pairs(self):
         if not self.mr:
@@ -3560,7 +3562,7 @@ class MergeRequestDetailScreen(ScreenBase):
             [("A", "auto-merge"), ("f", resolved_label),("t", auto_label)],
             [("M", "merge"),      ("v", "review"),     ("R", "review now")],
             [("u", "assign"),     ("e", "details"),    ("q", "back")],
-            [("G", "greptile")],
+            [("G", "greptile web"), ("w", "switch pane")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -3878,6 +3880,7 @@ class MergeRequestDetailScreen(ScreenBase):
 
     async def _render_greptile(self) -> None:
         gt = greptile_review(self.discussions) if self.mr else None
+        self._greptile_url = gt['url'] if gt else ''
         sig = (repr(gt), self.show_resolved)
         if sig == self._gt_sig:
             return
@@ -4007,6 +4010,12 @@ class MergeRequestDetailScreen(ScreenBase):
         self._render_body()
         await self._render_discussions()
         await self._render_greptile()
+
+    async def action_greptile_browser(self) -> None:
+        if self._greptile_url:
+            webbrowser.open(self._greptile_url)
+        else:
+            self.notify("No Greptile link on this MR", timeout=2)
 
     async def action_focus_greptile(self) -> None:
         try:

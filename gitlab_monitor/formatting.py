@@ -638,6 +638,7 @@ _GT_DROP_RE = re.compile(
     re.S | re.I,
 )
 _GT_TITLE_RE = re.compile(r'\*\*(.+?)\*\*')
+_GT_URL_RE = re.compile(r'href="([^"?]*/-/pull/\d+)')
 
 
 def format_local(iso_str):
@@ -665,6 +666,7 @@ def greptile_review(discussions):
         body = note.get('body') or ''
         if is_greptile_summary(d):
             m = _GT_SCORE_RE.search(body)
+            url = _GT_URL_RE.search(body)
             segments = []
             for seg in markdown_segments(_GT_DROP_RE.sub('', re.sub(r'<h2\b.*?</h2>', '', body, flags=re.S | re.I))):
                 segments.extend(seg[2] if seg[0] == 'details' and seg[1] == 'Summary' else [seg])
@@ -672,6 +674,7 @@ def greptile_review(discussions):
                 'score': int(m.group(1) or m.group(2)) if m else None,
                 'updated_at': note.get('updated_at') or note.get('created_at') or '',
                 'segments': segments,
+                'url': url.group(1) if url else '',
             }
         elif d.get('resolvable'):
             p = _GT_PRIORITY_RE.search(body)
@@ -690,4 +693,4 @@ def greptile_review(discussions):
         return None
     # shortcut: review # = order of reviewed head shas that drew findings, a clean review in between shifts later numbers; read greptile's review list if that bites
     reviews = sorted(by_sha.values(), key=lambda fs: min(f['created_at'] for f in fs))
-    return {**(summary or {'score': None, 'updated_at': '', 'segments': []}), 'reviews': reviews}
+    return {**(summary or {'score': None, 'updated_at': '', 'segments': [], 'url': ''}), 'reviews': reviews}

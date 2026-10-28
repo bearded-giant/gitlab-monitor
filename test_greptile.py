@@ -7,7 +7,7 @@ from gitlab_monitor.formatting import greptile_review
 
 SUMMARY_BODY = """<!-- greptile_summary -->
 
-<h2><a href="https://app.greptile.com/api/retrigger?id=1"><img alt="Retrigger" src="x.svg" height="24" align="right"></a>Confidence Score: 4/5</h2>
+<h2><a href="https://app.greptile.com/api/retrigger?id=1"><img alt="Retrigger" src="x.svg" height="24" align="right"></a><a href="https://app.greptile.com/acme/gitlab-acme/g/p/-/pull/1?utm_source=greptile_review&amp;utm_medium=gitlab"><img alt="View in Greptile" src="v.svg" height="24" align="right"></a>Confidence Score: 4/5</h2>
 
 The PR appears safe to merge.
 
@@ -80,6 +80,7 @@ def test_summary_score_updated_and_body():
     gt = greptile_review(_discussions())
     assert gt["score"] == 4
     assert gt["updated_at"] == "2026-10-28T13:05:11Z"
+    assert gt["url"] == "https://app.greptile.com/acme/gitlab-acme/g/p/-/pull/1"
     text = repr(gt["segments"])
     assert "The PR appears safe to merge." in text
     assert "Adds metric badges." in text
@@ -175,7 +176,10 @@ def _pane_text(screen):
     return "\n".join(str(w.render()) for w in screen.query("#mr-greptile Static"))
 
 
-def test_split_is_seventy_thirty_and_summary_leaves_main_list():
+def test_split_is_seventy_thirty_and_summary_leaves_main_list(monkeypatch):
+    opened = []
+    monkeypatch.setattr(tui.webbrowser, "open", opened.append)
+
     async def steps(app, pilot, screen):
         pane = screen.query_one("#mr-greptile")
         body = screen.query_one("#mr-body-scroll")
@@ -185,6 +189,8 @@ def test_split_is_seventy_thirty_and_summary_leaves_main_list():
         await pilot.press("f")
         await pilot.pause(0.1)
         mds_after = len(screen.query("#mr-greptile Markdown"))
+        await pilot.press("w")
+        await pilot.pause(0.05)
         await pilot.press("G")
         await pilot.pause(0.05)
         return (pane.display, pane.outer_size.width, body.outer_size.width, left, text,
@@ -201,13 +207,20 @@ def test_split_is_seventy_thirty_and_summary_leaves_main_list():
     # resolved finding body only after f
     assert mds_after == mds_before + 1
     assert focused == "mr-greptile"
+    assert opened == ["https://app.greptile.com/acme/gitlab-acme/g/p/-/pull/1"]
 
 
-def test_pane_hidden_without_greptile():
+def test_pane_hidden_without_greptile(monkeypatch):
+    opened = []
+    monkeypatch.setattr(tui.webbrowser, "open", opened.append)
+
     async def steps(app, pilot, screen):
         pane = screen.query_one("#mr-greptile")
+        await pilot.press("G")
+        await pilot.pause(0.05)
         return pane.display, screen.query_one("#mr-body-scroll").outer_size.width
 
     shown, body_w = _run([_disc("bryan", "lgtm", "2026-10-28T13:04:00Z")], steps)
     assert not shown
     assert body_w == 200
+    assert opened == []
