@@ -382,6 +382,124 @@ class ScreenBase(Screen):
         )
 
 
+class TabStrip(Static):
+
+    def __init__(self, **kw):
+        super().__init__("", **kw)
+        self._spans = []
+
+    def set_tabs(self, tabs, active_key) -> None:
+        self._spans = []
+        text = Text(no_wrap=True, overflow="ellipsis")
+        for t in tabs:
+            start = text.cell_len
+            style = "bold #cdd6f4 on #45475a" if t.get('key') == active_key else "#6c7086"
+            text.append(f" {t.get('label') or t.get('key')} ", style=style)
+            self._spans.append((start, text.cell_len, t))
+            text.append(" ")
+        self.display = bool(tabs)
+        self.update(text)
+
+    def on_click(self, event) -> None:
+        x = event.screen_x - self.content_region.x
+        for start, end, entry in self._spans:
+            if start <= x < end:
+                self.screen._open_tab(entry)
+                return
+
+
+class TabArea:
+    # TAB_AREA picks the store bucket; detail screens return their own _tab_key, list screens leave it None
+
+    TAB_AREA = ''
+    TAB_KEYS = {"right_square_bracket": "tab_next", "left_square_bracket": "tab_prev"}
+
+    def _tab_key(self):
+        return None
+
+    def _tab_entry(self):
+        return None
+
+    def _tabs(self):
+        return self.api.config.tabs
+
+    def _tab_strip(self) -> TabStrip:
+        strip = TabStrip(id="tabstrip", classes="tabstrip")
+        strip.set_tabs(self._tabs().list(self.TAB_AREA), self._tab_key() or self._tabs().active(self.TAB_AREA))
+        return strip
+
+    def _refresh_tabs(self) -> None:
+        try:
+            self.query_one("#tabstrip", TabStrip).set_tabs(
+                self._tabs().list(self.TAB_AREA), self._tab_key() or self._tabs().active(self.TAB_AREA)
+            )
+        except Exception:
+            pass
+
+    def on_screen_resume(self) -> None:
+        self._refresh_tabs()
+
+    def _tab_register(self) -> None:
+        entry = self._tab_entry()
+        if entry:
+            self._tabs().open(self.TAB_AREA, entry)
+            self._refresh_tabs()
+
+    def _tab_screen(self, entry):
+        if self.TAB_AREA == 'mr':
+            return MergeRequestDetailScreen(self.api, entry['project'], entry['iid'])
+        api = self.api
+        if api.project_name != entry['project']:
+            api = GitLabAPI(api.config)
+            api.set_project(entry['project'])
+        return JobListScreen(api, dict(entry['pipeline']))
+
+    def _open_tab(self, entry) -> None:
+        me = self._tab_key()
+        if entry.get('key') == me:
+            return
+        try:
+            screen = self._tab_screen(entry)
+        except Exception as e:
+            self.notify(f"Cannot open tab: {e}", severity="error", timeout=3)
+            return
+        if me is None:
+            self.app.push_screen(screen)
+        else:
+            self.app.switch_screen(screen)
+
+    def _tab_step(self, step: int) -> None:
+        tabs = self._tabs().list(self.TAB_AREA)
+        if not tabs:
+            self.notify("No open tabs", timeout=2)
+            return
+        keys = [t.get('key') for t in tabs]
+        me = self._tab_key()
+        if me in keys:
+            i = (keys.index(me) + step) % len(keys)
+        else:
+            active = self._tabs().active(self.TAB_AREA)
+            i = keys.index(active) if active in keys else 0
+        self._open_tab(tabs[i])
+
+    def action_tab_next(self) -> None:
+        self._tab_step(1)
+
+    def action_tab_prev(self) -> None:
+        self._tab_step(-1)
+
+    def action_tab_close(self) -> None:
+        me = self._tab_key()
+        keys = [t.get('key') for t in self._tabs().list(self.TAB_AREA)]
+        self._tabs().close(self.TAB_AREA, me)
+        rest = self._tabs().list(self.TAB_AREA)
+        if not rest:
+            self.app.pop_screen()
+            return
+        i = keys.index(me) if me in keys else 0
+        self._open_tab(rest[min(i, len(rest) - 1)])
+
+
 # -- api layer ---------------------------------------------------------------
 
 
@@ -679,9 +797,11 @@ class ProjectSelectScreen(ScreenBase):
         self.app.push_screen(MergeRequestDetailScreen(self.api, project_path, iid))
 
 
-class PipelineListScreen(ScreenBase):
+class PipelineListScreen(TabArea, ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel", "s": "toggle_status", "f": "failed", "a": "toggle_active", "c": "clear_filter", "M": "project_mrs", "P": "my_pipelines"}
+    TAB_AREA = 'pipeline'
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "t": "toggle_age", "x": "cancel", "s": "toggle_status", "f": "failed", "a": "toggle_active", "c": "clear_filter", "M": "project_mrs", "P": "my_pipelines", **TabArea.TAB_KEYS}
 
     STATUS_CYCLE = [None, 'running', 'pending']
 
@@ -726,12 +846,13 @@ class PipelineListScreen(ScreenBase):
             [("b", "browser"),   ("y", "copy url"),  ("c", "clear")],
             [("t", "age"),       ("s", status_label),("f", failed_label)],
             [("M", "MRs"),       ("P", "my pipes"),  ("x", "cancel")],
-            [("a", active_label),("q", "back")],
+            [("a", active_label),("q", "back"),   ("]/[", "tabs")],
         ]
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield self._tab_strip()
         yield Container(
             Input(value=self.initial_filter, placeholder="/  filter pipelines...", id="pipeline-filter"),
             id="filter-bar",
@@ -1068,9 +1189,11 @@ class PipelineListScreen(ScreenBase):
         self.app.push_screen(MyPipelineListScreen(self.api, age_days=self.age_days))
 
 
-class JobListScreen(ScreenBase):
+class JobListScreen(TabArea, ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "f": "failures", "s": "toggle_status", "y": "yank", "c": "clear_filter"}
+    TAB_AREA = 'pipeline'
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "f": "failures", "s": "toggle_status", "y": "yank", "c": "clear_filter", "X": "tab_close", **TabArea.TAB_KEYS}
 
     STAGE_ORDER = ['build', 'test', 'deploy', 'cleanup']
 
@@ -1087,6 +1210,18 @@ class JobListScreen(ScreenBase):
         self.status_filter = None
         self._refresh_timer = None
         self._refreshing = False
+
+    def _tab_key(self):
+        return f"{self.api.project_name}:{self.pipeline.get('id')}"
+
+    def _tab_entry(self):
+        p = self.pipeline
+        return {
+            'key': self._tab_key(),
+            'label': f"#{p.get('id')} {(p.get('ref') or '')[:16]}".rstrip(),
+            'project': self.api.project_name,
+            'pipeline': {k: v for k, v in p.items() if not k.startswith('_')},
+        }
 
     def _info_pairs(self):
         job_count = len(getattr(self, 'jobs', []) or [])
@@ -1132,12 +1267,13 @@ class JobListScreen(ScreenBase):
             [("/", "filter"),   ("enter", "logs"),  ("r", "refresh")],
             [("b", "browser"),  ("y", "copy url"),  ("c", "clear")],
             [("s", status_label),("f", "failures")],
-            [("q", "back")],
+            [("q", "back"),     ("]/[", "tabs"),    ("X", "close tab")],
         ]
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield self._tab_strip()
         yield Container(
             Input(placeholder="/  filter jobs...", id="job-filter"),
             id="filter-bar",
@@ -1187,6 +1323,7 @@ class JobListScreen(ScreenBase):
         table = self.query_one("#job-table", DataTable)
         table.add_columns("Stage", "Name", "Status", "Duration", "ID")
         table.cursor_type = "row"
+        self._tab_register()
         self._user_loading_label = "loading jobs..."
         try:
             sb = self.query_one("#statusbar", StatusBar)
@@ -1824,9 +1961,11 @@ def _mr_state_keys(state):
     return [("s", f"show {_mr_state_label(_next_mr_state(state))}"), ("a", "show open" if state == 'all' else "show all")]
 
 
-class MyMergeRequestsScreen(ScreenBase):
+class MyMergeRequestsScreen(TabArea, ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "a": "toggle_all", "t": "dashboard", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window", "A": "toggle_auto_merge", "M": "merge", "u": "assign"}
+    TAB_AREA = 'mr'
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "s": "toggle_state", "a": "toggle_all", "t": "dashboard", "m": "open_modules", "tab": "open_modules", "e": "export", "n": "note", "p": "pipelines", "w": "toggle_window", "A": "toggle_auto_merge", "M": "merge", "u": "assign", **TabArea.TAB_KEYS}
 
     REFRESH_INTERVAL = MR_REFRESH_INTERVAL
 
@@ -1872,11 +2011,13 @@ class MyMergeRequestsScreen(ScreenBase):
             [("e", "export md"),  ("n", "note"),     ("A", "auto-merge")],
             [("M", "merge"),      ("u", "assign"),   window_slot],
             [("g", "goto MR"),    ("t", "show active"),  ("esc", "quit")],
+            [("]/[", "tabs")],
         ]
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield self._tab_strip()
         yield Container(
             Input(placeholder="/  filter MRs...", id="mr-filter"),
             id="filter-bar",
@@ -2444,9 +2585,11 @@ class MyMergeRequestsScreen(ScreenBase):
         return path
 
 
-class MRDashboardScreen(ScreenBase):
+class MRDashboardScreen(TabArea, ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "t": "next_tab", "m": "open_modules", "tab": "open_modules", "n": "note", "p": "pipelines", "A": "toggle_auto_merge", "M": "merge", "u": "assign"}
+    TAB_AREA = 'mr'
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "g": "goto", "t": "next_tab", "m": "open_modules", "tab": "open_modules", "n": "note", "p": "pipelines", "A": "toggle_auto_merge", "M": "merge", "u": "assign", **TabArea.TAB_KEYS}
 
     REFRESH_INTERVAL = MR_REFRESH_INTERVAL
 
@@ -2486,12 +2629,13 @@ class MRDashboardScreen(ScreenBase):
             [("r", "refresh"),    ("b", "browser"),                     ("y", "copy url")],
             [("p", "pipelines"),  ("t", f"show {self._next_tab()}"),    ("g", "goto MR")],
             [("A", "auto-merge"), ("M", "merge"),                       ("n", "note")],
-            [("u", "assign"),     ("esc", "quit")],
+            [("u", "assign"),     ("]/[", "tabs"),                      ("esc", "quit")],
         ]
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield self._tab_strip()
         yield Container(
             Input(placeholder="/  filter MRs...", id="mr-filter"),
             id="filter-bar",
@@ -3210,9 +3354,11 @@ class MyReviewsScreen(ScreenBase):
         )
 
 
-class ProjectMergeRequestsScreen(ScreenBase):
+class ProjectMergeRequestsScreen(TabArea, ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "s": "toggle_state", "a": "toggle_all", "A": "toggle_auto_merge", "u": "assign"}
+    TAB_AREA = 'mr'
+
+    KEY_MAP = {"q": "back", "r": "refresh", "slash": "search", "b": "browser", "y": "yank", "s": "toggle_state", "a": "toggle_all", "A": "toggle_auto_merge", "u": "assign", **TabArea.TAB_KEYS}
 
     REFRESH_INTERVAL = MR_REFRESH_INTERVAL
 
@@ -3244,12 +3390,13 @@ class ProjectMergeRequestsScreen(ScreenBase):
             [("/", "filter"),     ("enter", "view"),  ("r", "refresh")],
             [("b", "browser"),    ("y", "copy url"),  state_key],
             [("A", "auto-merge"), ("u", "assign"),    all_key],
-            [("q", "back")],
+            [("q", "back"),       ("]/[", "tabs")],
         ]
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield self._tab_strip()
         yield Container(
             Input(placeholder="/  filter MRs...", id="proj-mr-filter"),
             id="filter-bar",
@@ -3488,7 +3635,9 @@ def _note_widgets(segments):
     return out
 
 
-class MergeRequestDetailScreen(ScreenBase):
+class MergeRequestDetailScreen(TabArea, ScreenBase):
+
+    TAB_AREA = 'mr'
 
     KEY_MAP = {
         "q": "back",
@@ -3511,6 +3660,8 @@ class MergeRequestDetailScreen(ScreenBase):
         "e": "toggle_details",
         "G": "greptile_browser",
         "w": "focus_greptile",
+        "X": "tab_close",
+        **TabArea.TAB_KEYS,
     }
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
@@ -3529,6 +3680,18 @@ class MergeRequestDetailScreen(ScreenBase):
         self._disc_sig = None
         self._gt_sig = None
         self._greptile_url = ''
+
+    def _tab_key(self):
+        return f"{self.project_path}:{self.iid}"
+
+    def _tab_entry(self):
+        title = (self.mr or {}).get('title') or ''
+        return {
+            'key': self._tab_key(),
+            'label': f"!{self.iid} {title[:16]}".rstrip(),
+            'project': self.project_path,
+            'iid': self.iid,
+        }
 
     def _info_pairs(self):
         if not self.mr:
@@ -3562,12 +3725,14 @@ class MergeRequestDetailScreen(ScreenBase):
             [("A", "auto-merge"), ("f", resolved_label),("t", auto_label)],
             [("M", "merge"),      ("v", "review"),     ("R", "review now")],
             [("u", "assign"),     ("e", "details"),    ("q", "back")],
-            [("G", "greptile web"), ("w", "switch pane")],
+            [("G", "greptile web"), ("w", "switch pane"), ("]/[", "tabs")],
+            [("X", "close tab")],
         ]
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield self._tab_strip()
         yield Horizontal(
             ScrollableContainer(
                 Horizontal(
@@ -3621,6 +3786,7 @@ class MergeRequestDetailScreen(ScreenBase):
     async def on_mount(self) -> None:
         if self.project_path:
             self.api.config.recent_projects.remember(self.project_path)
+        self._tab_register()
         self._user_loading_label = "loading MR..."
         try:
             sb = self.query_one("#statusbar", StatusBar)
@@ -3634,6 +3800,7 @@ class MergeRequestDetailScreen(ScreenBase):
             await self.load_mr()
         finally:
             self._clear_loading()
+        self._tab_register()
         if self.mr and self.mr.get('state') == 'opened':
             self._refresh_timer = self.set_interval(self.REFRESH_INTERVAL, self._safe_refresh)
         self._refresh_status()
@@ -4347,9 +4514,11 @@ class MRPipelineListScreen(ScreenBase):
         self.app.push_screen(JobListScreen(ds_api, pipeline))
 
 
-class MyPipelineListScreen(ScreenBase):
+class MyPipelineListScreen(TabArea, ScreenBase):
 
-    KEY_MAP = {"q": "back", "r": "refresh", "b": "browser", "y": "yank", "t": "toggle_age", "slash": "search", "c": "clear_filter", "tab": "open_modules", "a": "pick_project"}
+    TAB_AREA = 'pipeline'
+
+    KEY_MAP = {"q": "back", "r": "refresh", "b": "browser", "y": "yank", "t": "toggle_age", "slash": "search", "c": "clear_filter", "tab": "open_modules", "a": "pick_project", **TabArea.TAB_KEYS}
 
     REFRESH_INTERVAL = PIPELINE_REFRESH_INTERVAL
 
@@ -4385,12 +4554,13 @@ class MyPipelineListScreen(ScreenBase):
             [("tab", "modules"), ("/", "filter"),   ("enter", "jobs")],
             [("r", "refresh"),   ("b", "browser"),  ("y", "copy url")],
             [("a", "pick project"), ("t", "age"),   ("c", "clear")],
-            [("esc", "quit")],
+            [("]/[", "tabs"),    ("esc", "quit")],
         ]
 
     def compose(self) -> ComposeResult:
         yield K9sHeader(self._info_pairs(), self._keys(), id="header")
         yield Static(self._breadcrumb(), id="breadcrumb", classes="breadcrumb")
+        yield self._tab_strip()
         yield Container(
             Input(placeholder="/  filter pipelines...", id="my-pipe-filter"),
             id="filter-bar",
@@ -7041,6 +7211,12 @@ class PipelineMonitor(App):
         padding: 0 2;
         background: #1e1e2e;
         color: #89b4fa;
+    }
+
+    .tabstrip {
+        height: 1;
+        padding: 0 2;
+        background: #1e1e2e;
     }
 
     #filter-bar {

@@ -1,9 +1,12 @@
 import asyncio
+import tempfile
+from pathlib import Path
 
 from textual.app import App
 from textual.screen import Screen
 
 from gitlab_monitor import tui
+from gitlab_monitor.config import OpenTabs
 from gitlab_monitor.api import GitLabAPI
 from gitlab_monitor.constants import MR_DASHBOARD_LISTS
 from gitlab_monitor.formatting import _dashboard_badge, _reviewers_text
@@ -20,6 +23,7 @@ class _Config:
     gitlab_token = "x"
     mr_notes = _Notes()
     recent_projects = None
+    tabs = OpenTabs(Path(tempfile.mkdtemp()))
 
     def save_last_view(self, *a, **kw):
         pass

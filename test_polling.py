@@ -1,9 +1,12 @@
 import asyncio
+import tempfile
+from pathlib import Path
 
 from textual.app import App
 from textual.screen import Screen
 
 from gitlab_monitor import tui
+from gitlab_monitor.config import OpenTabs
 from gitlab_monitor.tui import PipelineMonitor, ScreenBase, TagListScreen
 
 
@@ -188,6 +191,7 @@ class _ReviewFiles:
 
 class _ListConfig(_Config):
     reviews_enabled = False
+    tabs = OpenTabs(Path(tempfile.mkdtemp()))
     reviews_dir = "/nonexistent"
     review_files = _ReviewFiles()
     recent_projects = None

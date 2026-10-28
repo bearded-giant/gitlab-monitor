@@ -136,7 +136,8 @@ By default `glmon` opens **My Work** — your starred repos, your open MRs group
 13. **Failure extraction** -- automatically extracts and highlights test failures; failed jobs flagged in red
 14. **Browser + clipboard** -- `b` opens the current selection in GitLab, `y` copies its URL or log output
 15. **Job detail info bar** -- live status and duration while viewing job logs
-16. **Assigned reviews** -- every open MR where you are a reviewer, across all projects, with markers for reviewed / stale / approved; an optional launchd poller pre-runs an adversarial AI review into a local markdown file and notifies you when a reviewed MR gets new commits. Nothing is ever posted back to GitLab.
+16. **Tabs** -- every MR detail and pipeline job list you open becomes a tab in its area (MRs or pipelines), up to 5 each; `]`/`[` cycle them, click one to jump, `X` closes the current one, and they come back when you reopen the module
+17. **Assigned reviews** -- every open MR where you are a reviewer, across all projects, with markers for reviewed / stale / approved; an optional launchd poller pre-runs an adversarial AI review into a local markdown file and notifies you when a reviewed MR gets new commits. Nothing is ever posted back to GitLab.
 
 ## Views
 
@@ -197,6 +198,8 @@ K9s-style filter bar — press `/` to filter by branch or user:
 
 Shows all jobs in a pipeline grouped by stage (build, test, deploy, cleanup) with color-coded status and duration. Child/downstream pipelines show up as bridge rows; `enter` on one drills into that pipeline, even across projects.
 
+Opening a pipeline here also pins it as a tab. The tab strip under the breadcrumb lists the last 5 pipelines you opened across every project; `]` and `[` switch between them, clicking one jumps to it, and `X` closes the one you are on. The same strip shows on the pipeline lists, so the tabs are still there after you leave and come back, even across restarts.
+
 ### 7. Job Detail View
 
 ![Job detail with logs](glmon-assets/Pipeline-job-logs.png)
@@ -219,6 +222,8 @@ The **List** tab is the flat **My MRs** view: the MRs you authored, grouped by r
 ![MR detail](glmon-assets/MR-detail.png)
 
 Title, description, author, source/target branches, pipeline status, and approval state. Drill into pipelines (`p`) or commits (`k`) from here. Quick actions: merge (`M`), approve (`a`), and close (`x`) each ask for a confirm first; assign (`u`) opens a filterable list of the project's users, cached locally for a day (`ctrl+r` in the list reloads it); toggle auto-merge / merge-when-pipeline-succeeds (`A`) applies right away; comment (`c`) opens a multi-line box (`ctrl+s` posts, `esc` cancels). Discussions render as markdown: headings, lists, links, code blocks, and `diff`/`suggestion` blocks in red and green. HTML from bots like Greptile is converted, and inline comments show their `file:line`. When Greptile has reviewed the MR, a pane on the right (30% of the width) shows its confidence score, when the summary comment was last updated, and the summary text; diagrams are dropped since a terminal can't draw them. Under that, its findings list by review (review numbers follow the commits Greptile left findings on, so a clean review in between isn't counted), each with its time, priority, `file:line`, and open or resolved status. Resolved findings show only their title until `f`. The summary comment moves out of the discussion list; finding threads stay there with your replies. MRs without Greptile notes get the full width. `<details>` sections start collapsed the way GitLab shows them; `e` expands or collapses them all. `f` toggles resolved discussions, `t` toggles the 2-minute auto-refresh, and `g` jumps to another MR by number. When a local review file exists for the MR, a `Review:` line sits between approvals and the description showing current or stale, the review time, unread, and whether it has been posted; `v` opens it in a modal (`q` closes). `R` runs an adversarial review for this MR now, whether or not one exists; the section updates on the next refresh.
+
+Every MR you open becomes a tab, up to 5 across all projects (the oldest drops off). The strip under the breadcrumb shows them on this screen and on the MR lists: `]` and `[` cycle, a click jumps, `X` closes the current tab. Tabs survive quitting the app.
 
 ![MR commits](glmon-assets/MR-commits.png)
 
@@ -375,6 +380,7 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | `c` | Clear filter |
 | `M` | This project's MRs |
 | `P` | My pipelines |
+| `]` / `[` | Open the next / previous pipeline tab |
 
 ### Job List View
 
@@ -383,6 +389,8 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | `/` | Focus filter input |
 | `s` | Cycle status filter: all -> failed -> running -> pending |
 | `f` | Show failed jobs summary |
+| `]` / `[` | Switch to the next / previous pipeline tab |
+| `X` | Close this pipeline tab |
 
 ### Job Detail View
 
@@ -398,6 +406,7 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | `t` | Cycle age window: 3d -> 7d -> 30d -> all |
 | `c` | Clear filter |
 | `a` | Pick a project (opens its Project Hub) |
+| `]` / `[` | Open the next / previous pipeline tab |
 
 ### MR Dashboard
 
@@ -410,6 +419,7 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | `p` | Pipelines for the selected MR |
 | `A` / `M` / `u` / `n` | Auto-merge, merge, assign, local note |
 | `g` | Go to MR by number |
+| `]` / `[` | Open the next / previous MR tab |
 
 ### Merge Request List
 
@@ -427,6 +437,7 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | `e` | Export list to markdown (My MRs) |
 | `M` | Merge (My MRs) |
 | `p` | Pipelines for selected MR (My MRs) |
+| `]` / `[` | Open the next / previous MR tab |
 
 ### Merge Request Detail
 
@@ -447,6 +458,8 @@ Keys are case-sensitive (`R` is not `r`) and each screen only handles the keys l
 | `v` | Open the local review file, if one exists |
 | `R` | Run an adversarial review for this MR now (re-reviews if one exists) |
 | `u` | Assign to a project user (filterable lookup; replaces the current assignee) |
+| `]` / `[` | Switch to the next / previous MR tab |
+| `X` | Close this MR tab |
 
 ### Reviews
 

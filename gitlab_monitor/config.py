@@ -203,6 +203,64 @@ class ProjectUsers:
         self._save()
 
 
+class OpenTabs:
+
+    LIMIT = 5
+
+    def __init__(self, config_dir: Path):
+        self.path = config_dir / "tabs.json"
+        self._areas: Dict[str, Dict[str, Any]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            data = json.loads(self.path.read_text())
+            if isinstance(data, dict):
+                self._areas = {
+                    k: v for k, v in data.items()
+                    if isinstance(v, dict) and isinstance(v.get('items'), list)
+                }
+        except Exception:
+            self._areas = {}
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(self._areas, indent=2, default=str))
+        os.replace(tmp, self.path)
+
+    def _area(self, area: str) -> Dict[str, Any]:
+        return self._areas.setdefault(area, {'items': [], 'active': None})
+
+    def list(self, area: str) -> List[Dict[str, Any]]:
+        return list(self._area(area)['items'])
+
+    def active(self, area: str) -> Optional[str]:
+        return self._area(area).get('active')
+
+    def open(self, area: str, entry: Dict[str, Any]) -> None:
+        a = self._area(area)
+        items = a['items']
+        for i, t in enumerate(items):
+            if t.get('key') == entry['key']:
+                items[i] = {**t, **entry}
+                break
+        else:
+            items.append(entry)
+            del items[:-self.LIMIT]
+        a['active'] = entry['key']
+        self._save()
+
+    def close(self, area: str, key: str) -> None:
+        a = self._area(area)
+        a['items'] = [t for t in a['items'] if t.get('key') != key]
+        if a['active'] == key:
+            a['active'] = None
+        self._save()
+
+
 def _slug(text: str, limit: int = 60) -> str:
     return re.sub(r'[^a-z0-9]+', '-', (text or '').lower()).strip('-')[:limit] or 'untitled'
 
@@ -344,6 +402,7 @@ class Config:
         self.recent_projects = RecentProjects(self.config_dir)
         self.mr_notes = MRNotes(self.config_dir)
         self.project_users = ProjectUsers(self.config_dir)
+        self.tabs = OpenTabs(self.config_dir)
         self.review_files = ReviewFiles(self.reviews_dir)
 
     def get_last_view(self) -> Optional[Dict[str, Any]]:

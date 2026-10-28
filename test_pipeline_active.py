@@ -1,8 +1,11 @@
 import asyncio
+import tempfile
+from pathlib import Path
 
 from textual.app import App
 
 from gitlab_monitor.tui import PipelineListScreen
+from gitlab_monitor.config import OpenTabs
 
 
 class _Recent:
@@ -13,6 +16,7 @@ class _Recent:
 class _Config:
     gitlab_url = "https://gitlab.example.com"
     recent_projects = _Recent()
+    tabs = OpenTabs(Path(tempfile.mkdtemp()))
 
     def save_last_view(self, *a, **kw):
         pass

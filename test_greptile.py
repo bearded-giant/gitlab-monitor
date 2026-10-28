@@ -1,8 +1,11 @@
 import asyncio
+import tempfile
+from pathlib import Path
 
 from textual.app import App
 
 from gitlab_monitor import tui
+from gitlab_monitor.config import OpenTabs
 from gitlab_monitor.formatting import greptile_review
 
 SUMMARY_BODY = """<!-- greptile_summary -->
@@ -127,6 +130,7 @@ class _Config:
     gitlab_url = "https://gitlab.example.com"
     recent_projects = _Recents()
     review_files = _ReviewFiles()
+    tabs = OpenTabs(Path(tempfile.mkdtemp()))
 
 
 class _Api:

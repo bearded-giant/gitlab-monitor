@@ -1,8 +1,11 @@
 import asyncio
+import tempfile
+from pathlib import Path
 
 from textual.app import App
 
 from gitlab_monitor.api import GitLabAPI
+from gitlab_monitor.config import OpenTabs
 from gitlab_monitor.tui import (
     MyMergeRequestsScreen,
     ProjectMergeRequestsScreen,
@@ -19,6 +22,7 @@ class _Config:
     gitlab_url = "https://gitlab.example.com"
     gitlab_token = "x"
     mr_notes = _Notes()
+    tabs = OpenTabs(Path(tempfile.mkdtemp()))
 
     def save_last_view(self, *a, **kw):
         pass
