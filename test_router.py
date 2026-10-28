@@ -93,7 +93,8 @@ def test_host_label_and_missing_provider():
     assert r.host_label() == ('Hosts', 'gl + gh')
     assert r.host_label('gh:o/r') == ('GitHub', 'https://gh')
     r.set_project('g/p')
-    assert r.host_label() == ('GitLab', 'https://gl') and r.project_url('gh:o/r') == 'https://gh/o/r'
+    assert r.host_label() == ('Hosts', 'gl + gh') and r.host_label('g/p') == ('GitLab', 'https://gl')
+    assert r.project_url('gh:o/r') == 'https://gh/o/r'
     single = MultiAPI(_Config(), providers={'gitlab': _P('GitLab', 'https://gl')})
     assert single.host_label() == ('GitLab', 'https://gl')
     with pytest.raises(RuntimeError, match='github is not configured'):

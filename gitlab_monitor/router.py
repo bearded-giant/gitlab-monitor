@@ -63,10 +63,9 @@ class MultiAPI:
         return bool(p and p.supports(action, project_path))
 
     def host_label(self, project_path=None):
-        key = project_path or self.project_name
-        if key or len(self.providers) == 1:
-            p = self.provider_for(key) if key else self._current
-            return p.host_label(key)
+        if project_path or len(self.providers) == 1:
+            p = self.provider_for(project_path) if project_path else self._current
+            return p.host_label(project_path)
         return ('Hosts', ' + '.join((p.host_label()[1] or '').replace('https://', '') for p in self.providers.values()))
 
     def project_url(self, project_path):

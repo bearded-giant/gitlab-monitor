@@ -720,7 +720,7 @@ class PipelineListScreen(ScreenBase):
         if view:
             pipelines_label = f"{len(self.filtered_pipelines)}/{total}  ({view})"
         return [
-            _host_label(self.api, getattr(self, 'project_path', None)),
+            _host_label(self.api, self.api.project_name),
             ("Project", self.api.project_name or "project"),
             ("Scope", self._age_label()),
             ("Pipelines", pipelines_label),
@@ -1111,7 +1111,7 @@ class JobListScreen(ScreenBase):
             jobs_label = f"{len(self.filtered_jobs)}/{jobs_label}  ({self.status_filter})"
         p = self.pipeline
         pairs = [
-            _host_label(self.api, getattr(self, 'project_path', None)),
+            _host_label(self.api, self.api.project_name),
             ("Project", self.api.project_name or "project"),
             ("Pipeline", f"#{p['id']}  {p['status']}"),
             ("Branch", p['ref'][:40]),
@@ -1475,7 +1475,7 @@ class JobDetailScreen(ScreenBase):
     def _info_pairs(self):
         status = self.job.get('status', '?')
         return [
-            _host_label(self.api, getattr(self, 'project_path', None)),
+            _host_label(self.api, self.api.project_name),
             ("Project", self.api.project_name or "project"),
             ("Job", f"#{self.job['id']}  {self.job['name']}"),
             ("Status", status),
@@ -1755,7 +1755,7 @@ class FailedJobsScreen(ScreenBase):
 
     def _info_pairs(self):
         return [
-            _host_label(self.api, getattr(self, 'project_path', None)),
+            _host_label(self.api, self.api.project_name),
             ("Project", self.api.project_name or "project"),
             ("Pipeline", f"#{self.pipeline['id']}"),
             ("Failures", str(len(self.failed_jobs))),

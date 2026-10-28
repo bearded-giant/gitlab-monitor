@@ -1022,7 +1022,7 @@ class GitLabAPI:
             since = datetime.now(timezone.utc) - timedelta(days=since_days)
             params['updated_after'] = since.isoformat().replace('+00:00', 'Z')
         try:
-            pipelines = project.pipelines.list(**params)
+            pipelines = project.pipelines.list(get_all=False, **params)
             return [self._pipeline_to_dict(p, project_path=project_path) for p in pipelines]
         except Exception:
             return []
@@ -1034,7 +1034,7 @@ class GitLabAPI:
             params = {'per_page': limit, 'order_by': 'id', 'sort': 'desc', 'scope': 'tags'}
             if username:
                 params['username'] = username
-            pipelines = project.pipelines.list(**params)
+            pipelines = project.pipelines.list(get_all=False, **params)
             return [self._pipeline_to_dict(p, project_path=project_path) for p in pipelines]
         except Exception:
             return []

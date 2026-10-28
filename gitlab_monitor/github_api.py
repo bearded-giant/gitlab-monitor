@@ -455,7 +455,8 @@ class GitHubAPI:
                 return cached
         try:
             me = self.current_username()
-            events = self._paged(f'/users/{me}/events', ACTIVITY_PAGE_CAP * 100)
+            # the events API serves at most 300 events and 422s past page 3
+            events = self._paged(f'/users/{me}/events', min(ACTIVITY_PAGE_CAP, 3) * 100)
             counts = {}
             for ev in events:
                 created = ev.get('created_at')
