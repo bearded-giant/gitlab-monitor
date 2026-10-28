@@ -47,10 +47,34 @@ tail -f /tmp/glmon-debug.log
 ## Configuration
 
 ### Required Environment Variables
+
+At least one host. GitLab:
+
 ```bash
 export GITLAB_URL=https://gitlab.example.com
 export GITLAB_TOKEN=your_personal_access_token
 ```
+
+GitHub:
+
+```bash
+export GITHUB_TOKEN=ghp_...        # classic PAT with repo scope, or a fine-grained token
+```
+
+With no `GITHUB_TOKEN` and no token file, glmon asks `gh auth token`, so a `gh auth login` is enough on a laptop. Set both hosts and every cross-project screen (My Work, MR dashboard, Reviews, My Pipelines, project picker) reads from both at once.
+
+### GitHub projects
+
+A GitHub repo is addressed as `gh:owner/repo` everywhere a GitLab project path goes: favorites, `-p`, `GITLAB_PROJECT`, MR notes, review files, `glmon-jirad --mr gh:owner/repo#12`. The same screens work on it with these differences.
+
+| Screen | On GitHub |
+|--------|-----------|
+| Pipelines | GitHub Actions workflow runs. Statuses map to the same badges. |
+| Jobs | Run jobs. There are no stages, so the stage column is blank. Child pipelines do not exist. |
+| Job detail | GitHub serves a job's log only after it finishes. While it runs you see the step list with per-step status; the log replaces it when the job completes. |
+| My Tag Deploys | Rows come from the repo's Deployments (what Vercel and a deploy workflow write), not from tag runs. |
+| MR detail | Approvals are the PR's review decision plus who approved. Threads are review threads, review bodies, and issue comments. Auto-merge needs the repo setting "Allow auto-merge". |
+| Tags | `R` dispatches the first active workflow on the tag (the workflow needs `workflow_dispatch`). `V` (revert) is hidden: GitHub has no revert endpoint. |
 
 ### Optional Environment Variables
 ```bash
@@ -94,7 +118,7 @@ Configuration can also be stored in `~/.config/gitlab-monitor/config.json`:
 
 The `reviews` block drives the Reviews module and its poller (see view 13). Every key is optional and falls back to the value shown. An optional `jira` block drives `glmon-jirad` (see [Jira Sync](#jira-sync)).
 
-Note: Never put the token in `config.json`. Use the `GITLAB_TOKEN` environment variable, or for non-interactive runs (the Reviews poller under launchd) a `~/.config/gitlab-monitor/token` file with mode 600.
+Note: Never put a token in `config.json`. Use the `GITLAB_TOKEN` / `GITHUB_TOKEN` environment variables, or for non-interactive runs (the pollers under launchd) a `~/.config/gitlab-monitor/token` or `~/.config/gitlab-monitor/github_token` file with mode 600.
 
 ## Quick Start
 
@@ -103,6 +127,7 @@ After installation, the tool is available as `gitlab-monitor` or `glmon` (short 
 ```bash
 glmon                                # lands on My Work (cross-project home)
 glmon -p group/subgroup/project      # skip the home, jump straight into a project
+glmon -p gh:owner/repo               # same, for a GitHub repo
 glmon --days 7                       # default pipeline window: 7 days (default: 3)
 glmon -p group/project --days 30     # combined
 glmon -p group/project -B            # pre-filter pipelines to the CWD git branch
@@ -143,7 +168,7 @@ By default `glmon` opens **My Work** — your starred repos, your open MRs group
 
 ### 1. My Work (home)
 
-The default landing screen. Three panels: your **Favorites** (starred repos), **My Open MRs** (every MR you authored, across all projects, grouped by repository), and **My Tag Deploys** (the latest tag pipeline you pushed in each favorite, running ones pinned on top). Cycle panels with `[`/`]`, `enter` to open the highlighted repo (into its Project Hub) or MR (into detail). `M` jumps to the MR dashboard, `P` to your pipelines. This is module `1`; it always opens here (no last-view restore). `esc` or `Ctrl+c` quits the app; `q` is back-only and a no-op on the home.
+The default landing screen. Three panels: your **Favorites** (starred repos), **My Open MRs** (every MR you authored, across all projects and both hosts, grouped by repository), and **My Tag Deploys** (the latest tag pipeline you pushed in each favorite, running ones pinned on top; on GitHub, the latest deployment). Cycle panels with `[`/`]`, `enter` to open the highlighted repo (into its Project Hub) or MR (into detail). `M` jumps to the MR dashboard, `P` to your pipelines. This is module `1`; it always opens here (no last-view restore). `esc` or `Ctrl+c` quits the app; `q` is back-only and a no-op on the home.
 
 ### 2. Module Switcher
 

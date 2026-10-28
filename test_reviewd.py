@@ -129,3 +129,11 @@ if __name__ == '__main__':
         if name.startswith('test_'):
             fn()
             print('ok', name)
+
+
+def test_parse_mr_ref_handles_both_hosts():
+    from gitlab_monitor.reviewd import parse_mr_ref
+    assert parse_mr_ref('https://gitlab.example.com/g/sub/p/-/merge_requests/12/diffs#note_1') == ('g/sub/p', 12)
+    assert parse_mr_ref('https://github.com/o/r/pull/7/files') == ('gh:o/r', 7)
+    assert parse_mr_ref('g/p!3') == ('g/p', 3)
+    assert parse_mr_ref('gh:o/r#4') == ('gh:o/r', 4)
