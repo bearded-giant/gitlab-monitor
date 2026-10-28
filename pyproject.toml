@@ -25,6 +25,7 @@ classifiers = [
 ]
 dependencies = [
     "python-gitlab>=3.0.0",
+    "requests>=2.28",
     "textual>=0.41.0",
     "rich>=13.0.0",
 ]

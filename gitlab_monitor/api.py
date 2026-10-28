@@ -32,6 +32,25 @@ _DASHBOARD_NODE = (
 )
 
 
+_SUMMARY_RE = re.compile(r"=+\s*short test summary info\s*=+\n(.*?)(?=^=+|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
+
+
+def parse_failures(trace):
+    failures = []
+    summary_match = _SUMMARY_RE.search(trace or '')
+    if summary_match:
+        for line in summary_match.group(1).strip().split('\n'):
+            if 'FAILED' in line:
+                failures.append(line.strip())
+    if not failures:
+        for line in (trace or '').split('\n'):
+            if any(kw in line.lower() for kw in ['error:', 'failed:', 'exception:']):
+                failures.append(line.strip())
+                if len(failures) > 20:
+                    break
+    return failures
+
+
 class GitLabAPI:
 
     def __init__(self, config: Config):
@@ -69,6 +88,12 @@ class GitLabAPI:
     def set_project(self, project_path: str):
         self.project = self.gl.projects.get(project_path)
         self.project_name = project_path
+
+    def supports(self, action, project_path=None):
+        return True
+
+    def host_label(self, project_path=None):
+        return ('GitLab', self.config.gitlab_url)
 
     @staticmethod
     def _project_activity(p):
@@ -373,24 +398,7 @@ class GitLabAPI:
             return b"", offset
 
     def get_job_failures(self, job_id):
-        trace = self.get_job_trace(job_id)
-        failures = []
-        summary_pattern = re.compile(
-            r"=+\s*short test summary info\s*=+\n(.*?)(?=^=+|\Z)",
-            re.MULTILINE | re.DOTALL | re.IGNORECASE,
-        )
-        summary_match = summary_pattern.search(trace)
-        if summary_match:
-            for line in summary_match.group(1).strip().split('\n'):
-                if 'FAILED' in line:
-                    failures.append(line.strip())
-        if not failures:
-            for line in trace.split('\n'):
-                if any(kw in line.lower() for kw in ['error:', 'failed:', 'exception:']):
-                    failures.append(line.strip())
-                    if len(failures) > 20:
-                        break
-        return failures
+        return parse_failures(self.get_job_trace(job_id))
 
     # -- merge requests ------------------------------------------------------
 
