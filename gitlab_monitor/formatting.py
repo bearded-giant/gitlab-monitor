@@ -92,7 +92,8 @@ def _key_lines(keys, cols=KEY_COLS):
     if not keys:
         return []
     if isinstance(keys[0], list):
-        return _key_lines_from_rows(keys, cols)
+        flat = [e for r in keys for e in r if e is not None]
+        return _key_lines_from_rows([flat[i:i + cols] for i in range(0, len(flat), cols)], cols)
     rows_per_col = (len(keys) + cols - 1) // cols
     columns = [keys[i * rows_per_col:(i + 1) * rows_per_col] for i in range(cols)]
     col_widths = []
@@ -152,7 +153,13 @@ def _key_lines_from_rows(rows, cols):
 
 
 def _header_layout(available_width):
-    if available_width is None or available_width >= 130:
+    if available_width is None:
+        return INFO_PANE_WIDTH, KEY_COLS, False
+    if available_width >= 175:
+        return INFO_PANE_WIDTH, 5, False
+    if available_width >= 150:
+        return INFO_PANE_WIDTH, 4, False
+    if available_width >= 130:
         return INFO_PANE_WIDTH, KEY_COLS, False
     if available_width >= 100:
         return 50, 2, False
