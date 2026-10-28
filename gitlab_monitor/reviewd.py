@@ -11,7 +11,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .api import GitLabAPI
+from .router import MultiAPI
+from .github_api import github_key
 from .config import Config
 
 NO_WRITE_PROMPT = "Never post, comment, approve, or otherwise write to GitLab. Output the review only."
@@ -221,14 +222,23 @@ def tick(config, api, dry_run=False, limit=None):
     return 0
 
 
-def resolve_mr(api, ref):
+def parse_mr_ref(ref):
     if ref.startswith('http'):
-        path, iid = ref.split('/-/merge_requests/')
-        project_path = path.split('://', 1)[1].split('/', 1)[1]
+        sep = '/-/merge_requests/' if '/-/merge_requests/' in ref else '/pull/'
+        path, iid = ref.split(sep)
+        host, _, project_path = path.split('://', 1)[1].partition('/')
+        if sep == '/pull/':
+            project_path = github_key(project_path)
         iid = int(iid.strip('/').split('/')[0].split('#')[0].split('?')[0])
     else:
-        project_path, iid = ref.rsplit('!', 1)
+        sep = '#' if '#' in ref and '!' not in ref else '!'
+        project_path, iid = ref.rsplit(sep, 1)
         iid = int(iid)
+    return project_path, iid
+
+
+def resolve_mr(api, ref):
+    project_path, iid = parse_mr_ref(ref)
     detail = api.get_merge_request(project_path, iid)
     if not detail:
         raise SystemExit(f"MR not found: {ref}")
@@ -262,7 +272,7 @@ def main(argv=None):
     if not ok:
         _log(msg)
         return 2
-    api = GitLabAPI(config)
+    api = MultiAPI(config)
     config.reviews_dir.mkdir(parents=True, exist_ok=True)
 
     if args.mr:

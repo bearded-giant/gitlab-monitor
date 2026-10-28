@@ -346,3 +346,20 @@ if __name__ == '__main__':
         if name.startswith('test_'):
             fn()
             print('ok', name)
+
+
+def test_git_project_prefixes_github_remote_and_reads_config_hosts():
+    import subprocess
+    repo = tempfile.mkdtemp()
+    git = lambda *a: subprocess.run(['git', *a], cwd=repo, capture_output=True, check=True)  # noqa: E731
+    git('init', '-q', '-b', 'feat/x')
+    git('remote', 'add', 'origin', 'git@github.com:me/thing.git')
+    assert jirad.git_project({'github.com': 'github'}, cwd=repo) == ('gh:me/thing', 'feat/x')
+    assert jirad.git_project({'gitlab.example.com': 'gitlab'}, cwd=repo) == (None, 'feat/x')
+
+    class _C:
+        gitlab_enabled = True
+        github_enabled = True
+        gitlab_url = 'https://gitlab.example.com/'
+        github_url = None
+    assert jirad.config_hosts(_C()) == {'gitlab.example.com': 'gitlab', 'github.com': 'github'}

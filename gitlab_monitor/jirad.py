@@ -18,7 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .api import GitLabAPI
+from .router import MultiAPI
+from .github_api import github_key
 from .config import Config
 from .reviewd import Lock, _key, _log, _parse_ts, claude_argv, parse_claude_output, resolve_mr
 
@@ -247,14 +248,27 @@ def remote_project_path(url):
     return (m.group(1), m.group(2)) if m else (None, None)
 
 
-def git_project(host, cwd=None):
+def config_hosts(config):
+    hosts = {}
+    if getattr(config, 'gitlab_enabled', False):
+        hosts[urlparse(config.gitlab_url).hostname] = 'gitlab'
+    if getattr(config, 'github_enabled', False):
+        hosts[urlparse(config.github_url or 'https://github.com').hostname] = 'github'
+    return hosts
+
+
+def git_project(hosts, cwd=None):
+    if isinstance(hosts, str):
+        hosts = {hosts: 'gitlab'}
+
     def git(*args):
         return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, check=False).stdout.strip()
     branch = git('branch', '--show-current')
     for name in git('remote').split():
         remote_host, path = remote_project_path(git('remote', 'get-url', name))
-        if remote_host == host:
-            return path, branch
+        kind = hosts.get(remote_host)
+        if kind:
+            return (github_key(path) if kind == 'github' else path), branch
     return None, branch
 
 
@@ -293,8 +307,8 @@ def lookup_lines(cfg, project_path, branch, mr, key, issue):
 
 
 def run_lookup(config, cfg, ref):
-    api = GitLabAPI(config)
-    if ref.startswith('http') or '!' in ref:
+    api = MultiAPI(config)
+    if ref.startswith('http') or '!' in ref or '#' in ref:
         try:
             mr = resolve_mr(api, ref)
         except ValueError:
@@ -302,10 +316,10 @@ def run_lookup(config, cfg, ref):
             return 1
         project_path, branch = mr['project_path'], mr['source_branch']
     else:
-        host = urlparse(config.gitlab_url).hostname
-        project_path, branch = git_project(host)
+        hosts = config_hosts(config)
+        project_path, branch = git_project(hosts)
         if not project_path:
-            print(f"not a checkout with a {host} remote: no ticket by design")
+            print(f"not a checkout with a {' or '.join(hosts)} remote: no ticket by design")
             return 1
         branch = ref or branch
         if not branch:
@@ -473,7 +487,7 @@ def main(argv=None):
         _log(msg)
         return 2
 
-    api = GitLabAPI(config)
+    api = MultiAPI(config)
     jira = Jira(cfg['base'], cfg['email'], config.jira_token)
     # an explicit --mr (ship-it) waits out a running tick so its own summary bullets are used
     lock = acquire(STATE_DIR, wait=90 if args.mr else 0)
