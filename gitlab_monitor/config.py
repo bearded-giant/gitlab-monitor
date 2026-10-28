@@ -6,6 +6,7 @@ import os
 import re
 import json
 import time
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -379,6 +380,8 @@ class Config:
         config = {
             'gitlab_url': None,
             'gitlab_token': None,
+            'github_token': None,
+            'github_url': None,
             'project_path': None,
             'refresh_interval': 30,
             'max_pipelines': 50,
@@ -415,6 +418,17 @@ class Config:
                     config['gitlab_token'] = token_file.read_text().strip() or None
             except OSError:
                 pass
+        if os.environ.get('GITHUB_TOKEN'):
+            config['github_token'] = os.environ['GITHUB_TOKEN']
+        elif not config.get('github_token'):
+            token_file = self.config_dir / 'github_token'
+            try:
+                if token_file.exists():
+                    config['github_token'] = token_file.read_text().strip() or None
+            except OSError:
+                pass
+        if os.environ.get('GITHUB_URL'):
+            config['github_url'] = os.environ['GITHUB_URL']
         if os.environ.get('GITLAB_PROJECT'):
             config['project_path'] = os.environ['GITLAB_PROJECT']
         if os.environ.get('GITLAB_REFRESH_INTERVAL'):
@@ -441,7 +455,7 @@ class Config:
         self._config.update(kwargs)
         
         # Don't save token to file for security
-        config_to_save = {k: v for k, v in self._config.items() if k != 'gitlab_token'}
+        config_to_save = {k: v for k, v in self._config.items() if k not in ('gitlab_token', 'github_token')}
         
         with open(self.config_file, 'w') as f:
             json.dump(config_to_save, f, indent=2)
@@ -454,6 +468,38 @@ class Config:
     def gitlab_token(self) -> Optional[str]:
         return self._config.get('gitlab_token')
     
+    @property
+    def github_token(self) -> Optional[str]:
+        token = self._config.get('github_token')
+        if token is None and os.environ.get('GLMON_GH_AUTH', '1') not in ('0', 'false', 'off'):
+            # GLMON_GH_AUTH=0 keeps a daemon from shelling out to gh
+            try:
+                out = subprocess.run(['gh', 'auth', 'token'], capture_output=True, text=True, timeout=5)
+                token = out.stdout.strip() if out.returncode == 0 else ''
+            except (OSError, subprocess.SubprocessError):
+                token = ''
+            self._config['github_token'] = token or ''
+        return token or None
+
+    @property
+    def github_url(self) -> Optional[str]:
+        return self._config.get('github_url')
+
+    @property
+    def github_api_url(self) -> Optional[str]:
+        url = self.github_url
+        if not url or url.rstrip('/') == 'https://github.com':
+            return None
+        return url.rstrip('/') + '/api/v3'
+
+    @property
+    def gitlab_enabled(self) -> bool:
+        return bool(self.gitlab_url and self.gitlab_token)
+
+    @property
+    def github_enabled(self) -> bool:
+        return bool(self.github_token)
+
     @property
     def project_path(self) -> Optional[str]:
         return self._config.get('project_path')
@@ -515,9 +561,10 @@ class Config:
             return None
     
     def validate(self) -> tuple[bool, str]:
-        """Validate required configuration (project_path is optional now)"""
-        if not self.gitlab_url:
-            return False, "GITLAB_URL not set. Set via environment variable or config file"
-        if not self.gitlab_token:
+        if self.gitlab_enabled or self.github_enabled:
+            return True, "Configuration valid"
+        if self.gitlab_url and not self.gitlab_token:
             return False, "GITLAB_TOKEN not set. Set via environment variable"
-        return True, "Configuration valid"
+        if self.gitlab_token and not self.gitlab_url:
+            return False, "GITLAB_URL not set. Set via environment variable or config file"
+        return False, "No host configured: set GITLAB_URL + GITLAB_TOKEN, or GITHUB_TOKEN (or `gh auth login`)"

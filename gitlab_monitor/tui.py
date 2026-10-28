@@ -84,6 +84,18 @@ from .formatting import (
     is_greptile_summary,
 )
 from .api import GitLabAPI, ACTIVITY_TTL
+from .router import MultiAPI
+from .github_api import is_github_key
+
+
+def _host_label(api, key=None):
+    fn = getattr(api, 'host_label', None)
+    return fn(key) if fn else ("GitLab", api.config.gitlab_url)
+
+
+def _fresh_api(api):
+    fn = getattr(api, 'fresh', None)
+    return fn() if fn else GitLabAPI(api.config)
 
 
 
@@ -469,7 +481,7 @@ class ProjectSelectScreen(ScreenBase):
     def _info_pairs(self):
         mode_label = "Favorites only" if self.mode == "fav" else "All projects"
         pairs = [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("View", mode_label),
             ("Favorites", str(len(self.favorites.list()))),
         ]
@@ -708,7 +720,7 @@ class PipelineListScreen(ScreenBase):
         if view:
             pipelines_label = f"{len(self.filtered_pipelines)}/{total}  ({view})"
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, self.api.project_name),
             ("Project", self.api.project_name or "project"),
             ("Scope", self._age_label()),
             ("Pipelines", pipelines_label),
@@ -1011,7 +1023,7 @@ class PipelineListScreen(ScreenBase):
             pipeline = self.filtered_pipelines[idx]
             ds_path = pipeline.get('_ds_project_path')
             if pipeline.get('_is_downstream') and ds_path:
-                ds_api = GitLabAPI(self.api.config)
+                ds_api = _fresh_api(self.api)
                 try:
                     ds_api.set_project(ds_path)
                 except Exception:
@@ -1099,7 +1111,7 @@ class JobListScreen(ScreenBase):
             jobs_label = f"{len(self.filtered_jobs)}/{jobs_label}  ({self.status_filter})"
         p = self.pipeline
         pairs = [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, self.api.project_name),
             ("Project", self.api.project_name or "project"),
             ("Pipeline", f"#{p['id']}  {p['status']}"),
             ("Branch", p['ref'][:40]),
@@ -1379,7 +1391,7 @@ class JobListScreen(ScreenBase):
             ds = row.get('_downstream') or {}
             ds_path = ds.get('_ds_project_path')
             if ds_path:
-                ds_api = GitLabAPI(self.api.config)
+                ds_api = _fresh_api(self.api)
                 try:
                     ds_api.set_project(ds_path)
                 except Exception:
@@ -1463,7 +1475,7 @@ class JobDetailScreen(ScreenBase):
     def _info_pairs(self):
         status = self.job.get('status', '?')
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, self.api.project_name),
             ("Project", self.api.project_name or "project"),
             ("Job", f"#{self.job['id']}  {self.job['name']}"),
             ("Status", status),
@@ -1617,6 +1629,20 @@ class JobDetailScreen(ScreenBase):
             self._refreshing_trace = False
             self._refresh_status()
 
+    def _trace_live(self) -> bool:
+        sup = getattr(self.api, 'supports', None)
+        return sup is None or bool(sup('job_trace_live'))
+
+    def _write_steps(self) -> None:
+        log = self.query_one("#job-log", RichLog)
+        log.clear()
+        log.write(Text(" STEPS  (log arrives when the job finishes) ", style="bold white on #89b4fa"))
+        log.write("")
+        for s in self.job.get('steps') or []:
+            log.write(Text.assemble(f"  {str(s.get('number') or ''):>3}  ", status_badge(s.get('status')), f"  {s.get('name') or ''}"))
+        if not self.job.get('steps'):
+            log.write(Text("  waiting for the runner...", style="dim italic"))
+
     def _write_trace_line(self, log, line) -> None:
         if any(kw in line.lower() for kw in ['error', 'failed', 'exception']):
             log.write(Text(line, style="#f38ba8"))
@@ -1624,11 +1650,16 @@ class JobDetailScreen(ScreenBase):
             log.write(line)
 
     async def _append_new_trace(self) -> None:
+        if not self._trace_live() and self.job.get('status') not in TERMINAL_STATUSES:
+            self._write_steps()
+            return
         new_bytes, total = await asyncio.to_thread(
             self.api.get_job_trace_range, self.job['id'], self.trace_bytes_read
         )
         if not new_bytes:
             return
+        if not self._trace_live() and self.trace_bytes_read == 0:
+            self.query_one("#job-log", RichLog).clear()
         self.trace_bytes_read = total
         chunk = new_bytes.decode("utf-8", errors="replace")
         self.trace += chunk
@@ -1724,7 +1755,7 @@ class FailedJobsScreen(ScreenBase):
 
     def _info_pairs(self):
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, self.api.project_name),
             ("Project", self.api.project_name or "project"),
             ("Pipeline", f"#{self.pipeline['id']}"),
             ("Failures", str(len(self.failed_jobs))),
@@ -1853,7 +1884,7 @@ class MyMergeRequestsScreen(ScreenBase):
         shown = len(self.filtered_mrs)
         count = f"{shown}/{total}" if shown != total else str(total)
         pairs = [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("Scope", "created_by_me"),
             ("State", _mr_state_label(self.state)),
             ("MRs", count),
@@ -2210,7 +2241,7 @@ class MyMergeRequestsScreen(ScreenBase):
         if not proj:
             self.notify("MR has no project path", severity="warning", timeout=2)
             return
-        ds_api = GitLabAPI(self.api.config)
+        ds_api = _fresh_api(self.api)
         try:
             ds_api.set_project(proj)
         except Exception:
@@ -2403,7 +2434,7 @@ class MyMergeRequestsScreen(ScreenBase):
             f"- generated: {title_ts}",
             f"- state: {self.state}",
             f"- count: {len(self.filtered_mrs)}",
-            f"- gitlab: {self.api.config.gitlab_url}",
+            f"- host: {_host_label(self.api)[1]}",
             "",
         ]
         for proj_path in order:
@@ -2474,7 +2505,7 @@ class MRDashboardScreen(ScreenBase):
 
     def _info_pairs(self):
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("User", self.me or "…"),
             ("Active", str(self._tab_count('active'))),
             ("Merged", str(self._tab_count('merged'))),
@@ -2650,8 +2681,7 @@ class MRDashboardScreen(ScreenBase):
         return m if kind == 'mr' else None
 
     def _dashboard_url(self):
-        base = f"{self.api.config.gitlab_url.rstrip('/')}/dashboard/merge_requests"
-        return f"{base}/merged" if self.tab == 'merged' else base
+        return self.api.dashboard_url(self.tab == 'merged')
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         kind, list_id, m = self._row(event.cursor_row)
@@ -2891,7 +2921,7 @@ class MyReviewsScreen(ScreenBase):
         reviewed = sum(1 for m in self.mrs if self._review_state(m) == 'current' and (self._review_entry(m) or {}).get('reason') != 'approved-baseline')
         stale = sum(1 for m in self.mrs if self._review_state(m) == 'stale')
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("Scope", "reviewer"),
             ("MRs", count),
             ("Reviewed", f"{reviewed} ({stale} stale)"),
@@ -3232,7 +3262,7 @@ class ProjectMergeRequestsScreen(ScreenBase):
         shown = len(self.filtered_mrs)
         count = f"{shown}/{total}" if shown != total else str(total)
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("Project", self.project_path),
             ("State", _mr_state_label(self.state)),
             ("MRs", count),
@@ -3533,7 +3563,7 @@ class MergeRequestDetailScreen(ScreenBase):
     def _info_pairs(self):
         if not self.mr:
             return [
-                ("GitLab", self.api.config.gitlab_url),
+                _host_label(self.api, getattr(self, 'project_path', None)),
                 ("Project", self.project_path),
                 ("MR", f"!{self.iid}"),
                 ("Status", "loading..."),
@@ -3543,7 +3573,7 @@ class MergeRequestDetailScreen(ScreenBase):
         pipeline = m['head_pipeline_status'] or '—'
         state_label = 'approved' if _is_mr_approved(m) else m['state']
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("Project", self.project_path),
             ("MR", f"!{m['iid']}  {title}"),
             ("State", state_label),
@@ -4165,7 +4195,7 @@ class MRPipelineListScreen(ScreenBase):
         if self.related:
             counts = f"{len(self.pipelines)} + {len(self.related)} related"
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("Project", self.project_path),
             ("MR", f"!{self.mr['iid']}  {(self.mr.get('title') or '')[:40]}"),
             ("Source", self.mr.get('source_branch') or ''),
@@ -4338,7 +4368,7 @@ class MRPipelineListScreen(ScreenBase):
         if idx is None or idx >= len(self._row_pipelines):
             return
         pipeline = self._row_pipelines[idx]
-        ds_api = GitLabAPI(self.api.config)
+        ds_api = _fresh_api(self.api)
         try:
             ds_api.set_project(self.project_path)
         except Exception:
@@ -4373,7 +4403,7 @@ class MyPipelineListScreen(ScreenBase):
     def _info_pairs(self):
         favs = self._favorites()
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("User", self.username or "—"),
             ("Favorites", str(len(favs))),
             ("Scope", self._age_label()),
@@ -4626,7 +4656,7 @@ class MyPipelineListScreen(ScreenBase):
         proj = p.get('project_path') or ''
         if not proj:
             return
-        ds_api = GitLabAPI(self.api.config)
+        ds_api = _fresh_api(self.api)
         try:
             ds_api.set_project(proj)
         except Exception:
@@ -4649,7 +4679,7 @@ class MRCommitListScreen(ScreenBase):
 
     def _info_pairs(self):
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("Project", self.project_path),
             ("MR", f"!{self.mr['iid']}  {(self.mr.get('title') or '')[:40]}"),
             ("Source", self.mr.get('source_branch') or ''),
@@ -4802,7 +4832,7 @@ class TagListScreen(ScreenBase):
         shown = len(self.filtered_tags)
         count = f"{shown}/{total}" if shown != total else str(total)
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("Project", self.project_path),
             ("Default", self.default_branch or "—"),
             ("Tags", count),
@@ -4811,7 +4841,7 @@ class TagListScreen(ScreenBase):
     def _keys(self):
         return [
             [("/", "filter"),  ("enter", "pipeline"),  ("r", "refresh")],
-            [("t", "create+push tag"),  ("R", "rollback/re-run"),  ("V", "revert+MR")],
+            [("t", "create+push tag"),  ("R", "rollback/re-run")] + ([("V", "revert+MR")] if self._can_revert() else []),
             [("b", "browser"),  ("y", "copy url"),  ("q", "back")],
         ]
 
@@ -5018,14 +5048,14 @@ class TagListScreen(ScreenBase):
         t = self._tag_at_row(self.query_one("#tag-table", DataTable).cursor_row)
         if t is None:
             return
-        url = f"{self.api.config.gitlab_url.rstrip('/')}/{self.project_path}/-/tags/{t['name']}"
+        url = self.api.tag_url(self.project_path, t['name'])
         webbrowser.open(url)
 
     async def action_yank(self) -> None:
         t = self._tag_at_row(self.query_one("#tag-table", DataTable).cursor_row)
         if t is None:
             return
-        url = f"{self.api.config.gitlab_url.rstrip('/')}/{self.project_path}/-/tags/{t['name']}"
+        url = self.api.tag_url(self.project_path, t['name'])
         if copy_to_clipboard(url):
             self.notify(f"Copied tag {t['name']} URL", timeout=2)
 
@@ -5087,7 +5117,14 @@ class TagListScreen(ScreenBase):
         except Exception as e:
             self.notify(f"Pipeline start failed: {e}", severity="error", timeout=5)
 
+    def _can_revert(self) -> bool:
+        sup = getattr(self.api, 'supports', None)
+        return sup is None or bool(sup('revert_tag_commit', self.project_path))
+
     async def action_revert_commit(self) -> None:
+        if not self._can_revert():
+            self.notify("This host has no revert endpoint — revert locally and open a PR", severity="warning", timeout=4)
+            return
         t = self._tag_at_row(self.query_one("#tag-table", DataTable).cursor_row)
         if t is None:
             return
@@ -5156,7 +5193,7 @@ class ProjectHubScreen(ScreenBase):
 
     def _info_pairs(self):
         pairs = [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("Project", self.project_path),
             ("Default", self.default_branch or "—"),
             ("Active", format_age(self.last_activity) if self.last_activity else "—"),
@@ -5416,18 +5453,17 @@ class ProjectHubScreen(ScreenBase):
         return None
 
     def _project_url(self):
-        return f"{self.api.config.gitlab_url.rstrip('/')}/{self.project_path}"
+        return self.api.project_url(self.project_path)
 
     def _url_for(self, kind, d):
-        base = self.api.config.gitlab_url.rstrip('/')
         if kind == "hub-commits":
-            return d.get('web_url') or f"{base}/{self.project_path}/-/commit/{d['id']}"
+            return d.get('web_url') or self.api.commit_url(self.project_path, d['id'])
         if kind == "hub-mrs":
-            return d.get('web_url') or f"{base}/{self.project_path}/-/merge_requests/{d['iid']}"
+            return d.get('web_url') or self.api.mr_url(self.project_path, d['iid'])
         if kind == "hub-pipelines":
-            return d.get('web_url') or f"{base}/{self.project_path}/-/pipelines/{d['id']}"
+            return d.get('web_url') or self.api.pipeline_url(self.project_path, d['id'])
         if kind == "hub-tags":
-            return f"{base}/{self.project_path}/-/tags/{d['name']}"
+            return self.api.tag_url(self.project_path, d['name'])
         return self._project_url()
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -5553,7 +5589,7 @@ class MyWorkScreen(ScreenBase):
 
     def _info_pairs(self):
         pairs = [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("Scope", "favorites + created_by_me"),
         ]
         if self._loaded:
@@ -5813,7 +5849,8 @@ class MyWorkScreen(ScreenBase):
                 t.add_row(label, Text(""), Text(""), Text(""), Text(""))
             else:
                 m = entry[1]
-                iid = Text(f"   !{m.get('iid')}", style="#cdd6f4")
+                mark = '#' if is_github_key(m.get('project_path')) else '!'
+                iid = Text(f"   {mark}{m.get('iid')}", style="#cdd6f4")
                 branch = Text(m.get('source_branch') or '', style="#89b4fa")
                 title = Text((m.get('title') or '')[:40], style="#cdd6f4")
                 created = Text(format_age(m['created_at']) if m.get('created_at') else '—', style="dim italic")
@@ -5861,13 +5898,12 @@ class MyWorkScreen(ScreenBase):
         return None
 
     def _url_for(self, focused):
-        base = self.api.config.gitlab_url.rstrip('/')
         kind, d = focused
         if kind == 'fav':
-            return f"{base}/{d['path']}"
+            return self.api.project_url(d['path'])
         if kind == 'deploy':
-            return d.get('web_url') or f"{base}/{d['project_path']}/-/pipelines/{d['id']}"
-        return d.get('web_url') or f"{base}/{d['project_path']}/-/merge_requests/{d['iid']}"
+            return d.get('web_url') or self.api.pipeline_url(d['project_path'], d['id'])
+        return d.get('web_url') or self.api.mr_url(d['project_path'], d['iid'])
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         tid = event.data_table.id
@@ -5881,7 +5917,7 @@ class MyWorkScreen(ScreenBase):
             d = self._row(self._deploys, row)
             if d:
                 proj = d.get('project_path') or ''
-                ds_api = GitLabAPI(self.api.config)
+                ds_api = _fresh_api(self.api)
                 try:
                     ds_api.set_project(proj)
                 except Exception:
@@ -5967,7 +6003,7 @@ class CommitListScreen(ScreenBase):
         shown = len(self.filtered_commits)
         count = f"{shown}/{total}" if shown != total else str(total)
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("Project", self.project_path),
             ("Branch", self.default_branch or "—"),
             ("Window", f"last {self.window_days}d"),
@@ -6114,7 +6150,7 @@ class CommitListScreen(ScreenBase):
         return self.filtered_commits[idx]
 
     def _commit_url(self, c):
-        return c.get('web_url') or f"{self.api.config.gitlab_url.rstrip('/')}/{self.project_path}/-/commit/{c['id']}"
+        return c.get('web_url') or self.api.commit_url(self.project_path, c['id'])
 
     async def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "commit-filter":
@@ -6207,7 +6243,7 @@ class CommitDetailScreen(ScreenBase):
     def _info_pairs(self):
         c = self.commit or {}
         return [
-            ("GitLab", self.api.config.gitlab_url),
+            _host_label(self.api, getattr(self, 'project_path', None)),
             ("Project", self.project_path),
             ("Commit", c.get('short_id') or self.sha[:8]),
             ("Pipeline", c.get('pipeline_status') or "—"),
@@ -6325,7 +6361,7 @@ class CommitDetailScreen(ScreenBase):
 
     def _commit_url(self):
         c = self.commit or {}
-        return c.get('web_url') or f"{self.api.config.gitlab_url.rstrip('/')}/{self.project_path}/-/commit/{self.sha}"
+        return c.get('web_url') or self.api.commit_url(self.project_path, self.sha)
 
     async def action_back(self) -> None:
         self.app.pop_screen()
@@ -7689,7 +7725,7 @@ class PipelineMonitor(App):
     def __init__(self, config: Config, default_age_days=DEFAULT_PIPELINE_AGE_DAYS, default_branch_filter: str = "", explicit_project: bool = False):
         super().__init__()
         self.config = config
-        self.api = GitLabAPI(config)
+        self.api = MultiAPI(config)
         self.default_age_days = default_age_days
         self.default_branch_filter = default_branch_filter or ""
         self.explicit_project = explicit_project
@@ -7850,9 +7886,10 @@ def main():
     valid, message = config.validate()
     if not valid:
         print(f"Error: {message}", file=sys.stderr)
-        print("\nRequired environment variables:")
+        print("\nConfigure at least one host:")
         print("  export GITLAB_URL=https://gitlab.example.com")
         print("  export GITLAB_TOKEN=your_personal_access_token")
+        print("  export GITHUB_TOKEN=ghp_...                  # or `gh auth login`; projects are gh:owner/repo")
         print("\nOptional:")
         print("  export GITLAB_PROJECT=group/project   # default project")
         print("  --project group/project               # skip My Work, open its pipelines")
