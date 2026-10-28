@@ -1629,6 +1629,20 @@ class JobDetailScreen(ScreenBase):
             self._refreshing_trace = False
             self._refresh_status()
 
+    def _trace_live(self) -> bool:
+        sup = getattr(self.api, 'supports', None)
+        return sup is None or bool(sup('job_trace_live'))
+
+    def _write_steps(self) -> None:
+        log = self.query_one("#job-log", RichLog)
+        log.clear()
+        log.write(Text(" STEPS  (log arrives when the job finishes) ", style="bold white on #89b4fa"))
+        log.write("")
+        for s in self.job.get('steps') or []:
+            log.write(Text.assemble(f"  {str(s.get('number') or ''):>3}  ", status_badge(s.get('status')), f"  {s.get('name') or ''}"))
+        if not self.job.get('steps'):
+            log.write(Text("  waiting for the runner...", style="dim italic"))
+
     def _write_trace_line(self, log, line) -> None:
         if any(kw in line.lower() for kw in ['error', 'failed', 'exception']):
             log.write(Text(line, style="#f38ba8"))
@@ -1636,11 +1650,16 @@ class JobDetailScreen(ScreenBase):
             log.write(line)
 
     async def _append_new_trace(self) -> None:
+        if not self._trace_live() and self.job.get('status') not in TERMINAL_STATUSES:
+            self._write_steps()
+            return
         new_bytes, total = await asyncio.to_thread(
             self.api.get_job_trace_range, self.job['id'], self.trace_bytes_read
         )
         if not new_bytes:
             return
+        if not self._trace_live() and self.trace_bytes_read == 0:
+            self.query_one("#job-log", RichLog).clear()
         self.trace_bytes_read = total
         chunk = new_bytes.decode("utf-8", errors="replace")
         self.trace += chunk
@@ -4822,7 +4841,7 @@ class TagListScreen(ScreenBase):
     def _keys(self):
         return [
             [("/", "filter"),  ("enter", "pipeline"),  ("r", "refresh")],
-            [("t", "create+push tag"),  ("R", "rollback/re-run"),  ("V", "revert+MR")],
+            [("t", "create+push tag"),  ("R", "rollback/re-run")] + ([("V", "revert+MR")] if self._can_revert() else []),
             [("b", "browser"),  ("y", "copy url"),  ("q", "back")],
         ]
 
@@ -5098,7 +5117,14 @@ class TagListScreen(ScreenBase):
         except Exception as e:
             self.notify(f"Pipeline start failed: {e}", severity="error", timeout=5)
 
+    def _can_revert(self) -> bool:
+        sup = getattr(self.api, 'supports', None)
+        return sup is None or bool(sup('revert_tag_commit', self.project_path))
+
     async def action_revert_commit(self) -> None:
+        if not self._can_revert():
+            self.notify("This host has no revert endpoint — revert locally and open a PR", severity="warning", timeout=4)
+            return
         t = self._tag_at_row(self.query_one("#tag-table", DataTable).cursor_row)
         if t is None:
             return
