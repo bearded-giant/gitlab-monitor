@@ -293,9 +293,10 @@ class ScreenBase(Screen):
         if action_name:
             event.prevent_default()
             event.stop()
+            action_name, _, arg = action_name.partition(":")
             method = getattr(self, f"action_{action_name}", None)
             if method:
-                result = method()
+                result = method(arg) if arg else method()
                 if asyncio.iscoroutine(result):
                     asyncio.ensure_future(result)
 
@@ -391,10 +392,11 @@ class TabStrip(Static):
     def set_tabs(self, tabs, active_key) -> None:
         self._spans = []
         text = Text(no_wrap=True, overflow="ellipsis")
-        for t in tabs:
+        for i, t in enumerate(tabs, 1):
             start = text.cell_len
-            style = "bold #cdd6f4 on #45475a" if t.get('key') == active_key else "#6c7086"
-            text.append(f" {t.get('label') or t.get('key')} ", style=style)
+            bg = " on #45475a" if t.get('key') == active_key else ""
+            text.append(f" {i} ", style="bold #89b4fa" + bg)
+            text.append(f"{t.get('label') or t.get('key')} ", style=("bold #cdd6f4" if bg else "#6c7086") + bg)
             self._spans.append((start, text.cell_len, t))
             text.append(" ")
         self.display = bool(tabs)
@@ -412,7 +414,11 @@ class TabArea:
     # TAB_AREA picks the store bucket; detail screens return their own _tab_key, list screens leave it None
 
     TAB_AREA = ''
-    TAB_KEYS = {"right_square_bracket": "tab_next", "left_square_bracket": "tab_prev"}
+    TAB_KEYS = {
+        "right_square_bracket": "tab_next", "left_square_bracket": "tab_prev",
+        "right": "tab_next", "left": "tab_prev",
+        **{str(i): f"tab_jump:{i}" for i in range(1, 6)},
+    }
 
     def _tab_key(self):
         return None
@@ -487,6 +493,11 @@ class TabArea:
 
     def action_tab_prev(self) -> None:
         self._tab_step(-1)
+
+    def action_tab_jump(self, n: str) -> None:
+        tabs = self._tabs().list(self.TAB_AREA)
+        if int(n) <= len(tabs):
+            self._open_tab(tabs[int(n) - 1])
 
     def action_tab_close(self) -> None:
         me = self._tab_key()
@@ -846,7 +857,7 @@ class PipelineListScreen(TabArea, ScreenBase):
             [("b", "browser"),   ("y", "copy url"),  ("c", "clear")],
             [("t", "age"),       ("s", status_label),("f", failed_label)],
             [("M", "MRs"),       ("P", "my pipes"),  ("x", "cancel")],
-            [("a", active_label),("q", "back"),   ("]/[", "tabs")],
+            [("a", active_label),("q", "back"),   ("←→ ]/[", "tabs"), ("1-5", "tab N")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -1267,7 +1278,7 @@ class JobListScreen(TabArea, ScreenBase):
             [("/", "filter"),   ("enter", "logs"),  ("r", "refresh")],
             [("b", "browser"),  ("y", "copy url"),  ("c", "clear")],
             [("s", status_label),("f", "failures")],
-            [("q", "back"),     ("]/[", "tabs"),    ("X", "close tab")],
+            [("q", "back"),     ("←→ ]/[", "tabs"), ("1-5", "tab N"),    ("X", "close tab")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2011,7 +2022,7 @@ class MyMergeRequestsScreen(TabArea, ScreenBase):
             [("e", "export md"),  ("n", "note"),     ("A", "auto-merge")],
             [("M", "merge"),      ("u", "assign"),   window_slot],
             [("g", "goto MR"),    ("t", "show active"),  ("esc", "quit")],
-            [("]/[", "tabs")],
+            [("←→ ]/[", "tabs"), ("1-5", "tab N")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -2629,7 +2640,7 @@ class MRDashboardScreen(TabArea, ScreenBase):
             [("r", "refresh"),    ("b", "browser"),                     ("y", "copy url")],
             [("p", "pipelines"),  ("t", f"show {self._next_tab()}"),    ("g", "goto MR")],
             [("A", "auto-merge"), ("M", "merge"),                       ("n", "note")],
-            [("u", "assign"),     ("]/[", "tabs"),                      ("esc", "quit")],
+            [("u", "assign"),     ("←→ ]/[", "tabs"), ("1-5", "tab N"),                      ("esc", "quit")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -3390,7 +3401,7 @@ class ProjectMergeRequestsScreen(TabArea, ScreenBase):
             [("/", "filter"),     ("enter", "view"),  ("r", "refresh")],
             [("b", "browser"),    ("y", "copy url"),  state_key],
             [("A", "auto-merge"), ("u", "assign"),    all_key],
-            [("q", "back"),       ("]/[", "tabs")],
+            [("q", "back"),       ("←→ ]/[", "tabs"), ("1-5", "tab N")],
         ]
 
     def compose(self) -> ComposeResult:
@@ -3725,7 +3736,7 @@ class MergeRequestDetailScreen(TabArea, ScreenBase):
             [("A", "auto-merge"), ("f", resolved_label),("t", auto_label)],
             [("M", "merge"),      ("v", "review"),     ("R", "review now")],
             [("u", "assign"),     ("e", "details"),    ("q", "back")],
-            [("G", "greptile web"), ("w", "switch pane"), ("]/[", "tabs")],
+            [("G", "greptile web"), ("w", "switch pane"), ("←→ ]/[", "tabs"), ("1-5", "tab N")],
             [("X", "close tab")],
         ]
 
@@ -4554,7 +4565,7 @@ class MyPipelineListScreen(TabArea, ScreenBase):
             [("tab", "modules"), ("/", "filter"),   ("enter", "jobs")],
             [("r", "refresh"),   ("b", "browser"),  ("y", "copy url")],
             [("a", "pick project"), ("t", "age"),   ("c", "clear")],
-            [("]/[", "tabs"),    ("esc", "quit")],
+            [("←→ ]/[", "tabs"), ("1-5", "tab N"),    ("esc", "quit")],
         ]
 
     def compose(self) -> ComposeResult:

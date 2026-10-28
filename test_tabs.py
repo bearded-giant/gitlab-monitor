@@ -114,6 +114,16 @@ def test_mr_detail_registers_cycles_closes_and_refreshes_on_resume():
             await pilot.press("left_square_bracket")
             await _settle(app, pilot)
             out["prev"] = app.screen.iid
+            await pilot.press("left")
+            await _settle(app, pilot)
+            out["arrow"] = app.screen.iid
+            await pilot.press("2")
+            await _settle(app, pilot)
+            out["digit"] = (app.screen.iid, len(app.screen_stack) - depth)
+            await pilot.press("5")
+            await pilot.pause(0.1)
+            out["digit_missing"] = app.screen.iid
+            out["chips"] = str(app.screen.query_one("#tabstrip", tui.TabStrip).render())
             await pilot.press("X")
             await _settle(app, pilot)
             out["closed"] = (app.screen.iid, len(app.screen_stack) - depth, [t["key"] for t in api.config.tabs.list("mr")])
@@ -127,6 +137,10 @@ def test_mr_detail_registers_cycles_closes_and_refreshes_on_resume():
     assert out["resumed"] == (1, ["g/p:1", "g/p:2"])
     assert out["next"] == (1, 0)
     assert out["prev"] == 2
+    assert out["arrow"] == 1
+    assert out["digit"] == (2, 0)
+    assert out["digit_missing"] == 2
+    assert out["chips"].split() == ["1", "!1", "title", "1", "2", "!2", "title", "2"]
     assert out["closed"] == (1, 0, ["g/p:1"])
     assert out["last_closed"] == (-1, [])
 
