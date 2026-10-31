@@ -1,6 +1,6 @@
 # Jira Sync (`glmon-jirad`)
 
-`glmon-jirad` keeps one Jira ticket per merge request you author, as a side effect of the MR. You never touch Jira: open an MR and a ticket shows up, merge it and the ticket closes. GitHub pull requests get the same treatment when `GITHUB_TOKEN` is set; they show up as `gh:owner/repo#12` in the log, and `jira.exclude_namespaces` matches them with the same prefix (`gh:owner`).
+`glmon-jirad` keeps one Jira ticket per merge request you author, as a side effect of the MR. You never touch Jira: open an MR and a ticket shows up, merge it and the ticket closes. GitHub pull requests get the same treatment when `GITHUB_TOKEN` is set; they show up as `gh:owner/repo#12` in the log, and `jira.exclude_namespaces` matches them with the same prefix (`gh:owner`). A bare `gh:` entry skips every GitHub repo.
 
 There's no webhook and no server. Each run lists your MRs, works out what each ticket's status should be from the MR's current state, and fixes whatever drifted. A run missed while the laptop slept gets caught up by the next one, so nothing depends on catching an event.
 

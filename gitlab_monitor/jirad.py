@@ -107,7 +107,8 @@ describe_mr = claude_describe
 
 
 def excluded(project_path, namespaces):
-    return any(project_path == ns.rstrip('/') or project_path.startswith(ns.rstrip('/') + '/') for ns in namespaces)
+    return any(project_path == ns.rstrip('/') or project_path.startswith(ns if ns.endswith(':') else ns.rstrip('/') + '/')
+               for ns in namespaces)
 
 
 def can_move(issue, target):

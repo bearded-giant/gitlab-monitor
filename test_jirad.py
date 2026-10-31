@@ -124,6 +124,14 @@ def test_excluded_matches_namespace_prefix_only():
     assert not excluded('engineering/customcheckout', ns)
 
 
+def test_excluded_bare_github_prefix_matches_every_github_repo():
+    assert excluded('gh:RechargePayments/ai-investigator', ['gh:'])
+    assert excluded('gh:skio-org/frost', ['gh:'])
+    assert not excluded('engineering/customcheckout', ['gh:'])
+    assert excluded('gh:RechargePayments/ai-investigator', ['gh:RechargePayments'])
+    assert not excluded('gh:RechargePayments-x/y', ['gh:RechargePayments'])
+
+
 def test_can_move_respects_human_statuses():
     assert can_move({'status': 'Backlog', 'category': 'new'}, IN_PROGRESS)
     assert can_move({'status': "Won't fix", 'category': 'done'}, IN_PROGRESS)
