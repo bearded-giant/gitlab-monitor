@@ -848,6 +848,9 @@ class GitHubAPI:
             store.set(project_path, users)
         return users
 
+    def commit_message_regex(self, project_path):
+        return ''
+
     def set_mr_title(self, project_path, iid, title):
         self._req('PATCH', f'/repos/{self._repo(project_path)}/pulls/{int(iid)}', json={'title': title})
         return True

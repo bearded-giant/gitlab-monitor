@@ -386,7 +386,6 @@ JIRA_DEFAULTS = {
     'issue_type': 'Story',
     'label': 'mr-sync',
     'exclude_namespaces': [],
-    'scope_key_namespaces': [],
     'lookback_days': 14,
     'since': None,
 }

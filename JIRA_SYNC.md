@@ -8,7 +8,7 @@ There's no webhook and no server. Each run lists your MRs, works out what each t
 
 For an open MR whose title has no ticket key, it creates a ticket in `jira.project`. The summary is the MR title. The description is up to three plain-language bullets about what the MR is for, written by `claude -p --model haiku` from the MR description (if that call fails, it uses the first line of the description instead). The ticket gets the `jira.label` label, is assigned to you, and carries a link back to the MR.
 
-Then it writes the key into the MR title. A placeholder key such as `PE-0000` is swapped in place, so `chore(PE-0000): add x` becomes `chore(PE-123): add x`. Titles without a placeholder get a prefix: `feat: add x` becomes `[PE-123] feat: add x`, and a `Draft:` prefix stays in front. A project under a namespace in `jira.scope_key_namespaces` gets the key as the conventional-commit scope instead, for repos whose squash-subject rule wants the type first: `fix(ui): add x` becomes `fix(PE-123): add x`. A title with no conventional type still gets the prefix. The title is the only place the link lives. Jira's GitLab integration reads it from there, and the next run finds the ticket from there.
+Then it writes the key into the MR title. A placeholder key such as `PE-0000` is swapped in place, so `chore(PE-0000): add x` becomes `chore(PE-123): add x`. Titles without a placeholder get a prefix: `feat: add x` becomes `[PE-123] feat: add x`, and a `Draft:` prefix stays in front. When the project's push rule sets a commit message regex that the prefixed title would fail (a squash commit takes the MR title, so the merge would be refused), the key goes in the conventional-commit scope instead: `fix(ui): add x` becomes `fix(PE-123): add x`. A title that neither form can satisfy keeps the prefix. The title is the only place the link lives. Jira's GitLab integration reads it from there, and the next run finds the ticket from there.
 
 After that, the ticket status follows the MR:
 
@@ -44,7 +44,7 @@ MRs under a namespace in `jira.exclude_namespaces` are skipped entirely, and so 
    }
    ```
 
-   The other keys and their defaults: `issue_type` (`Story`), `label` (`mr-sync`), `lookback_days` (`14`, how far back a run looks for MRs that changed), `scope_key_namespaces` (`[]`, namespaces whose titles carry the key as the scope, matched like `exclude_namespaces`), and `since` (set for you by `--enable`).
+   The other keys and their defaults: `issue_type` (`Story`), `label` (`mr-sync`), `lookback_days` (`14`, how far back a run looks for MRs that changed), and `since` (set for you by `--enable`).
 
 2. Put your Jira API token in a file only you can read. The background job runs under launchd, which doesn't see your shell's environment, so an exported token alone isn't enough.
 

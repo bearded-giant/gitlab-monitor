@@ -68,6 +68,19 @@ def retitle(title, key, project, scope=False):
     return f"{lead}[{key}] {rest}"
 
 
+def pick_title(title, key, project, rule=''):
+    prefixed = retitle(title, key, project)
+    try:
+        pat = re.compile(rule) if rule else None
+    except re.error:
+        return prefixed
+    # the squash commit is checked against the project's push rule, and a Draft: prefix never reaches it
+    if pat is None or pat.match(DRAFT_RE.sub('', prefixed, count=1)):
+        return prefixed
+    scoped = retitle(title, key, project, scope=True)
+    return scoped if pat.match(DRAFT_RE.sub('', scoped, count=1)) else prefixed
+
+
 def desired_status(mr):
     if mr['state'] == 'merged':
         return DONE
@@ -209,7 +222,7 @@ def sync_one(mr, api, jira, cfg, state, dry_run=False, summary_lines=None):
         except Exception as e:
             _log(f"remote link {key} failed: {e}")
     if mr['state'] == 'opened' and not find_key(project, mr['title']):
-        new_title = retitle(mr['title'], key, project, excluded(mr['project_path'], cfg.get('scope_key_namespaces') or []))
+        new_title = pick_title(mr['title'], key, project, api.commit_message_regex(mr['project_path']))
         if dry_run:
             _log(f"would retitle {mkey}: {new_title}")
         else:
