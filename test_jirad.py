@@ -3,6 +3,7 @@ from pathlib import Path
 
 import gitlab_monitor.jirad as jirad
 from gitlab_monitor.jirad import (
+    pick_title,
     DONE, IN_PROGRESS, IN_REVIEW, WONT_FIX, can_move, desired_status, excluded, find_key,
     jira_summary, load_state, retitle, save_state, summarize, sync_one, tick,
 )
@@ -22,9 +23,13 @@ def _mr(iid=1, title='feat: add thing', state='opened', draft=False, pipeline='s
 
 
 class FakeApi:
-    def __init__(self, mrs=()):
+    def __init__(self, mrs=(), rules=None):
+        self.rules = rules or {}
         self.mrs = list(mrs)
         self.titles = []
+
+    def commit_message_regex(self, path):
+        return self.rules.get(path, '')
 
     def set_mr_title(self, path, iid, title):
         self.titles.append((path, iid, title))
@@ -71,6 +76,16 @@ def test_summary_and_retitle_keep_draft_prefix_and_drop_placeholder():
     assert retitle('[PE-0000] feat: x', 'PE-5', 'PE') == '[PE-5] feat: x'
     assert retitle('Draft: feat: x', 'PE-5', 'PE') == 'Draft: [PE-5] feat: x'
     assert retitle('feat: x', 'PE-5', 'PE') == '[PE-5] feat: x'
+
+
+def test_scope_projects_get_the_key_as_the_conventional_scope():
+    assert retitle('fix(merchant-portal): no empty toggles', 'PE-5', 'PE', scope=True) == 'fix(PE-5): no empty toggles'
+    assert retitle('feat: add x', 'PE-5', 'PE', scope=True) == 'feat(PE-5): add x'
+    assert retitle('feat(ui)!: drop y', 'PE-5', 'PE', scope=True) == 'feat(PE-5)!: drop y'
+    assert retitle('Draft: fix: z', 'PE-5', 'PE', scope=True) == 'Draft: fix(PE-5): z'
+    # no conventional type to hang the key on: fall back to the prefix
+    assert retitle('Update readme', 'PE-5', 'PE', scope=True) == '[PE-5] Update readme'
+    assert retitle('fix(PE-0000): z', 'PE-5', 'PE', scope=True) == 'fix(PE-5): z'
 
 
 def test_scope_placeholder_is_replaced_in_place():
@@ -150,6 +165,30 @@ def test_open_mr_without_key_creates_ticket_retitles_and_moves():
     assert api.titles == [('engineering/app', 1, '[PE-100] feat: add thing')]
     assert jira.moves == [('PE-100', IN_REVIEW)]
     assert state['mrs']['engineering/app:1'] == {'key': 'PE-100', 'status': IN_REVIEW}
+
+
+FRONTEND_RULE = r'^((build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\(.+\))?(!)?(: (.*\s*)*))|(Merge (.*\s*)*)|(Revert (.*\s*)*)'
+
+
+def test_pick_title_follows_the_project_commit_rule():
+    assert pick_title('fix(ui): x', 'PE-5', 'PE', FRONTEND_RULE) == 'fix(PE-5): x'
+    assert pick_title('Draft: feat: y', 'PE-5', 'PE', FRONTEND_RULE) == 'Draft: feat(PE-5): y'
+    # no rule, a broken rule, or a title no form can satisfy: the prefix
+    assert pick_title('fix(ui): x', 'PE-5', 'PE', '') == '[PE-5] fix(ui): x'
+    assert pick_title('fix(ui): x', 'PE-5', 'PE', '(unclosed') == '[PE-5] fix(ui): x'
+    assert pick_title('Update readme', 'PE-5', 'PE', FRONTEND_RULE) == '[PE-5] Update readme'
+    # a rule the prefix already passes keeps the prefix
+    assert pick_title('feat: x', 'PE-5', 'PE', r'^\[PE-\d+\] ') == '[PE-5] feat: x'
+
+
+def test_a_project_with_a_commit_rule_gets_the_key_as_scope():
+    api, jira = FakeApi(rules={'engineering/frontend/frontend': FRONTEND_RULE}), FakeJira()
+    sync_one(_mr(title='fix(ui): no empty toggles', path='engineering/frontend/frontend'), api, jira, CFG, {})
+    sync_one(_mr(iid=2, title='fix(ui): same'), api, jira, CFG, {})
+    assert api.titles == [
+        ('engineering/frontend/frontend', 1, 'fix(PE-100): no empty toggles'),
+        ('engineering/app', 2, '[PE-101] fix(ui): same'),
+    ]
 
 
 def test_summary_lines_override_description():

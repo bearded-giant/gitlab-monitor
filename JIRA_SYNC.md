@@ -8,7 +8,7 @@ There's no webhook and no server. Each run lists your MRs, works out what each t
 
 For an open MR whose title has no ticket key, it creates a ticket in `jira.project`. The summary is the MR title. The description is up to three plain-language bullets about what the MR is for, written by `claude -p --model haiku` from the MR description (if that call fails, it uses the first line of the description instead). The ticket gets the `jira.label` label, is assigned to you, and carries a link back to the MR.
 
-Then it writes the key into the MR title. A placeholder key such as `PE-0000` is swapped in place, so `chore(PE-0000): add x` becomes `chore(PE-123): add x`. Titles without a placeholder get a prefix: `feat: add x` becomes `[PE-123] feat: add x`, and a `Draft:` prefix stays in front. The title is the only place the link lives. Jira's GitLab integration reads it from there, and the next run finds the ticket from there.
+Then it writes the key into the MR title. A placeholder key such as `PE-0000` is swapped in place, so `chore(PE-0000): add x` becomes `chore(PE-123): add x`. Titles without a placeholder get a prefix: `feat: add x` becomes `[PE-123] feat: add x`, and a `Draft:` prefix stays in front. When the project's push rule sets a commit message regex that the prefixed title would fail (a squash commit takes the MR title, so the merge would be refused), the key goes in the conventional-commit scope instead: `fix(ui): add x` becomes `fix(PE-123): add x`. A title that neither form can satisfy keeps the prefix. The title is the only place the link lives. Jira's GitLab integration reads it from there, and the next run finds the ticket from there.
 
 After that, the ticket status follows the MR:
 

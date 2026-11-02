@@ -737,6 +737,14 @@ class GitLabAPI:
                                          per_page=1, get_all=False)
         return self.get_merge_request_basic(project_path, mrs[0].iid) if mrs else None
 
+    def commit_message_regex(self, project_path):
+        # no push rule (404) or a tier without push rules means no message rule to satisfy
+        try:
+            rule = self.gl.projects.get(project_path, lazy=True).pushrules.get()
+        except Exception:
+            return ''
+        return getattr(rule, 'commit_message_regex', '') or ''
+
     def set_mr_title(self, project_path, iid, title):
         project = self.gl.projects.get(project_path, lazy=True)
         mr = project.mergerequests.get(iid)

@@ -38,6 +38,7 @@ SYNC_OWNED = {s.lower() for s in (IN_PROGRESS, IN_REVIEW, WONT_FIX)}
 # no head pipeline means the project runs no MR CI, so nothing is left to go green
 GREEN = {'success', None}
 DRAFT_RE = re.compile(r'^\s*(?:draft:|\[draft\]|\(draft\))\s*', re.IGNORECASE)
+CONVENTIONAL_RE = re.compile(r'^(?P<type>[a-z]+)(?:\([^)]*\))?(?P<bang>!)?:\s*', re.IGNORECASE)
 
 
 def find_key(project, *texts):
@@ -55,12 +56,29 @@ def jira_summary(title, project):
     return t.strip().lstrip(':').strip() or title.strip()
 
 
-def retitle(title, key, project):
+def retitle(title, key, project, scope=False):
     placeholder = re.compile(rf'\b{re.escape(project)}-0+\b', re.IGNORECASE)
     if placeholder.search(title):
         return placeholder.sub(key, title, count=1)
     draft = DRAFT_RE.match(title)
-    return f"{draft.group(0) if draft else ''}[{key}] {jira_summary(title, project)}"
+    lead, rest = (draft.group(0) if draft else ''), jira_summary(title, project)
+    # repos whose squash-subject rule wants the conventional type first carry the key as the scope
+    if scope and (m := CONVENTIONAL_RE.match(rest)):
+        return f"{lead}{m['type']}({key}){m['bang'] or ''}: {rest[m.end():]}"
+    return f"{lead}[{key}] {rest}"
+
+
+def pick_title(title, key, project, rule=''):
+    prefixed = retitle(title, key, project)
+    try:
+        pat = re.compile(rule) if rule else None
+    except re.error:
+        return prefixed
+    # the squash commit is checked against the project's push rule, and a Draft: prefix never reaches it
+    if pat is None or pat.match(DRAFT_RE.sub('', prefixed, count=1)):
+        return prefixed
+    scoped = retitle(title, key, project, scope=True)
+    return scoped if pat.match(DRAFT_RE.sub('', scoped, count=1)) else prefixed
 
 
 def desired_status(mr):
@@ -204,7 +222,7 @@ def sync_one(mr, api, jira, cfg, state, dry_run=False, summary_lines=None):
         except Exception as e:
             _log(f"remote link {key} failed: {e}")
     if mr['state'] == 'opened' and not find_key(project, mr['title']):
-        new_title = retitle(mr['title'], key, project)
+        new_title = pick_title(mr['title'], key, project, api.commit_message_regex(mr['project_path']))
         if dry_run:
             _log(f"would retitle {mkey}: {new_title}")
         else:
