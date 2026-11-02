@@ -73,6 +73,16 @@ def test_summary_and_retitle_keep_draft_prefix_and_drop_placeholder():
     assert retitle('feat: x', 'PE-5', 'PE') == '[PE-5] feat: x'
 
 
+def test_scope_projects_get_the_key_as_the_conventional_scope():
+    assert retitle('fix(merchant-portal): no empty toggles', 'PE-5', 'PE', scope=True) == 'fix(PE-5): no empty toggles'
+    assert retitle('feat: add x', 'PE-5', 'PE', scope=True) == 'feat(PE-5): add x'
+    assert retitle('feat(ui)!: drop y', 'PE-5', 'PE', scope=True) == 'feat(PE-5)!: drop y'
+    assert retitle('Draft: fix: z', 'PE-5', 'PE', scope=True) == 'Draft: fix(PE-5): z'
+    # no conventional type to hang the key on: fall back to the prefix
+    assert retitle('Update readme', 'PE-5', 'PE', scope=True) == '[PE-5] Update readme'
+    assert retitle('fix(PE-0000): z', 'PE-5', 'PE', scope=True) == 'fix(PE-5): z'
+
+
 def test_scope_placeholder_is_replaced_in_place():
     assert jira_summary('chore(PE-0000): add greptile review config', 'PE') == 'chore: add greptile review config'
     assert jira_summary('PE-0000: fix it', 'PE') == 'fix it'
@@ -150,6 +160,17 @@ def test_open_mr_without_key_creates_ticket_retitles_and_moves():
     assert api.titles == [('engineering/app', 1, '[PE-100] feat: add thing')]
     assert jira.moves == [('PE-100', IN_REVIEW)]
     assert state['mrs']['engineering/app:1'] == {'key': 'PE-100', 'status': IN_REVIEW}
+
+
+def test_a_scope_key_namespace_retitles_with_the_key_as_scope():
+    api, jira = FakeApi(), FakeJira()
+    cfg = {**CFG, 'scope_key_namespaces': ['engineering/frontend']}
+    sync_one(_mr(title='fix(ui): no empty toggles', path='engineering/frontend/frontend'), api, jira, cfg, {})
+    sync_one(_mr(iid=2, title='fix(ui): same'), api, jira, cfg, {})
+    assert api.titles == [
+        ('engineering/frontend/frontend', 1, 'fix(PE-100): no empty toggles'),
+        ('engineering/app', 2, '[PE-101] fix(ui): same'),
+    ]
 
 
 def test_summary_lines_override_description():
