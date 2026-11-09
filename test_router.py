@@ -124,3 +124,34 @@ def test_host_label_and_missing_provider():
     assert single.host_label() == ('GitLab', 'https://gl')
     with pytest.raises(RuntimeError, match='github is not configured'):
         single.get_merge_request('gh:o/r', 1)
+
+
+def test_check_hosts_reports_each_failing_host():
+    import gitlab
+    import requests
+
+    from gitlab_monitor.router import host_problem
+
+    r = _router()
+    seen = []
+    r.on_error = lambda name, err: seen.append((name, host_problem(err)))
+
+    def dead():
+        raise gitlab.exceptions.GitlabAuthenticationError('invalid_token', 401)
+
+    def offline():
+        raise requests.ConnectTimeout('timed out')
+    r.providers['gitlab'].ping = dead
+    r.providers['github'].ping = offline
+    r.check_hosts()
+    assert seen == [('gitlab', 'token rejected (expired or revoked)'), ('github', 'unreachable (network, VPN or DNS)')]
+
+    seen.clear()
+    single = MultiAPI(_Config(), providers={'github': r.providers['github']})
+    single.on_error = r.on_error
+    single.check_hosts()
+    assert seen == [('github', 'unreachable (network, VPN or DNS)')]
+
+    resp = type('R', (), {'status_code': 401})()
+    assert host_problem(requests.HTTPError(response=resp)) == 'token rejected (expired or revoked)'
+    assert host_problem(RuntimeError('boom')) == 'RuntimeError: boom'

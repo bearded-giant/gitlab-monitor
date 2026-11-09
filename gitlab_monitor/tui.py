@@ -84,7 +84,7 @@ from .formatting import (
     is_greptile_summary,
 )
 from .api import GitLabAPI, ACTIVITY_TTL
-from .router import MultiAPI
+from .router import MultiAPI, host_problem
 from .github_api import is_github_key
 
 
@@ -7944,7 +7944,7 @@ class PipelineMonitor(App):
         await super().on_event(event)
 
     def _provider_error(self, provider, err) -> None:
-        msg = f"{provider} unavailable, its rows are hidden: {type(err).__name__}: {err}"
+        msg = f"{provider}: {host_problem(err)}; its rows are hidden"
         if msg in self._provider_warned:
             return
         self._provider_warned.add(msg)
@@ -8026,6 +8026,7 @@ class PipelineMonitor(App):
         _dbg(f"activity refresh: total={total} bars_updated={bars}")
 
     async def _finish_loading(self) -> None:
+        self._host_check = asyncio.create_task(asyncio.to_thread(self.api.check_hosts))
         try:
             await asyncio.to_thread(self.api.connect_project)
         except Exception:

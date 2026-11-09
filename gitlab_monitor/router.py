@@ -4,6 +4,8 @@
 
 from concurrent.futures import ThreadPoolExecutor
 
+import requests
+
 from .api import GitLabAPI
 from .github_api import GitHubAPI, is_github_key
 
@@ -12,6 +14,15 @@ _IMPLICIT_PROJECT = frozenset({
     'get_pipeline_jobs', 'get_job', 'get_job_trace', 'get_job_trace_range', 'get_job_failures',
 })
 _FANOUT = frozenset({'get_my_merge_requests', 'get_review_requests', 'get_projects'})
+
+
+def host_problem(err):
+    code = getattr(err, 'response_code', None) or getattr(getattr(err, 'response', None), 'status_code', None)
+    if code == 401:
+        return 'token rejected (expired or revoked)'
+    if isinstance(err, (requests.ConnectionError, requests.Timeout)):
+        return 'unreachable (network, VPN or DNS)'
+    return f'{type(err).__name__}: {err}'
 
 
 class MultiAPI:
@@ -40,6 +51,17 @@ class MultiAPI:
     def _report(self, provider, err):
         if self.on_error:
             self.on_error(provider, err)
+
+    def check_hosts(self):
+        if not self.providers:
+            return
+        with ThreadPoolExecutor(max_workers=len(self.providers)) as pool:
+            futures = {pn: pool.submit(p.ping) for pn, p in self.providers.items()}
+        for pn, f in futures.items():
+            try:
+                f.result()
+            except Exception as e:
+                self._report(pn, e)
 
     @property
     def project(self):

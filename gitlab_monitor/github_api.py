@@ -171,6 +171,9 @@ class GitHubAPI:
 
     # -- identity / projects -------------------------------------------------
 
+    def ping(self):
+        self._get('/user')
+
     def current_username(self):
         if self._username_cache is None:
             try:
