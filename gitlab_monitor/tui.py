@@ -468,7 +468,7 @@ class TabArea:
             return MergeRequestDetailScreen(self.api, entry['project'], entry['iid'])
         api = self.api
         if api.project_name != entry['project']:
-            api = GitLabAPI(api.config)
+            api = _fresh_api(api)
             api.set_project(entry['project'])
         return JobListScreen(api, dict(entry['pipeline']))
 

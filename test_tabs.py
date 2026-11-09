@@ -185,3 +185,20 @@ def test_pipeline_tab_strips_private_keys_and_single_tab_cycle_is_noop():
         "pipeline": {"id": 7, "status": "success", "ref": "main"},
     }]
     assert same and delta == 0
+
+
+def test_pipeline_tab_for_other_project_routes_through_fresh_api():
+    made = []
+
+    class _Fresh(_Api):
+        def set_project(self, key):
+            made.append(key)
+            self.project_name = key
+
+    api = _Api()
+    api.fresh = _Fresh
+    host = tui.TabArea()
+    host.TAB_AREA = "pipeline"
+    host.api = api
+    screen = host._tab_screen({"project": "gh:o/r", "pipeline": {"id": 1, "status": "success", "ref": "main"}})
+    assert made == ["gh:o/r"] and screen.api.project_name == "gh:o/r"
