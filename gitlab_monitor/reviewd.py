@@ -273,6 +273,7 @@ def main(argv=None):
         _log(msg)
         return 2
     api = MultiAPI(config)
+    api.on_error = lambda host, e: _log(f"{host} unavailable: {type(e).__name__}: {e}")
     config.reviews_dir.mkdir(parents=True, exist_ok=True)
 
     if args.mr:

@@ -507,6 +507,7 @@ def main(argv=None):
         return 2
 
     api = MultiAPI(config)
+    api.on_error = lambda host, e: _log(f"{host} unavailable: {type(e).__name__}: {e}")
     jira = Jira(cfg['base'], cfg['email'], config.jira_token)
     # an explicit --mr (ship-it) waits out a running tick so its own summary bullets are used
     lock = acquire(STATE_DIR, wait=90 if args.mr else 0)
