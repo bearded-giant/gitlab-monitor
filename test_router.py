@@ -81,6 +81,31 @@ def test_fanout_merges_and_isolates_failures():
     assert dash['reviews_requested']['count'] == 2 and len(dash['reviews_requested']['mrs']) == 2
 
 
+def test_fanout_reports_failed_provider():
+    r = _router()
+    seen = []
+    r.on_error = lambda name, err: seen.append((name, str(err)))
+    assert r.get_projects() == [{'path': 'g/p', 'last_activity': '1'}]
+    assert seen == [('github', 'boom')]
+    r.config = type('NoHosts', (), {'gitlab_enabled': False, 'github_enabled': False})()
+    assert r.fresh().on_error is r.on_error
+
+
+def test_paths_isolate_and_report_failed_provider():
+    r = _router()
+    seen = []
+    r.on_error = lambda name, err: seen.append(name)
+
+    def dead(paths):
+        raise RuntimeError('401')
+    r.providers['gitlab'].get_projects_by_paths = dead
+    assert [m['path'] for m in r.get_projects_by_paths(['gh:o/r', 'g/p'])] == ['gh:o/r']
+    assert seen == ['gitlab']
+    single = MultiAPI(_Config(), providers={'gitlab': r.providers['gitlab']})
+    with pytest.raises(RuntimeError, match='401'):
+        single.get_projects_by_paths(['g/p'])
+
+
 def test_paths_split_per_provider_keep_order():
     r = _router()
     out = r.get_projects_by_paths(['gh:o/r', 'g/p', 'gh:o/s'])
@@ -99,3 +124,34 @@ def test_host_label_and_missing_provider():
     assert single.host_label() == ('GitLab', 'https://gl')
     with pytest.raises(RuntimeError, match='github is not configured'):
         single.get_merge_request('gh:o/r', 1)
+
+
+def test_check_hosts_reports_each_failing_host():
+    import gitlab
+    import requests
+
+    from gitlab_monitor.router import host_problem
+
+    r = _router()
+    seen = []
+    r.on_error = lambda name, err: seen.append((name, host_problem(err)))
+
+    def dead():
+        raise gitlab.exceptions.GitlabAuthenticationError('invalid_token', 401)
+
+    def offline():
+        raise requests.ConnectTimeout('timed out')
+    r.providers['gitlab'].ping = dead
+    r.providers['github'].ping = offline
+    r.check_hosts()
+    assert seen == [('gitlab', 'token rejected (expired or revoked)'), ('github', 'unreachable (network, VPN or DNS)')]
+
+    seen.clear()
+    single = MultiAPI(_Config(), providers={'github': r.providers['github']})
+    single.on_error = r.on_error
+    single.check_hosts()
+    assert seen == [('github', 'unreachable (network, VPN or DNS)')]
+
+    resp = type('R', (), {'status_code': 401})()
+    assert host_problem(requests.HTTPError(response=resp)) == 'token rejected (expired or revoked)'
+    assert host_problem(RuntimeError('boom')) == 'RuntimeError: boom'

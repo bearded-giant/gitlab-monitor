@@ -171,6 +171,9 @@ class GitHubAPI:
 
     # -- identity / projects -------------------------------------------------
 
+    def ping(self):
+        self._get('/user')
+
     def current_username(self):
         if self._username_cache is None:
             try:
@@ -248,6 +251,10 @@ class GitHubAPI:
     def get_project_meta(self, project_path):
         try:
             return self._repo_to_dict(self._repo_meta(project_path))
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 401:
+                raise
+            return None
         except Exception:
             return None
 

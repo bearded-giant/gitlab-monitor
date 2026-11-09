@@ -62,6 +62,9 @@ class GitLabAPI:
         self._user_id_cache = None
         self._activity_cache = None  # (timestamp, result)
 
+    def ping(self):
+        self.gl.auth()
+
     def current_username(self):
         if self._username_cache is None:
             try:
@@ -144,6 +147,8 @@ class GitLabAPI:
                 'description': p.description or '',
                 'last_activity': self._project_activity(p),
             }
+        except gitlab.exceptions.GitlabAuthenticationError:
+            raise
         except Exception:
             return None
 

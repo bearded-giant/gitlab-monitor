@@ -84,7 +84,7 @@ from .formatting import (
     is_greptile_summary,
 )
 from .api import GitLabAPI, ACTIVITY_TTL
-from .router import MultiAPI
+from .router import MultiAPI, host_problem
 from .github_api import is_github_key
 
 
@@ -468,7 +468,7 @@ class TabArea:
             return MergeRequestDetailScreen(self.api, entry['project'], entry['iid'])
         api = self.api
         if api.project_name != entry['project']:
-            api = GitLabAPI(api.config)
+            api = _fresh_api(api)
             api.set_project(entry['project'])
         return JobListScreen(api, dict(entry['pipeline']))
 
@@ -7913,6 +7913,8 @@ class PipelineMonitor(App):
         super().__init__()
         self.config = config
         self.api = MultiAPI(config)
+        self.api.on_error = self._provider_error
+        self._provider_warned = set()
         self.default_age_days = default_age_days
         self.default_branch_filter = default_branch_filter or ""
         self.explicit_project = explicit_project
@@ -7940,6 +7942,14 @@ class PipelineMonitor(App):
                     if t:
                         t.resume()
         await super().on_event(event)
+
+    def _provider_error(self, provider, err) -> None:
+        msg = f"{provider}: {host_problem(err)}; its rows are hidden"
+        if msg in self._provider_warned:
+            return
+        self._provider_warned.add(msg)
+        # runs on worker threads; notify only posts a message, which is thread-safe
+        self.notify(msg, severity="error", timeout=30)
 
     def action_quit(self) -> None:
         self.exit()
@@ -8016,6 +8026,7 @@ class PipelineMonitor(App):
         _dbg(f"activity refresh: total={total} bars_updated={bars}")
 
     async def _finish_loading(self) -> None:
+        self._host_check = asyncio.create_task(asyncio.to_thread(self.api.check_hosts))
         try:
             await asyncio.to_thread(self.api.connect_project)
         except Exception:

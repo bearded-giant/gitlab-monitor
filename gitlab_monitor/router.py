@@ -4,6 +4,8 @@
 
 from concurrent.futures import ThreadPoolExecutor
 
+import requests
+
 from .api import GitLabAPI
 from .github_api import GitHubAPI, is_github_key
 
@@ -12,6 +14,15 @@ _IMPLICIT_PROJECT = frozenset({
     'get_pipeline_jobs', 'get_job', 'get_job_trace', 'get_job_trace_range', 'get_job_failures',
 })
 _FANOUT = frozenset({'get_my_merge_requests', 'get_review_requests', 'get_projects'})
+
+
+def host_problem(err):
+    code = getattr(err, 'response_code', None) or getattr(getattr(err, 'response', None), 'status_code', None)
+    if code == 401:
+        return 'token rejected (expired or revoked)'
+    if isinstance(err, (requests.ConnectionError, requests.Timeout)):
+        return 'unreachable (network, VPN or DNS)'
+    return f'{type(err).__name__}: {err}'
 
 
 class MultiAPI:
@@ -30,9 +41,27 @@ class MultiAPI:
         self.providers = providers
         self._current = providers.get('gitlab') or next(iter(providers.values()), None)
         self._activity_cache = None
+        self.on_error = None
 
     def fresh(self):
-        return MultiAPI(self.config)
+        api = MultiAPI(self.config)
+        api.on_error = self.on_error
+        return api
+
+    def _report(self, provider, err):
+        if self.on_error:
+            self.on_error(provider, err)
+
+    def check_hosts(self):
+        if not self.providers:
+            return
+        with ThreadPoolExecutor(max_workers=len(self.providers)) as pool:
+            futures = {pn: pool.submit(p.ping) for pn, p in self.providers.items()}
+        for pn, f in futures.items():
+            try:
+                f.result()
+            except Exception as e:
+                self._report(pn, e)
 
     @property
     def project(self):
@@ -78,13 +107,14 @@ class MultiAPI:
         if len(self.providers) == 1:
             return [getattr(self._current, name)(*args, **kwargs)]
         with ThreadPoolExecutor(max_workers=len(self.providers)) as pool:
-            futures = [pool.submit(getattr(p, name), *args, **kwargs) for p in self.providers.values()]
+            futures = {pn: pool.submit(getattr(p, name), *args, **kwargs) for pn, p in self.providers.items()}
         results, err = [], None
-        for f in futures:
+        for pn, f in futures.items():
             try:
                 results.append(f.result())
             except Exception as e:
                 err = e
+                self._report(pn, e)
         if not results and err:
             raise err
         return results
@@ -97,10 +127,16 @@ class MultiAPI:
 
     def get_projects_by_paths(self, paths):
         out = []
-        for p in self.providers.values():
-            mine = [x for x in paths if (self.providers.get('github') is p) == is_github_key(x)]
-            if mine:
+        for pn, p in self.providers.items():
+            mine = [x for x in paths if (pn == 'github') == is_github_key(x)]
+            if not mine:
+                continue
+            try:
                 out.extend(p.get_projects_by_paths(mine))
+            except Exception as e:
+                if len(self.providers) == 1:
+                    raise
+                self._report(pn, e)
         by_path = {m['path']: m for m in out}
         return [by_path[x] for x in paths if x in by_path]
 
