@@ -7913,6 +7913,8 @@ class PipelineMonitor(App):
         super().__init__()
         self.config = config
         self.api = MultiAPI(config)
+        self.api.on_error = self._provider_error
+        self._provider_warned = set()
         self.default_age_days = default_age_days
         self.default_branch_filter = default_branch_filter or ""
         self.explicit_project = explicit_project
@@ -7940,6 +7942,14 @@ class PipelineMonitor(App):
                     if t:
                         t.resume()
         await super().on_event(event)
+
+    def _provider_error(self, provider, err) -> None:
+        msg = f"{provider} unavailable, its rows are hidden: {type(err).__name__}: {err}"
+        if msg in self._provider_warned:
+            return
+        self._provider_warned.add(msg)
+        # runs on worker threads; notify only posts a message, which is thread-safe
+        self.notify(msg, severity="error", timeout=30)
 
     def action_quit(self) -> None:
         self.exit()

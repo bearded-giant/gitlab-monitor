@@ -144,6 +144,8 @@ class GitLabAPI:
                 'description': p.description or '',
                 'last_activity': self._project_activity(p),
             }
+        except gitlab.exceptions.GitlabAuthenticationError:
+            raise
         except Exception:
             return None
 

@@ -81,6 +81,31 @@ def test_fanout_merges_and_isolates_failures():
     assert dash['reviews_requested']['count'] == 2 and len(dash['reviews_requested']['mrs']) == 2
 
 
+def test_fanout_reports_failed_provider():
+    r = _router()
+    seen = []
+    r.on_error = lambda name, err: seen.append((name, str(err)))
+    assert r.get_projects() == [{'path': 'g/p', 'last_activity': '1'}]
+    assert seen == [('github', 'boom')]
+    r.config = type('NoHosts', (), {'gitlab_enabled': False, 'github_enabled': False})()
+    assert r.fresh().on_error is r.on_error
+
+
+def test_paths_isolate_and_report_failed_provider():
+    r = _router()
+    seen = []
+    r.on_error = lambda name, err: seen.append(name)
+
+    def dead(paths):
+        raise RuntimeError('401')
+    r.providers['gitlab'].get_projects_by_paths = dead
+    assert [m['path'] for m in r.get_projects_by_paths(['gh:o/r', 'g/p'])] == ['gh:o/r']
+    assert seen == ['gitlab']
+    single = MultiAPI(_Config(), providers={'gitlab': r.providers['gitlab']})
+    with pytest.raises(RuntimeError, match='401'):
+        single.get_projects_by_paths(['g/p'])
+
+
 def test_paths_split_per_provider_keep_order():
     r = _router()
     out = r.get_projects_by_paths(['gh:o/r', 'g/p', 'gh:o/s'])

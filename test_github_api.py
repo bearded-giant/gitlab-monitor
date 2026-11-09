@@ -272,3 +272,25 @@ def test_paged_keeps_page_size_stable_past_100():
         return list(range(lo, min(lo + n, 250)))
     api = _api({'/x': page})
     assert api._paged('/x', 250) == list(range(250))
+
+
+def test_project_meta_raises_on_auth_failure_only():
+    import gitlab
+    import requests
+    api = _api({'/repos/o/dead': _Resp({}, 401), '/repos/o/ok': {'id': 1, 'full_name': 'o/ok', 'name': 'ok'}})
+    assert api.get_project_meta('gh:o/ok')['path'] == 'gh:o/ok'
+    assert api.get_project_meta('gh:o/missing') is None
+    with pytest.raises(requests.HTTPError):
+        api.get_project_meta('gh:o/dead')
+
+    gl = GitLabAPI(_Config())
+
+    def fail(exc):
+        def get(path):
+            raise exc
+        return SimpleNamespace(get=get)
+    gl.gl = SimpleNamespace(projects=fail(gitlab.exceptions.GitlabGetError('404 Not Found', 404)))
+    assert gl.get_project_meta('g/p') is None
+    gl.gl = SimpleNamespace(projects=fail(gitlab.exceptions.GitlabAuthenticationError('invalid_token', 401)))
+    with pytest.raises(gitlab.exceptions.GitlabAuthenticationError):
+        gl.get_projects_by_paths(['g/p'])
