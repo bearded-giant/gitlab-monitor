@@ -51,7 +51,7 @@ def test_build_queue_reasons_and_skips():
 
 def test_prompt_and_argv_never_post():
     p = build_prompt('https://gl/g/p/-/merge_requests/9', 'oldsha')
-    # grill runs as a forked skill: --append-system-prompt stops at the parent, its arguments reach the fork
+    # the no-write line rides the prompt too: a forked skill never sees --append-system-prompt
     assert p.splitlines() == ['/grill https://gl/g/p/-/merge_requests/9',
                               'Previously reviewed at oldsha. Call out what changed since.',
                               reviewd.NO_WRITE_PROMPT]
@@ -84,7 +84,7 @@ def test_parse_claude_output_array_and_object():
 
 
 def test_run_review_records_models_used():
-    # a skill can pin its own model (grill forks to sonnet), so --model is not what ran
+    # a skill can pin its own model, so --model is not what ran
     out = json.dumps([{'type': 'result', 'result': 'r', 'total_cost_usd': 0.5, 'session_id': 's', 'num_turns': 1,
                        'modelUsage': {'claude-sonnet-5-5': {'costUSD': 0.5}}}])
     real = reviewd.subprocess.run
